@@ -725,6 +725,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         </span>
       </div>
       <button class="docs-btn" onclick="showView('documents')">Pre-Flight Documents</button>
+      <button class="docs-btn" id="pairing-btn" style="background:var(--blue-dark);border-top:1px solid rgba(255,255,255,.2);" onclick="showView('pairing')">View Full Pairing</button>
       <div class="card">
         <div class="content-grid">
           <div class="col-divider">
@@ -1132,6 +1133,10 @@ async function submitSignature(){
 
 const LEG_SEQ = "$seq";
 const LEG_POSITION = "$position";
+if(!LEG_SEQ){
+  const btn = document.getElementById('pairing-btn');
+  if(btn) btn.style.display = 'none';
+}
 async function initPairingView(){
   const body = document.getElementById('pairing-body');
   if(!LEG_SEQ){
