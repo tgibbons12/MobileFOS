@@ -55,7 +55,19 @@ def fetch_ofp_leg_fields(simbrief_user, timeout=15):
         except ValueError:
             return ""
 
-    crew = [n for n in (text("crew/cpt"), text("crew/fo")) if n]
+    # SimBrief's <crew> block: cpt/fo are the pilots, dx is the dispatcher,
+    # pu is the purser/lead flight attendant — cabin crew beyond the purser
+    # aren't tracked by SimBrief at all, so this is the full roster it has.
+    crew = [
+        f"{role} {name}"
+        for role, name in (
+            ("CA", text("crew/cpt")),
+            ("FO", text("crew/fo")),
+            ("DX", text("crew/dx")),
+            ("PU", text("crew/pu")),
+        )
+        if name
+    ]
 
     fields = {
         "flight_number": text("general/flight_number"),
