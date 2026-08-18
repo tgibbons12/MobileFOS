@@ -1160,6 +1160,24 @@ function renderPairing(seqData){
   const body = document.getElementById('pairing-body');
   body.innerHTML = '';
   const position = LEG_POSITION || (seqData.positions && seqData.positions[0]) || '';
+
+  const dutyDays = seqData.duty_days || [];
+  const totalLegs = dutyDays.reduce((n, d) => n + (d.legs || []).length, 0);
+  const firstLeg = dutyDays[0] && dutyDays[0].legs && dutyDays[0].legs[0];
+  const lastDay = dutyDays[dutyDays.length - 1];
+  const lastLeg = lastDay && lastDay.legs && lastDay.legs[lastDay.legs.length - 1];
+  const summary = document.createElement('div');
+  summary.className = 'flight-summary';
+  summary.style.flexWrap = 'wrap';
+  const summaryBits = [
+    dutyDays.length + ' day' + (dutyDays.length === 1 ? '' : 's'),
+    totalLegs + ' leg' + (totalLegs === 1 ? '' : 's'),
+    (seqData.positions || []).join('/'),
+  ];
+  if(firstLeg && lastLeg) summaryBits.unshift(firstLeg.origin + ' → ' + lastLeg.destination);
+  summary.textContent = summaryBits.filter(Boolean).join('  ·  ');
+  body.appendChild(summary);
+
   (seqData.duty_days || []).forEach(day => {
     const bar = document.createElement('div');
     bar.className = 'section-bar';
@@ -1264,13 +1282,32 @@ function renderWeather(stations){
     return;
   }
   const roleLabel = {origin: 'Origin', destination: 'Destination', alternate: 'Alternate'};
+  const catColor = {VFR: '#2fa355', MVFR: '#1c63b7', IFR: '#e0393e', LIFR: '#8e2de2'};
   stations.forEach(s => {
     const card = document.createElement('div');
     card.style.cssText = 'padding:11px 14px;border-bottom:1px solid var(--border);background:var(--card);';
     const header = document.createElement('div');
-    header.style.cssText = 'font-weight:700;font-size:13px;margin-bottom:6px;';
-    header.textContent = (roleLabel[s.role] || s.role) + ' — ' + s.icao;
+    header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;';
+    const title = document.createElement('div');
+    title.style.cssText = 'font-weight:700;font-size:13px;';
+    title.textContent = (roleLabel[s.role] || s.role) + ' — ' + s.icao + (s.name ? ' (' + s.name + ')' : '');
+    header.appendChild(title);
+    if(s.category){
+      const badge = document.createElement('span');
+      badge.textContent = s.category;
+      badge.style.cssText = 'font-size:10.5px;font-weight:700;color:#fff;padding:2px 7px;border-radius:10px;background:' + (catColor[s.category] || 'var(--label)') + ';flex:0 0 auto;';
+      header.appendChild(badge);
+    }
     card.appendChild(header);
+    if(s.visibility || s.ceiling){
+      const meta = document.createElement('div');
+      meta.style.cssText = 'font-size:11.5px;color:var(--label);margin-bottom:6px;';
+      const bits = [];
+      if(s.visibility) bits.push('Vis ' + (s.visibility >= 9999 ? '10+SM' : s.visibility + 'm'));
+      if(s.ceiling && s.ceiling < 9999) bits.push('Ceiling ' + s.ceiling + 'ft');
+      meta.textContent = bits.join(' · ');
+      if(bits.length) card.appendChild(meta);
+    }
     if(s.metar){
       const m = document.createElement('div');
       m.style.cssText = 'font-family:ui-monospace,Menlo,monospace;font-size:11.5px;white-space:pre-wrap;color:var(--value);margin-bottom:6px;';

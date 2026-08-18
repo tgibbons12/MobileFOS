@@ -105,15 +105,21 @@ def fetch_weather_briefing(simbrief_user, timeout=15):
         return el.text.strip() if el is not None and el.text else ""
 
     stations = [
-        ("origin", "origin/icao_code", "orig"),
-        ("destination", "destination/icao_code", "dest"),
-        ("alternate", "alternate/icao_code", "altn"),
+        ("origin", "origin", "orig"),
+        ("destination", "destination", "dest"),
+        ("alternate", "alternate", "altn"),
     ]
     briefing = []
-    for role, icao_path, wx_prefix in stations:
-        icao = text(icao_path)
+    for role, elem, wx_prefix in stations:
+        icao = text(f"{elem}/icao_code")
         metar = text(f"weather/{wx_prefix}_metar")
         taf = text(f"weather/{wx_prefix}_taf")
         if icao and (metar or taf):
-            briefing.append({"role": role, "icao": icao, "metar": metar, "taf": taf})
+            briefing.append({
+                "role": role, "icao": icao, "name": text(f"{elem}/name"),
+                "metar": metar, "taf": taf,
+                "category": text(f"{elem}/metar_category").upper(),
+                "visibility": text(f"{elem}/metar_visibility"),
+                "ceiling": text(f"{elem}/metar_ceiling"),
+            })
     return briefing
