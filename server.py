@@ -16,6 +16,7 @@ call to /generate. See build_leg_from_sources() below for the seam.
 import base64
 import logging
 import os
+import time
 from datetime import datetime, timezone
 
 from flask import Flask, request, jsonify, Response
@@ -23,6 +24,7 @@ from string import Template
 import pbs_parser
 import release_engine
 import simbrief_ofp
+import simbrief_apiv1
 
 app = Flask(__name__)
 LOG = logging.getLogger(__name__)
@@ -285,6 +287,38 @@ def leg_weather(leg_id):
         return jsonify({"error": f"couldn't load weather: {e}"}), 502
 
     return jsonify(briefing)
+
+
+@app.route("/simbrief-api/prepare", methods=["POST"])
+def simbrief_api_prepare():
+    if not simbrief_apiv1.is_configured():
+        return jsonify({"error": "SimBrief API key not configured on this server"}), 503
+
+    body = request.get_json(silent=True) or {}
+    orig = (body.get("orig") or "").strip().upper()
+    dest = (body.get("dest") or "").strip().upper()
+    actype = (body.get("type") or "").strip().lower()
+    outputpage = (body.get("outputpage") or "").strip()
+    if not (orig and dest and actype and outputpage):
+        return jsonify({"error": "orig, dest, type, and outputpage are all required"}), 400
+
+    timestamp = int(time.time())
+    outputpage_calc = outputpage.replace("http://", "").replace("https://", "")
+    api_req = f"{orig}{dest}{actype}{timestamp}{outputpage_calc}"
+    return jsonify({
+        "api_code": simbrief_apiv1.sign(api_req),
+        "ofp_id": simbrief_apiv1.compute_ofp_id(orig, dest, actype, timestamp),
+        "timestamp": timestamp,
+        "outputpage_calc": outputpage_calc,
+    })
+
+
+@app.route("/simbrief-api/check")
+def simbrief_api_check():
+    ofp_id = request.args.get("ofp_id", "")
+    if not ofp_id:
+        return jsonify({"error": "ofp_id required"}), 400
+    return jsonify({"available": simbrief_apiv1.check_ofp_ready(ofp_id)})
 
 
 @app.route("/release/status")
@@ -829,6 +863,47 @@ FOS_TEMPLATE = """<!DOCTYPE html>
       </div>
       <div id="pairing-body"><p class="placeholder-note">Loading…</p></div>
     </section>
+    <section id="sb-gen-view" class="view">
+      <div class="topbar">
+        <button class="back-link" onclick="showView('pairing')">Back</button>
+        <div class="topbar-title">
+          <h1>Generate via SimBrief</h1>
+          <p id="sb-gen-route"></p>
+        </div>
+      </div>
+      <div class="search-block">
+        <label for="sb-gen-user">SimBrief Username</label>
+        <input id="sb-gen-user" type="text" placeholder="e.g. tgibbons">
+      </div>
+      <div class="search-block">
+        <label for="sb-gen-type">Aircraft Type (SimBrief code, e.g. b738)</label>
+        <input id="sb-gen-type" type="text" placeholder="b738">
+      </div>
+      <div class="search-block">
+        <label for="sb-gen-airline">Airline (ICAO)</label>
+        <input id="sb-gen-airline" type="text" placeholder="e.g. EMY">
+      </div>
+      <div class="search-block">
+        <label for="sb-gen-fltnum">Flight Number</label>
+        <input id="sb-gen-fltnum" type="text">
+      </div>
+      <div class="search-block">
+        <label for="sb-gen-date">Date (DDMMMYY, e.g. 18AUG26)</label>
+        <input id="sb-gen-date" type="text">
+      </div>
+      <div class="search-block">
+        <label for="sb-gen-time">Departure Time (local, HHMM)</label>
+        <input id="sb-gen-time" type="text">
+      </div>
+      <div class="search-block">
+        <label for="sb-gen-reg">Tail Number (optional)</label>
+        <input id="sb-gen-reg" type="text" placeholder="optional">
+      </div>
+      <div style="padding:14px;background:var(--card);">
+        <button id="sb-gen-btn" onclick="submitSimbriefGen()" style="margin:0;width:100%;background:var(--blue);color:#fff;border:none;padding:11px;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;">Generate Flight Plan</button>
+        <div id="sb-gen-msg" style="margin-top:10px;font-size:13px;color:var(--label);"></div>
+      </div>
+    </section>
     <section id="release-view" class="view">
       <div class="topbar">
         <button class="back-link" onclick="showView('overview')">Back</button>
@@ -863,6 +938,7 @@ function showView(view){
   document.getElementById('pdf-view').classList.toggle('active', view==='pdf');
   document.getElementById('sign-view').classList.toggle('active', view==='sign');
   document.getElementById('pairing-view').classList.toggle('active', view==='pairing');
+  document.getElementById('sb-gen-view').classList.toggle('active', view==='sb-gen');
   document.getElementById('nav-home').classList.toggle('active', view==='overview');
   document.getElementById('nav-docs').classList.toggle('active', view==='documents');
   document.getElementById('nav-release').classList.toggle('active', view==='release');
@@ -1179,7 +1255,18 @@ function renderPairing(seqData){
       left.appendChild(desc);
       const actions = document.createElement('div');
       actions.className = 'actions';
-      actions.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>';
+      const sbIcon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      sbIcon.setAttribute('viewBox', '0 0 24 24');
+      sbIcon.setAttribute('fill', 'none');
+      sbIcon.setAttribute('stroke', 'currentColor');
+      sbIcon.setAttribute('stroke-width', '2');
+      sbIcon.setAttribute('stroke-linecap', 'round');
+      sbIcon.setAttribute('stroke-linejoin', 'round');
+      sbIcon.setAttribute('title', 'Generate via SimBrief');
+      sbIcon.innerHTML = '<path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/>';
+      sbIcon.onclick = (e) => { e.stopPropagation(); openSimbriefGen(leg, day.duty_day, i); };
+      actions.appendChild(sbIcon);
+      actions.insertAdjacentHTML('beforeend', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>');
       row.appendChild(left);
       row.appendChild(actions);
       row.onclick = () => generatePairingLeg(seqData.seq, day.duty_day, i, position);
@@ -1235,6 +1322,138 @@ async function cacheAllPairingLegs(seqData, position, msgEl){
   }
   msgEl.textContent = `Cached ${ok} of ${total} legs.` + (fails.length ? ' Failures: ' + fails.join('; ') : '');
   msgEl.style.color = fails.length ? '#c0392b' : '#2fa355';
+}
+
+let _sbGenLeg = null;
+function openSimbriefGen(leg, dutyDay, legIndex){
+  _sbGenLeg = leg;
+  document.getElementById('sb-gen-route').textContent = leg.origin + ' → ' + leg.destination;
+  document.getElementById('sb-gen-type').value = '';
+  document.getElementById('sb-gen-airline').value = '';
+  document.getElementById('sb-gen-fltnum').value = leg.flight_number || '';
+  document.getElementById('sb-gen-date').value = '';
+  document.getElementById('sb-gen-time').value = leg.dep_local || '';
+  document.getElementById('sb-gen-reg').value = '';
+  const savedUser = localStorage.getItem('fos_simbrief_user');
+  if(savedUser) document.getElementById('sb-gen-user').value = savedUser;
+  const btn = document.getElementById('sb-gen-btn');
+  btn.disabled = false;
+  document.getElementById('sb-gen-msg').textContent = '';
+  showView('sb-gen');
+}
+
+async function submitSimbriefGen(){
+  const el = document.getElementById('sb-gen-msg');
+  const btn = document.getElementById('sb-gen-btn');
+  const user = document.getElementById('sb-gen-user').value.trim();
+  const type = document.getElementById('sb-gen-type').value.trim().toLowerCase();
+  const airline = document.getElementById('sb-gen-airline').value.trim().toUpperCase();
+  const fltnum = document.getElementById('sb-gen-fltnum').value.trim();
+  const date = document.getElementById('sb-gen-date').value.trim().toUpperCase();
+  const time = document.getElementById('sb-gen-time').value.trim();
+  const reg = document.getElementById('sb-gen-reg').value.trim().toUpperCase();
+  const orig = _sbGenLeg.origin, dest = _sbGenLeg.destination;
+
+  if(!user){ el.textContent = 'Enter your SimBrief username first.'; el.style.color = '#c0392b'; return; }
+  if(!type){ el.textContent = 'Enter the SimBrief aircraft type code first.'; el.style.color = '#c0392b'; return; }
+  localStorage.setItem('fos_simbrief_user', user);
+
+  // Popup must open synchronously, before any await — Safari (and others)
+  // stop treating window.open as user-initiated once you're a tick removed
+  // from the actual click via an awaited fetch, and silently block it.
+  const popup = window.open('about:blank', 'SBworker', 'width=600,height=650');
+  if(!popup){
+    el.textContent = 'Please allow pop-ups for this site, then try again.';
+    el.style.color = '#c0392b';
+    return;
+  }
+
+  btn.disabled = true;
+  el.textContent = 'Preparing…';
+  el.style.color = '';
+
+  const outputpage = location.origin + location.pathname;
+  let prep;
+  try {
+    const r = await fetch('/simbrief-api/prepare', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({orig, dest, type, outputpage}),
+    });
+    prep = await r.json();
+    if(!r.ok){ el.textContent = prep.error || 'Prepare failed'; el.style.color = '#c0392b'; btn.disabled = false; popup.close(); return; }
+  } catch(e) {
+    el.textContent = 'Request failed: ' + e; el.style.color = '#c0392b'; btn.disabled = false; popup.close(); return;
+  }
+
+  const form = document.createElement('form');
+  form.method = 'get';
+  form.action = 'https://www.simbrief.com/ofp/ofp.loader.api.php';
+  form.target = 'SBworker';
+  const addField = (name, value) => {
+    const input = document.createElement('input');
+    input.type = 'hidden';
+    input.name = name;
+    input.value = value;
+    form.appendChild(input);
+  };
+  addField('orig', orig);
+  addField('dest', dest);
+  addField('type', type);
+  if(airline) addField('airline', airline);
+  if(fltnum) addField('fltnum', fltnum);
+  if(date) addField('date', date);
+  if(time && time.length === 4){
+    addField('deph', time.slice(0, 2));
+    addField('depm', time.slice(2, 4));
+  }
+  if(reg) addField('reg', reg);
+  addField('apicode', prep.api_code);
+  addField('outputpage', prep.outputpage_calc);
+  addField('timestamp', String(prep.timestamp));
+  document.body.appendChild(form);
+  form.submit();
+  form.remove();
+
+  el.textContent = 'Complete the flight plan in the pop-up window — this page will pick it up once you’re done.';
+  el.style.color = '';
+
+  const closeWatcher = setInterval(() => {
+    if(!popup.closed) return;
+    clearInterval(closeWatcher);
+    el.textContent = 'Checking for the generated flight plan…';
+    pollSimbriefReady(prep.ofp_id, user, el, btn, 0);
+  }, 500);
+}
+
+async function pollSimbriefReady(ofpId, user, el, btn, attempt){
+  if(attempt > 40){
+    el.textContent = 'Still not showing up on SimBrief — try Load from SimBrief manually once it’s ready.';
+    el.style.color = '#c0392b';
+    btn.disabled = false;
+    return;
+  }
+  let data = {available: false};
+  try {
+    const r = await fetch('/simbrief-api/check?ofp_id=' + encodeURIComponent(ofpId));
+    data = await r.json();
+  } catch(e) { /* keep polling */ }
+
+  if(data.available){
+    el.textContent = 'Flight plan ready — loading it…';
+    el.style.color = '#2fa355';
+    try {
+      const r2 = await fetch('/generate', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({simbrief_user: user})});
+      const data2 = await r2.json();
+      if(!r2.ok){ el.textContent = data2.error || 'Generated, but could not load it into FOS'; el.style.color = '#c0392b'; btn.disabled = false; return; }
+      window.location.href = data2.fos_url;
+    } catch(e) {
+      el.textContent = 'Generated, but loading it failed: ' + e;
+      el.style.color = '#c0392b';
+      btn.disabled = false;
+    }
+    return;
+  }
+  setTimeout(() => pollSimbriefReady(ofpId, user, el, btn, attempt + 1), 3000);
 }
 
 let _weatherLoaded = false;
