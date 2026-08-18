@@ -13,14 +13,18 @@ Aviobook.fetch_xml_from_api() + your pairing builder's export in ahead of the
 call to /generate. See build_leg_from_sources() below for the seam.
 """
 
+import base64
+import logging
 import os
 
 from flask import Flask, request, jsonify, Response
 from string import Template
 import pbs_parser
 import release_engine
+import simbrief_ofp
 
 app = Flask(__name__)
+LOG = logging.getLogger(__name__)
 
 _store = {"current": None, "archive": [], "next_id": 1}
 _pbs_store = {"meta": None, "sequences": []}
@@ -44,17 +48,32 @@ DEFAULT_LEG = {
 # ---------------------------------------------------------------------------
 def build_leg_from_sources(payload):
     """
-    payload: whatever /generate receives.
-    Today: assumed to already be a fully-merged leg dict (see DEFAULT_LEG
-    for the shape) and is passed through unchanged.
-    Later: this is where you'd e.g.
-        pairing = fetch_pairing_leg(payload["seq"])          # your Apps Script export
-        ofp     = _av.parse_simbrief_xml(
-                      _av.fetch_xml_from_api(payload["simbrief_username"])
-                  )                                            # Aviobook.py
-        return merge_pairing_and_ofp(pairing, ofp)
+    payload: whatever /generate (or the PBS-generate route) received, plus
+    an optional "simbrief_user" key.
+
+    A PBS bid-pack pairing is a schedule pattern, not one specific day's
+    flight — it can never carry tail number, named crew, real calendar date,
+    or passenger load (those only exist once someone has dispatched the leg).
+    When simbrief_user is given, we fetch that pilot's current SimBrief OFP
+    and use it to fill in exactly those gaps. Any field the pairing already
+    supplied wins — this only populates what's still blank, it never
+    overwrites real pairing data (SEQ, hotel/limo, duty time, route/times
+    from the bid pack) with something less authoritative.
     """
-    return payload
+    simbrief_user = payload.get("simbrief_user")
+    if not simbrief_user:
+        return payload
+
+    payload = dict(payload)
+    payload.pop("simbrief_user", None)
+    try:
+        ofp_fields = simbrief_ofp.fetch_ofp_leg_fields(simbrief_user)
+    except Exception as e:
+        LOG.warning(f"SimBrief OFP enrichment failed for {simbrief_user}: {e}")
+        return payload
+
+    known = {k: v for k, v in payload.items() if v not in (None, "", [])}
+    return {**ofp_fields, **known}
 
 
 def _find(flight_number, dep_date):
@@ -154,6 +173,9 @@ def generate_from_pbs(seq_number):
     leg = day["legs"][leg_index]
 
     fos_leg = pbs_parser.pbs_leg_to_fos_leg(_pbs_store["meta"], seq, day, leg, position)
+    if body.get("simbrief_user"):
+        fos_leg["simbrief_user"] = body["simbrief_user"]
+    fos_leg = build_leg_from_sources(fos_leg)
     record = _store_leg(fos_leg)
     return jsonify({"fos_url": f"/fos/{record['id']}", "id": record["id"]})
 
@@ -214,10 +236,13 @@ def generate_release(leg_id):
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 502
 
-    return Response(
-        rls_bytes, mimetype="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
+    payload = {
+        "filename": filename,
+        "rls_pdf_b64": base64.b64encode(rls_bytes).decode("ascii"),
+    }
+    if wb_bytes:
+        payload["wb_pdf_b64"] = base64.b64encode(wb_bytes).decode("ascii")
+    return jsonify(payload)
 
 
 @app.route("/archive")
@@ -408,6 +433,9 @@ FOS_TEMPLATE = """<!DOCTYPE html>
     <button class="side-btn" id="nav-docs" title="Documents" onclick="showView('documents')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5"/><path d="M9.5 13h5M9.5 16h5"/></svg>
     </button>
+    <button class="side-btn" id="nav-release" title="Release" onclick="showView('release')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5"/><path d="M12 11v6"/><path d="M9.5 14.5L12 17l2.5-2.5"/></svg>
+    </button>
     <button class="side-btn" title="Web" onclick="showToast('Web')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.5 2.6 2.5 15.4 0 18M12 3c-2.5 2.6-2.5 15.4 0 18"/></svg>
     </button>
@@ -526,6 +554,28 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         </div>
       </div>
     </section>
+    <section id="release-view" class="view">
+      <div class="topbar">
+        <button class="back-link" onclick="showView('overview')">Back</button>
+        <div class="topbar-title">
+          <h1>Flight $flight_number</h1>
+          <p>Release Builder</p>
+        </div>
+      </div>
+      <div class="status-bar"><span>SEQ $seq</span><span>$date</span></div>
+      <div class="search-block">
+        <label for="release-user">SimBrief Username</label>
+        <input id="release-user" type="text" placeholder="e.g. tgibbons">
+      </div>
+      <div style="padding:14px;background:var(--card);">
+        <button class="docs-btn" id="release-gen-btn" style="border-radius:5px;" onclick="generateRelease()">Generate Release</button>
+        <div id="release-status" style="margin-top:10px;font-size:13px;color:var(--label);"></div>
+        <div id="release-downloads" style="display:none;margin-top:10px;gap:10px;flex-wrap:wrap;">
+          <a id="release-rls-link" style="display:none;background:var(--green);color:#fff;text-decoration:none;padding:9px 14px;border-radius:5px;font-size:13px;font-weight:600;">Download RLS PDF</a>
+          <a id="release-wb-link" style="display:none;background:var(--blue-dark);color:#fff;text-decoration:none;padding:9px 14px;border-radius:5px;font-size:13px;font-weight:600;">Download W&amp;B PDF</a>
+        </div>
+      </div>
+    </section>
   </main>
 </div>
 <div id="toast"></div>
@@ -534,9 +584,61 @@ const LEG_ID = "$leg_id";
 function showView(view){
   document.getElementById('overview-view').classList.toggle('active', view==='overview');
   document.getElementById('documents-view').classList.toggle('active', view==='documents');
+  document.getElementById('release-view').classList.toggle('active', view==='release');
   document.getElementById('nav-home').classList.toggle('active', view==='overview');
   document.getElementById('nav-docs').classList.toggle('active', view==='documents');
+  document.getElementById('nav-release').classList.toggle('active', view==='release');
   window.scrollTo(0,0);
+  if(view === 'release') initReleaseView();
+}
+let _releaseStatusChecked = false;
+function initReleaseView(){
+  const input = document.getElementById('release-user');
+  const saved = localStorage.getItem('fos_simbrief_user');
+  if(saved && !input.value) input.value = saved;
+  if(_releaseStatusChecked) return;
+  _releaseStatusChecked = true;
+  fetch('/release/status').then(r=>r.json()).then(data=>{
+    if(!data.available){
+      const status = document.getElementById('release-status');
+      status.textContent = 'Release generation unavailable: ' + (data.error || 'unknown error');
+      status.style.color = '#c0392b';
+      document.getElementById('release-gen-btn').disabled = true;
+    }
+  }).catch(()=>{});
+}
+function generateRelease(){
+  const btn = document.getElementById('release-gen-btn');
+  const status = document.getElementById('release-status');
+  const userId = document.getElementById('release-user').value.trim();
+  if(!userId){ status.textContent = 'Enter a SimBrief username first.'; status.style.color = '#c0392b'; return; }
+  localStorage.setItem('fos_simbrief_user', userId);
+  btn.disabled = true;
+  status.style.color = '';
+  status.textContent = 'Generating release — this can take up to a minute…';
+  document.getElementById('release-downloads').style.display = 'none';
+  fetch('/fos/' + LEG_ID + '/release', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({user_id:userId})})
+    .then(r => r.json().then(data => ({ok:r.ok, data})))
+    .then(({ok, data}) => {
+      btn.disabled = false;
+      if(!ok){ status.textContent = 'Failed: ' + (data.error || 'unknown error'); status.style.color = '#c0392b'; return; }
+      status.textContent = 'Release generated.';
+      status.style.color = '#2fa355';
+      const rlsLink = document.getElementById('release-rls-link');
+      rlsLink.href = 'data:application/pdf;base64,' + data.rls_pdf_b64;
+      rlsLink.download = data.filename;
+      rlsLink.style.display = 'inline-block';
+      const wbLink = document.getElementById('release-wb-link');
+      if(data.wb_pdf_b64){
+        wbLink.href = 'data:application/pdf;base64,' + data.wb_pdf_b64;
+        wbLink.download = data.filename.replace('-RLS.pdf', '-WB.pdf');
+        wbLink.style.display = 'inline-block';
+      } else {
+        wbLink.style.display = 'none';
+      }
+      document.getElementById('release-downloads').style.display = 'flex';
+    })
+    .catch(e => { btn.disabled = false; status.textContent = 'Request failed: ' + e; status.style.color = '#c0392b'; });
 }
 function toggleSection(name){
   const bar = document.getElementById(name+'-bar');
