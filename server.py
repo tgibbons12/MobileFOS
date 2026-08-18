@@ -139,6 +139,21 @@ def import_pbs():
     })
 
 
+def _sequence_routing(seq):
+    """Full station chain for a sequence — first leg's origin, then every
+    leg's destination in order. Legs are contiguous (each leg's origin is
+    the previous leg's destination, across duty-day boundaries too — a
+    night stop just means a gap in time, not in the station chain), so this
+    walk alone gives the whole routing without needing to dedupe anything."""
+    stations = []
+    for day in seq["duty_days"]:
+        for leg in day["legs"]:
+            if not stations:
+                stations.append(leg["origin"])
+            stations.append(leg["destination"])
+    return stations
+
+
 @app.route("/pbs/sequences")
 def list_pbs_sequences():
     out = []
@@ -153,6 +168,7 @@ def list_pbs_sequences():
             "report": first_day["report"],
             "origin": first_leg["origin"] if first_leg else None,
             "final_destination": last_leg["destination"] if last_leg else None,
+            "routing": _sequence_routing(s),
         })
     return jsonify(out)
 
@@ -415,24 +431,7 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
 
   <h1 style="margin-top:28px;">Sequences</h1>
   <div id="seq-list"><p class="empty">No sequences imported yet.</p></div>
-
-  <div id="gen-form" class="panel" style="display:none;">
-    <div id="gen-seq-label" style="font-weight:600;"></div>
-    <label for="gen-duty-day">Duty Day</label>
-    <select id="gen-duty-day" onchange="populateLegs()"></select>
-    <label for="gen-leg">Leg</label>
-    <select id="gen-leg"></select>
-    <label for="gen-position">Position</label>
-    <select id="gen-position"></select>
-    <label for="gen-simbrief">SimBrief Username (optional — fills tail/crew/load/date on THIS leg from the current OFP)</label>
-    <input id="gen-simbrief" type="text" placeholder="e.g. tgibbons">
-    <br><button onclick="generateLeg()">Generate This Leg</button>
-    <div id="gen-msg" class="msg"></div>
-    <hr>
-    <div style="font-size:13px;color:#6b7380;margin-bottom:4px;">Cache every leg in this sequence at once (no SimBrief enrichment — this is the whole trip's schedule, not one specific day's dispatch):</div>
-    <button class="secondary" onclick="generateAllLegs()">Generate &amp; Cache All Legs in Sequence</button>
-    <div id="gen-all-msg" class="msg"></div>
-  </div>
+  <div id="seq-open-msg" class="msg"></div>
 </div>
 
 <div id="tab-simbrief" class="tab-panel">
@@ -448,8 +447,6 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
 <h1 style="margin-top:28px;">Archive</h1>
 <div id="archive-list">$rows</div>
 <script>
-let currentSeqData = null;
-
 function showTab(tab){
   document.getElementById('tab-pbs').classList.toggle('active', tab==='pbs');
   document.getElementById('tab-simbrief').classList.toggle('active', tab==='simbrief');
@@ -499,81 +496,31 @@ function loadSequences(){
   fetch('/pbs/sequences').then(r=>r.json()).then(seqs=>{
     const list = document.getElementById('seq-list');
     list.innerHTML = seqs.map(s =>
-      `<a class="arow" href="#" onclick="selectSeq('${s.seq}');return false;">SEQ ${s.seq} — ${s.origin||''}→${s.final_destination||''} <span>${s.days} day(s)</span></a>`
+      `<a class="arow" href="#" onclick="openSequence('${s.seq}');return false;">SEQ ${s.seq} — ${(s.routing||[]).join('-')} <span>${s.days} day(s)</span></a>`
     ).join('') || '<p class="empty">No sequences imported yet.</p>';
   });
 }
 
-function selectSeq(seq){
-  fetch('/pbs/sequences/' + seq).then(r=>r.json()).then(data=>{
-    currentSeqData = data;
-    document.getElementById('gen-seq-label').textContent = 'SEQ ' + data.seq;
-    document.getElementById('gen-duty-day').innerHTML = data.duty_days.map(d =>
-      `<option value="${d.duty_day}">Day ${d.duty_day} (RPT ${d.report})</option>`
-    ).join('');
-    document.getElementById('gen-position').innerHTML = (data.positions||[]).map(p =>
-      `<option value="${p}">${p}</option>`
-    ).join('');
-    const saved = localStorage.getItem('fos_simbrief_user');
-    if(saved) document.getElementById('gen-simbrief').value = saved;
-    populateLegs();
-    document.getElementById('gen-msg').textContent = '';
-    document.getElementById('gen-all-msg').textContent = '';
-    document.getElementById('gen-form').style.display = 'block';
-  });
-}
-
-function populateLegs(){
-  const dutyDay = parseInt(document.getElementById('gen-duty-day').value, 10);
-  const day = (currentSeqData.duty_days || []).find(d => d.duty_day === dutyDay);
-  document.getElementById('gen-leg').innerHTML = (day ? day.legs : []).map((l, i) =>
-    `<option value="${i}">${l.flight_number || '—'} ${l.origin}→${l.destination} ${l.dep_local}/${l.arr_local}</option>`
-  ).join('');
-}
-
-function generateLeg(){
-  const el = document.getElementById('gen-msg');
-  const simbrief = document.getElementById('gen-simbrief').value.trim();
-  if(simbrief) localStorage.setItem('fos_simbrief_user', simbrief);
-  const body = {
-    duty_day: parseInt(document.getElementById('gen-duty-day').value, 10),
-    leg_index: parseInt(document.getElementById('gen-leg').value, 10),
-    position: document.getElementById('gen-position').value,
-  };
-  if(simbrief) body.simbrief_user = simbrief;
-  fetch('/pbs/sequences/' + currentSeqData.seq + '/generate', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)})
-    .then(r => r.json().then(data => ({ok:r.ok, data})))
-    .then(({ok, data}) => {
-      if(!ok){ el.textContent = data.error || 'Generate failed'; el.style.color = '#c0392b'; return; }
-      window.location.href = data.fos_url;
-    })
-    .catch(e=>{ el.textContent = 'Request failed: ' + e; el.style.color = '#c0392b'; });
-}
-
-async function generateAllLegs(){
-  const el = document.getElementById('gen-all-msg');
-  const position = document.getElementById('gen-position').value;
-  const seq = currentSeqData.seq;
-  let total = 0, ok = 0;
-  const fails = [];
-  for(const day of (currentSeqData.duty_days || [])){
-    for(let i = 0; i < day.legs.length; i++){
-      total++;
-      try {
-        const r = await fetch('/pbs/sequences/' + seq + '/generate', {
-          method: 'POST', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({duty_day: day.duty_day, leg_index: i, position: position})
-        });
-        const data = await r.json();
-        if(r.ok) ok++; else fails.push(`Day ${day.duty_day} leg ${i+1}: ${data.error}`);
-      } catch(e) { fails.push(`Day ${day.duty_day} leg ${i+1}: ${e}`); }
-      el.textContent = `Caching… ${ok}/${total} done`;
-      el.style.color = '';
-    }
+async function openSequence(seq){
+  const el = document.getElementById('seq-open-msg');
+  el.textContent = 'Opening…';
+  el.style.color = '';
+  try {
+    const seqR = await fetch('/pbs/sequences/' + seq);
+    const seqData = await seqR.json();
+    if(!seqR.ok){ el.textContent = seqData.error || 'Sequence not found'; el.style.color = '#c0392b'; return; }
+    const position = (seqData.positions && seqData.positions[0]) || '';
+    const genR = await fetch('/pbs/sequences/' + seq + '/generate', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({duty_day: 1, leg_index: 0, position: position}),
+    });
+    const genData = await genR.json();
+    if(!genR.ok){ el.textContent = genData.error || 'Generate failed'; el.style.color = '#c0392b'; return; }
+    window.location.href = genData.fos_url + '?view=pairing';
+  } catch(e) {
+    el.textContent = 'Request failed: ' + e;
+    el.style.color = '#c0392b';
   }
-  el.textContent = `Cached ${ok} of ${total} legs.` + (fails.length ? ' Failures: ' + fails.join('; ') : '');
-  el.style.color = fails.length ? '#c0392b' : '#2fa355';
-  loadArchive();
 }
 
 function loadFromSimbrief(){
@@ -1196,6 +1143,18 @@ function renderPairing(seqData){
   summary.textContent = summaryBits.filter(Boolean).join('  ·  ');
   body.appendChild(summary);
 
+  const cacheWrap = document.createElement('div');
+  cacheWrap.style.cssText = 'padding:11px 14px;background:var(--card);border-bottom:1px solid var(--border);';
+  const cacheBtn = document.createElement('button');
+  cacheBtn.textContent = 'Generate & Cache All Legs in Sequence';
+  cacheBtn.style.cssText = 'margin:0;width:100%;background:var(--green);color:#fff;border:none;padding:10px;border-radius:5px;font-size:13.5px;font-weight:600;cursor:pointer;';
+  cacheBtn.onclick = () => cacheAllPairingLegs(seqData, position, cacheMsg);
+  const cacheMsg = document.createElement('div');
+  cacheMsg.style.cssText = 'margin-top:8px;font-size:12.5px;color:var(--label);';
+  cacheWrap.appendChild(cacheBtn);
+  cacheWrap.appendChild(cacheMsg);
+  body.appendChild(cacheWrap);
+
   (seqData.duty_days || []).forEach(day => {
     const bar = document.createElement('div');
     bar.className = 'section-bar';
@@ -1255,6 +1214,27 @@ async function generatePairingLeg(seq, dutyDay, legIndex, position){
     if(!r.ok){ showToast(data.error || 'Generate failed'); return; }
     window.location.href = data.fos_url;
   } catch(e) { showToast('Request failed: ' + e); }
+}
+async function cacheAllPairingLegs(seqData, position, msgEl){
+  let total = 0, ok = 0;
+  const fails = [];
+  for(const day of (seqData.duty_days || [])){
+    for(let i = 0; i < day.legs.length; i++){
+      total++;
+      try {
+        const r = await fetch('/pbs/sequences/' + encodeURIComponent(seqData.seq) + '/generate', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({duty_day: day.duty_day, leg_index: i, position: position}),
+        });
+        const data = await r.json();
+        if(r.ok) ok++; else fails.push(`Day ${day.duty_day} leg ${i+1}: ${data.error}`);
+      } catch(e) { fails.push(`Day ${day.duty_day} leg ${i+1}: ${e}`); }
+      msgEl.textContent = `Caching… ${ok}/${total} done`;
+      msgEl.style.color = '';
+    }
+  }
+  msgEl.textContent = `Cached ${ok} of ${total} legs.` + (fails.length ? ' Failures: ' + fails.join('; ') : '');
+  msgEl.style.color = fails.length ? '#c0392b' : '#2fa355';
 }
 
 let _weatherLoaded = false;
@@ -1341,6 +1321,11 @@ function renderWeather(stations){
     body.appendChild(card);
   });
 }
+
+(function(){
+  const params = new URLSearchParams(window.location.search);
+  if(params.get('view') === 'pairing') showView('pairing');
+})();
 </script>
 </body>
 </html>"""
