@@ -758,18 +758,18 @@ FOS_TEMPLATE = """<!DOCTYPE html>
       </div>
     </section>
 
-    <div id="pdf-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:50;">
-      <div style="position:absolute;inset:12px;background:#fff;border-radius:8px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 8px 30px rgba(0,0,0,.3);">
-        <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);flex:0 0 auto;">
-          <span id="pdf-overlay-title" style="font-weight:600;font-size:14px;color:var(--value);"></span>
-          <div style="display:flex;gap:16px;align-items:center;">
-            <a id="pdf-export-link" style="font-size:13px;color:var(--blue-dark);text-decoration:none;font-weight:600;">Export</a>
-            <button onclick="closePdfOverlay()" style="margin:0;background:none;color:var(--label);font-size:22px;line-height:1;padding:10px;cursor:pointer;">&times;</button>
-          </div>
+    <section id="pdf-view" class="view">
+      <div class="topbar">
+        <button class="back-link" onclick="closePdfView()">Back</button>
+        <div class="topbar-actions">
+          <a id="pdf-export-link" style="font-size:14px;color:var(--blue-dark);text-decoration:none;font-weight:600;">Export</a>
         </div>
-        <div id="pdf-pages" style="flex:1;overflow:auto;background:#525659;padding:12px;display:flex;flex-direction:column;align-items:center;gap:12px;-webkit-overflow-scrolling:touch;"></div>
+        <div class="topbar-title">
+          <h1 id="pdf-view-title"></h1>
+        </div>
       </div>
-    </div>
+      <div id="pdf-pages" style="background:#525659;margin:0 -16px;padding:12px 12px 32px;display:flex;flex-direction:column;align-items:center;gap:12px;"></div>
+    </section>
     <section id="release-view" class="view">
       <div class="topbar">
         <button class="back-link" onclick="showView('overview')">Back</button>
@@ -801,6 +801,7 @@ function showView(view){
   document.getElementById('overview-view').classList.toggle('active', view==='overview');
   document.getElementById('documents-view').classList.toggle('active', view==='documents');
   document.getElementById('release-view').classList.toggle('active', view==='release');
+  document.getElementById('pdf-view').classList.toggle('active', view==='pdf');
   document.getElementById('nav-home').classList.toggle('active', view==='overview');
   document.getElementById('nav-docs').classList.toggle('active', view==='documents');
   document.getElementById('nav-release').classList.toggle('active', view==='release');
@@ -936,8 +937,8 @@ async function viewDoc(kind, label){
   const field = {rls:'rls_pdf_b64', fi:'fi_pdf_b64', fil:'fil_pdf_b64', wb:'wb_pdf_b64'}[kind];
   const b64 = data[field];
   if(!b64){ showToast(label + ' not available in this release'); return; }
-  document.getElementById('pdf-overlay-title').textContent = label;
-  document.getElementById('pdf-overlay').style.display = 'block';
+  document.getElementById('pdf-view-title').textContent = label;
+  showView('pdf');
   // Export still uses a blob: URL (fine for downloads) — the inline VIEW uses
   // PDF.js on canvas instead of an iframe, since iOS Safari routinely refuses
   // to render PDFs inside an iframe at all (blob or data:, doesn't matter)
@@ -953,11 +954,11 @@ async function viewDoc(kind, label){
     document.getElementById('pdf-pages').innerHTML = '<p style="color:#fff;padding:20px;">Failed to render this PDF: ' + e + '</p>';
   }
 }
-function closePdfOverlay(){
+function closePdfView(){
   _pdfRenderToken++; // cancel any render still in flight
-  document.getElementById('pdf-overlay').style.display = 'none';
   document.getElementById('pdf-pages').innerHTML = '';
   if(_pdfObjectUrl){ URL.revokeObjectURL(_pdfObjectUrl); _pdfObjectUrl = null; }
+  showView('documents');
 }
 </script>
 </body>
