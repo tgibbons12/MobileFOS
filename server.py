@@ -70,6 +70,7 @@ def build_leg_from_sources(payload):
         ofp_fields = simbrief_ofp.fetch_ofp_leg_fields(simbrief_user)
     except Exception as e:
         LOG.warning(f"SimBrief OFP enrichment failed for {simbrief_user}: {e}")
+        payload["_ofp_error"] = str(e)
         return payload
 
     known = {k: v for k, v in payload.items() if v not in (None, "", [])}
@@ -107,7 +108,11 @@ def _store_leg(leg):
 @app.route("/generate", methods=["POST"])
 def generate():
     payload = request.get_json(silent=True) or {}
-    record = _store_leg(build_leg_from_sources(payload))
+    leg = build_leg_from_sources(payload)
+    ofp_error = leg.pop("_ofp_error", None)
+    if ofp_error and not leg.get("flight_number"):
+        return jsonify({"error": f"couldn't load SimBrief OFP: {ofp_error}"}), 502
+    record = _store_leg(leg)
     return jsonify({"fos_url": f"/fos/{record['id']}", "id": record["id"]})
 
 
@@ -176,6 +181,7 @@ def generate_from_pbs(seq_number):
     if body.get("simbrief_user"):
         fos_leg["simbrief_user"] = body["simbrief_user"]
     fos_leg = build_leg_from_sources(fos_leg)
+    fos_leg.pop("_ofp_error", None)  # non-fatal here — real pairing data already exists
     record = _store_leg(fos_leg)
     return jsonify({"fos_url": f"/fos/{record['id']}", "id": record["id"]})
 
@@ -300,41 +306,203 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
 <style>
   body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#eef1f4;margin:0;padding:24px;color:#1a1f29;}
   h1{font-size:18px;color:#144e94;}
-  textarea{width:100%;max-width:640px;height:220px;font-family:ui-monospace,Menlo,monospace;font-size:12.5px;padding:10px;border:1px solid #e3e6ea;border-radius:6px;box-sizing:border-box;}
+  label{display:block;font-size:13px;font-weight:600;margin:10px 0 4px;}
+  textarea, select, input[type=text]{width:100%;max-width:640px;font-family:inherit;font-size:13.5px;padding:9px 10px;border:1px solid #e3e6ea;border-radius:5px;box-sizing:border-box;background:#fbfbfc;}
+  textarea{height:160px;font-family:ui-monospace,Menlo,monospace;font-size:12.5px;}
   button{margin-top:10px;background:#1c63b7;color:#fff;border:none;padding:10px 18px;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;}
+  button.secondary{background:#2fa355;}
   .arow{display:block;background:#fff;border:1px solid #e3e6ea;border-radius:6px;padding:10px 14px;margin-bottom:8px;text-decoration:none;color:#1a1f29;font-size:13.5px;max-width:640px;}
   .arow span{color:#6b7380;float:right;}
   .empty{color:#6b7380;font-style:italic;}
-  #msg{margin-top:8px;font-size:13px;}
+  .msg{margin-top:8px;font-size:13px;}
+  .panel{max-width:640px;padding:14px;background:#fff;border:1px solid #e3e6ea;border-radius:6px;margin-top:10px;}
+  .tabs{display:flex;gap:8px;max-width:640px;border-bottom:1px solid #e3e6ea;margin-bottom:16px;}
+  .tab-btn{margin:0;background:none;color:#6b7380;border:none;border-bottom:2px solid transparent;border-radius:0;padding:10px 4px;font-size:14px;font-weight:600;cursor:pointer;}
+  .tab-btn.active{color:#144e94;border-bottom-color:#1c63b7;}
+  .tab-panel{display:none;}
+  .tab-panel.active{display:block;}
+  hr{max-width:640px;margin:14px 0;border:none;border-top:1px solid #e3e6ea;}
 </style></head><body>
-<h1>FOS &mdash; paste a leg JSON to generate</h1>
-<textarea id="payload">{
-  "seq": "6610", "date": "WED 24APR19", "flight_number": "3543",
-  "origin": "BNA", "destination": "JFK",
-  "dep_date": "4/24/19", "arr_date": "4/24/19",
-  "sched_out": "07:56", "sched_in": "11:27", "est_out": "07:56", "est_in": "11:27",
-  "dep_gate": "C10", "arr_gate": "32G",
-  "fleet_type": "EMJ", "equipment_type": "E140",
-  "tail_number": "843", "tail_routing": "From 3420/23 IN 2125/23",
-  "status": "MISFFD", "customer_load": 31, "position": "FO",
-  "crew": ["M. Anderson", "T. Reyes"],
-  "flight_time": "2:37", "ground_time": "1:33", "tz_diff": "+1:00"
-}</textarea><br>
-<button onclick="gen()">Generate</button>
-<div id="msg"></div>
+<h1>FOS</h1>
+<div class="tabs">
+  <button class="tab-btn active" id="tab-pbs-btn" onclick="showTab('pbs')">Import PBS</button>
+  <button class="tab-btn" id="tab-simbrief-btn" onclick="showTab('simbrief')">Load from SimBrief</button>
+</div>
+
+<div id="tab-pbs" class="tab-panel active">
+  <textarea id="pbs-text" placeholder="Paste your crew pairing builder's PBS bid-pack export here"></textarea><br>
+  <button onclick="importPbs()">Import</button>
+  <div id="import-msg" class="msg"></div>
+
+  <h1 style="margin-top:28px;">Sequences</h1>
+  <div id="seq-list"><p class="empty">No sequences imported yet.</p></div>
+
+  <div id="gen-form" class="panel" style="display:none;">
+    <div id="gen-seq-label" style="font-weight:600;"></div>
+    <label for="gen-duty-day">Duty Day</label>
+    <select id="gen-duty-day" onchange="populateLegs()"></select>
+    <label for="gen-leg">Leg</label>
+    <select id="gen-leg"></select>
+    <label for="gen-position">Position</label>
+    <select id="gen-position"></select>
+    <label for="gen-simbrief">SimBrief Username (optional — fills tail/crew/load/date on THIS leg from the current OFP)</label>
+    <input id="gen-simbrief" type="text" placeholder="e.g. tgibbons">
+    <br><button onclick="generateLeg()">Generate This Leg</button>
+    <div id="gen-msg" class="msg"></div>
+    <hr>
+    <div style="font-size:13px;color:#6b7380;margin-bottom:4px;">Cache every leg in this sequence at once (no SimBrief enrichment — this is the whole trip's schedule, not one specific day's dispatch):</div>
+    <button class="secondary" onclick="generateAllLegs()">Generate &amp; Cache All Legs in Sequence</button>
+    <div id="gen-all-msg" class="msg"></div>
+  </div>
+</div>
+
+<div id="tab-simbrief" class="tab-panel">
+  <div class="panel">
+    <div style="font-size:13px;color:#6b7380;margin-bottom:4px;">Loads whatever OFP is currently on this SimBrief account right now — for dispatching the flight you're on today, not for browsing a schedule.</div>
+    <label for="sb-user">SimBrief Username</label>
+    <input id="sb-user" type="text" placeholder="e.g. tgibbons">
+    <br><button onclick="loadFromSimbrief()">Load Current Flight</button>
+    <div id="sb-msg" class="msg"></div>
+  </div>
+</div>
+
 <h1 style="margin-top:28px;">Archive</h1>
-$rows
+<div id="archive-list">$rows</div>
 <script>
-function gen(){
-  const el = document.getElementById('msg');
-  let body;
-  try { body = JSON.parse(document.getElementById('payload').value); }
-  catch(e){ el.textContent = 'Invalid JSON: ' + e.message; el.style.color = '#c0392b'; return; }
-  fetch('/generate', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)})
-    .then(r=>r.json())
-    .then(data=>{ window.location.href = data.fos_url; })
+let currentSeqData = null;
+
+function showTab(tab){
+  document.getElementById('tab-pbs').classList.toggle('active', tab==='pbs');
+  document.getElementById('tab-simbrief').classList.toggle('active', tab==='simbrief');
+  document.getElementById('tab-pbs-btn').classList.toggle('active', tab==='pbs');
+  document.getElementById('tab-simbrief-btn').classList.toggle('active', tab==='simbrief');
+}
+
+function loadArchive(){
+  fetch('/archive').then(r=>r.json()).then(rows=>{
+    document.getElementById('archive-list').innerHTML = rows.map(r =>
+      `<a class="arow" href="/fos/${r.id}">${r.flight_number||''} ${r.origin||''}→${r.destination||''} <span>${r.dep_date||''}</span></a>`
+    ).join('') || '<p class="empty">No legs generated yet.</p>';
+  });
+}
+
+function importPbs(){
+  const el = document.getElementById('import-msg');
+  const text = document.getElementById('pbs-text').value;
+  if(!text.trim()){ el.textContent = 'Paste bid-pack text first.'; el.style.color = '#c0392b'; return; }
+  fetch('/import-pbs', {method:'POST', headers:{'Content-Type':'text/plain'}, body: text})
+    .then(r => r.json().then(data => ({ok:r.ok, data})))
+    .then(({ok, data}) => {
+      if(!ok){ el.textContent = data.error || 'Import failed'; el.style.color = '#c0392b'; return; }
+      el.textContent = `Imported ${data.sequences_parsed} sequence(s), ${data.legs_parsed} legs.`;
+      el.style.color = '#2fa355';
+      loadSequences();
+    })
     .catch(e=>{ el.textContent = 'Request failed: ' + e; el.style.color = '#c0392b'; });
 }
+
+function loadSequences(){
+  fetch('/pbs/sequences').then(r=>r.json()).then(seqs=>{
+    const list = document.getElementById('seq-list');
+    list.innerHTML = seqs.map(s =>
+      `<a class="arow" href="#" onclick="selectSeq('${s.seq}');return false;">SEQ ${s.seq} — ${s.origin||''}→${s.final_destination||''} <span>${s.days} day(s)</span></a>`
+    ).join('') || '<p class="empty">No sequences imported yet.</p>';
+  });
+}
+
+function selectSeq(seq){
+  fetch('/pbs/sequences/' + seq).then(r=>r.json()).then(data=>{
+    currentSeqData = data;
+    document.getElementById('gen-seq-label').textContent = 'SEQ ' + data.seq;
+    document.getElementById('gen-duty-day').innerHTML = data.duty_days.map(d =>
+      `<option value="${d.duty_day}">Day ${d.duty_day} (RPT ${d.report})</option>`
+    ).join('');
+    document.getElementById('gen-position').innerHTML = (data.positions||[]).map(p =>
+      `<option value="${p}">${p}</option>`
+    ).join('');
+    const saved = localStorage.getItem('fos_simbrief_user');
+    if(saved) document.getElementById('gen-simbrief').value = saved;
+    populateLegs();
+    document.getElementById('gen-msg').textContent = '';
+    document.getElementById('gen-all-msg').textContent = '';
+    document.getElementById('gen-form').style.display = 'block';
+  });
+}
+
+function populateLegs(){
+  const dutyDay = parseInt(document.getElementById('gen-duty-day').value, 10);
+  const day = (currentSeqData.duty_days || []).find(d => d.duty_day === dutyDay);
+  document.getElementById('gen-leg').innerHTML = (day ? day.legs : []).map((l, i) =>
+    `<option value="${i}">${l.flight_number || '—'} ${l.origin}→${l.destination} ${l.dep_local}/${l.arr_local}</option>`
+  ).join('');
+}
+
+function generateLeg(){
+  const el = document.getElementById('gen-msg');
+  const simbrief = document.getElementById('gen-simbrief').value.trim();
+  if(simbrief) localStorage.setItem('fos_simbrief_user', simbrief);
+  const body = {
+    duty_day: parseInt(document.getElementById('gen-duty-day').value, 10),
+    leg_index: parseInt(document.getElementById('gen-leg').value, 10),
+    position: document.getElementById('gen-position').value,
+  };
+  if(simbrief) body.simbrief_user = simbrief;
+  fetch('/pbs/sequences/' + currentSeqData.seq + '/generate', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)})
+    .then(r => r.json().then(data => ({ok:r.ok, data})))
+    .then(({ok, data}) => {
+      if(!ok){ el.textContent = data.error || 'Generate failed'; el.style.color = '#c0392b'; return; }
+      window.location.href = data.fos_url;
+    })
+    .catch(e=>{ el.textContent = 'Request failed: ' + e; el.style.color = '#c0392b'; });
+}
+
+async function generateAllLegs(){
+  const el = document.getElementById('gen-all-msg');
+  const position = document.getElementById('gen-position').value;
+  const seq = currentSeqData.seq;
+  let total = 0, ok = 0;
+  const fails = [];
+  for(const day of (currentSeqData.duty_days || [])){
+    for(let i = 0; i < day.legs.length; i++){
+      total++;
+      try {
+        const r = await fetch('/pbs/sequences/' + seq + '/generate', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({duty_day: day.duty_day, leg_index: i, position: position})
+        });
+        const data = await r.json();
+        if(r.ok) ok++; else fails.push(`Day ${day.duty_day} leg ${i+1}: ${data.error}`);
+      } catch(e) { fails.push(`Day ${day.duty_day} leg ${i+1}: ${e}`); }
+      el.textContent = `Caching… ${ok}/${total} done`;
+      el.style.color = '';
+    }
+  }
+  el.textContent = `Cached ${ok} of ${total} legs.` + (fails.length ? ' Failures: ' + fails.join('; ') : '');
+  el.style.color = fails.length ? '#c0392b' : '#2fa355';
+  loadArchive();
+}
+
+function loadFromSimbrief(){
+  const el = document.getElementById('sb-msg');
+  const user = document.getElementById('sb-user').value.trim();
+  if(!user){ el.textContent = 'Enter a SimBrief username first.'; el.style.color = '#c0392b'; return; }
+  localStorage.setItem('fos_simbrief_user', user);
+  el.textContent = 'Loading current flight…';
+  el.style.color = '';
+  fetch('/generate', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({simbrief_user: user})})
+    .then(r => r.json().then(data => ({ok:r.ok, data})))
+    .then(({ok, data}) => {
+      if(!ok){ el.textContent = data.error || 'Load failed'; el.style.color = '#c0392b'; return; }
+      window.location.href = data.fos_url;
+    })
+    .catch(e=>{ el.textContent = 'Request failed: ' + e; el.style.color = '#c0392b'; });
+}
+
+(function(){
+  const saved = localStorage.getItem('fos_simbrief_user');
+  if(saved) document.getElementById('sb-user').value = saved;
+})();
+loadSequences();
 </script>
 </body></html>"""
 

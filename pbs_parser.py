@@ -93,7 +93,7 @@ def parse_pbs(text):
     idx = text.find(marker)
     detail = text[idx:] if idx != -1 else text
 
-    blocks = re.split(r'\n-{20,}\n', detail)
+    blocks = re.split(r'\r?\n-{20,}[ \t]*\r?\n', detail)
     sequences = []
 
     for block in blocks:

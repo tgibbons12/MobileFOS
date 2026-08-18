@@ -45,6 +45,16 @@ def fetch_ofp_leg_fields(simbrief_user, timeout=15):
         except (ValueError, OSError, OverflowError):
             return ""
 
+    def seconds_to_hhmm(path):
+        raw = text(path)
+        if not raw:
+            return ""
+        try:
+            total = int(raw) % 86400
+            return f"{total // 3600:02d}:{(total % 3600) // 60:02d}"
+        except ValueError:
+            return ""
+
     crew = [n for n in (text("crew/cpt"), text("crew/fo")) if n]
 
     fields = {
@@ -58,7 +68,9 @@ def fetch_ofp_leg_fields(simbrief_user, timeout=15):
         "est_out": epoch_to("%H:%M", "times/est_out"),
         "est_in": epoch_to("%H:%M", "times/est_in"),
         "tail_number": text("aircraft/reg"),
+        "fleet_type": text("aircraft/icaocode"),
         "customer_load": text("general/passengers"),
+        "flight_time": seconds_to_hhmm("times/sched_block"),
         "crew": crew,
     }
     return {k: v for k, v in fields.items() if v}
