@@ -13,9 +13,12 @@ Aviobook.fetch_xml_from_api() + your pairing builder's export in ahead of the
 call to /generate. See build_leg_from_sources() below for the seam.
 """
 
+import os
+
 from flask import Flask, request, jsonify, Response
 from string import Template
 import pbs_parser
+import release_engine
 
 app = Flask(__name__)
 
@@ -182,6 +185,39 @@ def toggle_ffd(leg_id):
         return jsonify({"error": "not found"}), 404
     record["fit_for_duty"] = not record.get("fit_for_duty", False)
     return jsonify({"fit_for_duty": record["fit_for_duty"]})
+
+
+@app.route("/release/status")
+def release_status():
+    return jsonify({
+        "available": release_engine.is_available(),
+        "error": release_engine.import_error(),
+    })
+
+
+@app.route("/fos/<int:leg_id>/release", methods=["POST"])
+def generate_release(leg_id):
+    record = next((r for r in _store["archive"] if r["id"] == leg_id), None)
+    if not record:
+        return jsonify({"error": "not found"}), 404
+
+    if not release_engine.is_available():
+        return jsonify({"error": release_engine.import_error()}), 503
+
+    body = request.get_json(silent=True) or {}
+    user_id = body.get("user_id") or os.environ.get("SIMBRIEF_USER")
+    if not user_id:
+        return jsonify({"error": "no SimBrief user id — pass \"user_id\" or set SIMBRIEF_USER"}), 400
+
+    try:
+        rls_bytes, wb_bytes, filename = release_engine.generate_release_pdfs(user_id)
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 502
+
+    return Response(
+        rls_bytes, mimetype="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.route("/archive")

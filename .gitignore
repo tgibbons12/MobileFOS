@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+config.json
+
+# SimBrief's own terms prohibit redistributing this package without their
+# written consent (see SimBrief_APIv1/README.txt) — keep it out of git.
+SimBrief_APIv1/
