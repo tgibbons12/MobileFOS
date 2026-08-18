@@ -876,8 +876,8 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         <input id="sb-gen-user" type="text" placeholder="e.g. tgibbons">
       </div>
       <div class="search-block">
-        <label for="sb-gen-type">Aircraft Type (SimBrief code, e.g. b738)</label>
-        <input id="sb-gen-type" type="text" placeholder="b738">
+        <label for="sb-gen-type">Aircraft Type — code (b738) or your saved airframe's Internal ID (123456_1582090020)</label>
+        <input id="sb-gen-type" type="text" placeholder="b738 or 123456_1582090020">
       </div>
       <div class="search-block">
         <label for="sb-gen-airline">Airline (ICAO)</label>
@@ -1328,7 +1328,7 @@ let _sbGenLeg = null;
 function openSimbriefGen(leg, dutyDay, legIndex){
   _sbGenLeg = leg;
   document.getElementById('sb-gen-route').textContent = leg.origin + ' → ' + leg.destination;
-  document.getElementById('sb-gen-type').value = '';
+  document.getElementById('sb-gen-type').value = localStorage.getItem('fos_simbrief_airframe') || '';
   document.getElementById('sb-gen-airline').value = '';
   document.getElementById('sb-gen-fltnum').value = leg.flight_number || '';
   document.getElementById('sb-gen-date').value = '';
@@ -1357,6 +1357,7 @@ async function submitSimbriefGen(){
   if(!user){ el.textContent = 'Enter your SimBrief username first.'; el.style.color = '#c0392b'; return; }
   if(!type){ el.textContent = 'Enter the SimBrief aircraft type code first.'; el.style.color = '#c0392b'; return; }
   localStorage.setItem('fos_simbrief_user', user);
+  localStorage.setItem('fos_simbrief_airframe', type);
 
   // Popup must open synchronously, before any await — Safari (and others)
   // stop treating window.open as user-initiated once you're a tick removed
