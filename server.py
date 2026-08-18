@@ -551,8 +551,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   button{font-family:inherit;}
   :focus-visible{outline:2px solid var(--blue-dark);outline-offset:2px;}
   @media (prefers-reduced-motion: reduce){ *{transition:none !important;animation:none !important;} }
-  .app-shell{display:flex;min-height:100vh;min-height:100dvh;max-width:900px;margin:0 auto;box-shadow:0 0 0 1px var(--border);padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom);}
-  @media (max-width:900px){ .app-shell{box-shadow:none;} }
+  .app-shell{display:flex;min-height:100vh;min-height:100dvh;width:100%;padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom);padding-left:env(safe-area-inset-left);padding-right:env(safe-area-inset-right);}
   .sidebar{width:64px;flex:0 0 64px;background:var(--navy);display:flex;flex-direction:column;align-items:center;padding:14px 0;gap:6px;}
   .side-btn{width:44px;height:44px;display:flex;align-items:center;justify-content:center;background:transparent;border:none;color:#9db3d6;border-radius:8px;cursor:pointer;position:relative;}
   .side-btn svg{width:22px;height:22px;}
@@ -747,6 +746,10 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           <div><div class="code">FIL</div><div class="desc">Flight Details \u2013 Local</div></div>
           <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('fil','Flight Details \u2013 Local')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
         </div>
+        <div class="doc-row">
+          <div><div class="code">WBD</div><div class="desc">Weight &amp; Balance Data (TPS)</div></div>
+          <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('wb','Weight &amp; Balance Data')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
+        </div>
         <div class="doc-row" style="border-bottom:none;">
           <div><div class="code">G*L/SS</div><div class="desc">Customers Requiring Special Services</div></div>
           <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="showToast('Not available \u2014 no data source for this document yet')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
@@ -891,22 +894,34 @@ async function ensureRelease(){
   _releaseCache = data;
   return data;
 }
+function b64ToBlob(b64, mime){
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for(let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], {type: mime});
+}
+let _pdfObjectUrl = null;
 async function viewDoc(kind, label){
   const data = await ensureRelease();
   if(!data) return;
-  const field = {rls:'rls_pdf_b64', fi:'fi_pdf_b64', fil:'fil_pdf_b64'}[kind];
+  const field = {rls:'rls_pdf_b64', fi:'fi_pdf_b64', fil:'fil_pdf_b64', wb:'wb_pdf_b64'}[kind];
   const b64 = data[field];
   if(!b64){ showToast(label + ' not available in this release'); return; }
+  // iOS Safari renders data: URIs in an iframe unreliably (often kicks out to
+  // the system PDF viewer instead of showing it inline) — blob: URLs work.
+  if(_pdfObjectUrl) URL.revokeObjectURL(_pdfObjectUrl);
+  _pdfObjectUrl = URL.createObjectURL(b64ToBlob(b64, 'application/pdf'));
   document.getElementById('pdf-overlay-title').textContent = label;
-  document.getElementById('pdf-frame').src = 'data:application/pdf;base64,' + b64;
+  document.getElementById('pdf-frame').src = _pdfObjectUrl;
   const exportLink = document.getElementById('pdf-export-link');
-  exportLink.href = 'data:application/pdf;base64,' + b64;
+  exportLink.href = _pdfObjectUrl;
   exportLink.download = kind === 'rls' ? data.filename : (data.filename || 'release.pdf').replace('-RLS.pdf', '-' + kind.toUpperCase() + '.pdf');
   document.getElementById('pdf-overlay').style.display = 'block';
 }
 function closePdfOverlay(){
   document.getElementById('pdf-overlay').style.display = 'none';
-  document.getElementById('pdf-frame').src = '';
+  document.getElementById('pdf-frame').src = 'about:blank';
+  if(_pdfObjectUrl){ URL.revokeObjectURL(_pdfObjectUrl); _pdfObjectUrl = null; }
 }
 </script>
 </body>
