@@ -5,9 +5,9 @@ operates on, tail number, named crew, and passenger load. A bid pack is a
 schedule pattern, not a specific day's flight — those fields only exist once
 someone has actually dispatched the leg in SimBrief.
 
-Deliberately independent of release_engine/MASTERLOG_FOS: this only needs a
+Deliberately independent of release_engine/MASTERLOG: this only needs a
 handful of XML fields, not the whole TPS/performance pipeline, and
-MASTERLOG_FOS.fetch_simbrief_data() calls sys.exit(1) on failure, which would
+MASTERLOG.fetch_simbrief_data() calls sys.exit(1) on failure, which would
 be fatal to import for a merge step that should fail softly instead.
 """
 
@@ -86,3 +86,34 @@ def fetch_ofp_leg_fields(simbrief_user, timeout=15):
         "crew": crew,
     }
     return {k: v for k, v in fields.items() if v}
+
+
+def fetch_weather_briefing(simbrief_user, timeout=15):
+    """
+    Origin/destination/alternate METAR+TAF for the pilot's current SimBrief
+    OFP. SimBrief already fetches and bundles these into the OFP XML as part
+    of building it, so this needs no separate aviationweather.gov call (and
+    sidesteps whatever network restriction blocked that route before).
+    Returns a list of {icao, role, metar, taf} dicts, empty ones omitted.
+    """
+    resp = requests.get(OFP_URL, params={"username": simbrief_user}, timeout=timeout)
+    resp.raise_for_status()
+    root = ET.fromstring(resp.text)
+
+    def text(path):
+        el = root.find(path)
+        return el.text.strip() if el is not None and el.text else ""
+
+    stations = [
+        ("origin", "origin/icao_code", "orig"),
+        ("destination", "destination/icao_code", "dest"),
+        ("alternate", "alternate/icao_code", "altn"),
+    ]
+    briefing = []
+    for role, icao_path, wx_prefix in stations:
+        icao = text(icao_path)
+        metar = text(f"weather/{wx_prefix}_metar")
+        taf = text(f"weather/{wx_prefix}_taf")
+        if icao and (metar or taf):
+            briefing.append({"role": role, "icao": icao, "metar": metar, "taf": taf})
+    return briefing

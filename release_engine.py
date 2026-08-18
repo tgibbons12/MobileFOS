@@ -1,15 +1,24 @@
 """
-Headless wrapper around MASTERLOG_FOS.generate_enhanced_howgozit().
+Headless wrapper around MASTERLOG.generate_enhanced_howgozit().
 
-MASTERLOG_FOS.py (and MASTERLOG.py, which it optionally imports for SLS field
-reports) were written for interactive desktop use: they `import tkinter` at
-module level and use simpledialog/filedialog for prompts. Railway's container
-has no Tk/Tcl libs, so a bare `import MASTERLOG_FOS` dies before any of our
-code runs. We install stub tkinter modules in sys.modules first so those
-imports resolve to harmless no-ops; nothing in the code path we actually call
-(generate_enhanced_howgozit with an explicit user_id + output_path) invokes
-them for real — the interactive prompts are only reached from other entry
-points (get_or_prompt_username, prompt_for_output_folder) that we never call.
+Uses MASTERLOG.py, not MASTERLOG_FOS.py — the two are near-identical (same
+entry point name/signature, same fetch → parse → split-into-RLS/WB flow),
+but MASTERLOG.py is the newer generation: structured logging instead of
+print(), a release watermark, a prepended WBD/index page, and it calls
+write_field_reports() directly instead of needing a cross-module import
+(MASTERLOG_FOS.py needs `from MASTERLOG import write_field_reports`, which
+was silently failing on a missing write_tlr_section — calling MASTERLOG.py
+directly sidesteps that entirely, no stub needed for this path).
+
+MASTERLOG.py was written for interactive desktop use: it `import tkinter`s
+at module level and uses simpledialog/filedialog for prompts. Railway's
+container has no Tk/Tcl libs, so a bare `import MASTERLOG` dies before any
+of our code runs. We install stub tkinter modules in sys.modules first so
+those imports resolve to harmless no-ops; nothing in the code path we
+actually call (generate_enhanced_howgozit with an explicit user_id +
+output_path) invokes them for real — the interactive prompts are only
+reached from other entry points (get_or_prompt_username,
+prompt_for_output_folder) that we never call.
 
 generate_enhanced_howgozit() writes two PDFs into the directory implied by
 `output_path` (filenames are derived from flight data, not from output_path's
@@ -70,13 +79,13 @@ def _install_tkinter_stub():
 _install_tkinter_stub()
 
 # Auto-open (subprocess.run(['open', path])) is already wrapped in a
-# try/except inside MASTERLOG_FOS.py, so it fails safe on Linux without our
+# try/except inside MASTERLOG.py, so it fails safe on Linux without our
 # help — no monkeypatch needed there.
 
 _import_error = None
-MASTERLOG_FOS = None
+MASTERLOG = None
 try:
-    import MASTERLOG_FOS
+    import MASTERLOG
 except Exception as e:  # pragma: no cover - reported via /release/status
     _import_error = "".join(traceback.format_exception(type(e), e, e.__traceback__))
 
@@ -105,7 +114,7 @@ def generate_release_pdfs(user_id):
     with tempfile.TemporaryDirectory(prefix="fos-release-") as tmpdir:
         placeholder = os.path.join(tmpdir, "placeholder.pdf")
         try:
-            result = MASTERLOG_FOS.generate_enhanced_howgozit(user_id, output_path=placeholder)
+            result = MASTERLOG.generate_enhanced_howgozit(user_id, output_path=placeholder)
         except SystemExit as e:
             raise RuntimeError(f"generate_enhanced_howgozit exited: {e}")
         except Exception as e:

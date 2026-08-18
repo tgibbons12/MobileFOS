@@ -252,6 +252,25 @@ def list_signatures():
     return jsonify(_signature_log)
 
 
+@app.route("/fos/<int:leg_id>/weather", methods=["POST"])
+def leg_weather(leg_id):
+    record = next((r for r in _store["archive"] if r["id"] == leg_id), None)
+    if not record:
+        return jsonify({"error": "not found"}), 404
+
+    body = request.get_json(silent=True) or {}
+    user_id = body.get("user_id") or os.environ.get("SIMBRIEF_USER")
+    if not user_id:
+        return jsonify({"error": "no SimBrief user id — pass \"user_id\" or set SIMBRIEF_USER"}), 400
+
+    try:
+        briefing = simbrief_ofp.fetch_weather_briefing(user_id)
+    except Exception as e:
+        return jsonify({"error": f"couldn't load weather: {e}"}), 502
+
+    return jsonify(briefing)
+
+
 @app.route("/release/status")
 def release_status():
     return jsonify({
@@ -658,7 +677,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
     <button class="side-btn active" id="nav-home" title="Home" onclick="showView('overview')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></svg>
     </button>
-    <button class="side-btn" title="Pairing" onclick="showToast('Pairing')">
+    <button class="side-btn" id="nav-pairing" title="Pairing" onclick="showView('pairing')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18"/><path d="M8 3v4M16 3v4"/></svg>
     </button>
     <button class="side-btn" title="Messages" onclick="showToast('Messages')">
@@ -796,6 +815,11 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="showToast('Not available \u2014 no data source for this document yet')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
         </div>
       </div>
+      <button class="section-bar collapsed" id="weather-bar" onclick="toggleWeatherSection()">
+        Weather
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+      </button>
+      <div id="weather-body" style="display:none;"><p class="placeholder-note">Tap to load current METAR/TAF (uses the SimBrief username from Release/Load-from-SimBrief)</p></div>
     </section>
 
     <section id="pdf-view" class="view">
@@ -828,6 +852,16 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         </div>
         <div id="sign-msg" style="margin-top:10px;font-size:13px;color:var(--label);"></div>
       </div>
+    </section>
+    <section id="pairing-view" class="view">
+      <div class="topbar">
+        <button class="back-link" onclick="showView('overview')">Back</button>
+        <div class="topbar-title">
+          <h1>Pairing</h1>
+          <p>SEQ $seq — full trip</p>
+        </div>
+      </div>
+      <div id="pairing-body"><p class="placeholder-note">Loading…</p></div>
     </section>
     <section id="release-view" class="view">
       <div class="topbar">
@@ -862,12 +896,15 @@ function showView(view){
   document.getElementById('release-view').classList.toggle('active', view==='release');
   document.getElementById('pdf-view').classList.toggle('active', view==='pdf');
   document.getElementById('sign-view').classList.toggle('active', view==='sign');
+  document.getElementById('pairing-view').classList.toggle('active', view==='pairing');
   document.getElementById('nav-home').classList.toggle('active', view==='overview');
   document.getElementById('nav-docs').classList.toggle('active', view==='documents');
   document.getElementById('nav-release').classList.toggle('active', view==='release');
+  document.getElementById('nav-pairing').classList.toggle('active', view==='pairing');
   window.scrollTo(0,0);
   if(view === 'release') initReleaseView();
   if(view === 'sign') initSignPad();
+  if(view === 'pairing') initPairingView();
 }
 let _releaseStatusChecked = false;
 function initReleaseView(){
@@ -1091,6 +1128,158 @@ async function submitSignature(){
     el.textContent = 'Request failed: ' + e;
     el.style.color = '#c0392b';
   }
+}
+
+const LEG_SEQ = "$seq";
+const LEG_POSITION = "$position";
+async function initPairingView(){
+  const body = document.getElementById('pairing-body');
+  if(!LEG_SEQ){
+    body.innerHTML = '<p class="placeholder-note">This leg has no SEQ — it wasn’t generated from a PBS pairing.</p>';
+    return;
+  }
+  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  try {
+    const r = await fetch('/pbs/sequences/' + encodeURIComponent(LEG_SEQ));
+    const data = await r.json();
+    if(!r.ok){
+      body.innerHTML = '<p class="placeholder-note">No pairing data for SEQ ' + LEG_SEQ + ' — re-import the PBS bid pack on Home.</p>';
+      return;
+    }
+    renderPairing(data);
+  } catch(e) {
+    body.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>';
+  }
+}
+function renderPairing(seqData){
+  const body = document.getElementById('pairing-body');
+  body.innerHTML = '';
+  const position = LEG_POSITION || (seqData.positions && seqData.positions[0]) || '';
+  (seqData.duty_days || []).forEach(day => {
+    const bar = document.createElement('div');
+    bar.className = 'section-bar';
+    bar.style.cursor = 'default';
+    bar.textContent = 'Day ' + day.duty_day + ' — RPT ' + (day.report || '');
+    body.appendChild(bar);
+
+    const list = document.createElement('div');
+    list.className = 'doc-list';
+    (day.legs || []).forEach((leg, i) => {
+      const row = document.createElement('div');
+      row.className = 'doc-row';
+      row.style.cursor = 'pointer';
+      const left = document.createElement('div');
+      const code = document.createElement('div');
+      code.className = 'code';
+      code.textContent = leg.flight_number || '—';
+      const desc = document.createElement('div');
+      desc.className = 'desc';
+      desc.textContent = leg.origin + '→' + leg.destination + ' ' + leg.dep_local + '/' + leg.arr_local;
+      left.appendChild(code);
+      left.appendChild(desc);
+      const actions = document.createElement('div');
+      actions.className = 'actions';
+      actions.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>';
+      row.appendChild(left);
+      row.appendChild(actions);
+      row.onclick = () => generatePairingLeg(seqData.seq, day.duty_day, i, position);
+      list.appendChild(row);
+    });
+    body.appendChild(list);
+
+    const bits = [
+      day.release ? ('RLS ' + day.release) : '',
+      day.duty ? ('Duty ' + day.duty) : '',
+      day.tafb ? ('TAFB ' + day.tafb) : '',
+      day.hotel || '',
+    ].filter(Boolean).join(' · ');
+    if(bits){
+      const note = document.createElement('p');
+      note.className = 'placeholder-note';
+      note.textContent = bits;
+      body.appendChild(note);
+    }
+  });
+  if(!body.children.length){
+    body.innerHTML = '<p class="placeholder-note">No duty days on this sequence.</p>';
+  }
+}
+async function generatePairingLeg(seq, dutyDay, legIndex, position){
+  try {
+    const r = await fetch('/pbs/sequences/' + encodeURIComponent(seq) + '/generate', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({duty_day: dutyDay, leg_index: legIndex, position: position}),
+    });
+    const data = await r.json();
+    if(!r.ok){ showToast(data.error || 'Generate failed'); return; }
+    window.location.href = data.fos_url;
+  } catch(e) { showToast('Request failed: ' + e); }
+}
+
+let _weatherLoaded = false;
+function toggleWeatherSection(){
+  const bar = document.getElementById('weather-bar');
+  const body = document.getElementById('weather-body');
+  const collapsed = bar.classList.toggle('collapsed');
+  body.style.display = collapsed ? 'none' : 'block';
+  if(!collapsed && !_weatherLoaded) loadWeather();
+}
+async function loadWeather(){
+  const body = document.getElementById('weather-body');
+  const userId = localStorage.getItem('fos_simbrief_user');
+  if(!userId){
+    body.innerHTML = '<p class="placeholder-note">Set a SimBrief username on the Release tab first.</p>';
+    return;
+  }
+  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  try {
+    const r = await fetch('/fos/' + LEG_ID + '/weather', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({user_id:userId})});
+    const data = await r.json();
+    if(!r.ok){ body.innerHTML = '<p class="placeholder-note">' + (data.error || 'Failed to load weather') + '</p>'; return; }
+    _weatherLoaded = true;
+    renderWeather(data);
+  } catch(e) {
+    body.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>';
+  }
+}
+function renderWeather(stations){
+  const body = document.getElementById('weather-body');
+  body.innerHTML = '';
+  const refresh = document.createElement('a');
+  refresh.href = '#';
+  refresh.textContent = 'Refresh';
+  refresh.style.cssText = 'display:block;padding:8px 14px;font-size:12px;color:var(--blue-dark);text-decoration:none;background:var(--card);border-bottom:1px solid var(--border);';
+  refresh.onclick = (e) => { e.preventDefault(); loadWeather(); };
+  body.appendChild(refresh);
+  if(!stations.length){
+    const note = document.createElement('p');
+    note.className = 'placeholder-note';
+    note.textContent = 'No weather data on the current OFP.';
+    body.appendChild(note);
+    return;
+  }
+  const roleLabel = {origin: 'Origin', destination: 'Destination', alternate: 'Alternate'};
+  stations.forEach(s => {
+    const card = document.createElement('div');
+    card.style.cssText = 'padding:11px 14px;border-bottom:1px solid var(--border);background:var(--card);';
+    const header = document.createElement('div');
+    header.style.cssText = 'font-weight:700;font-size:13px;margin-bottom:6px;';
+    header.textContent = (roleLabel[s.role] || s.role) + ' — ' + s.icao;
+    card.appendChild(header);
+    if(s.metar){
+      const m = document.createElement('div');
+      m.style.cssText = 'font-family:ui-monospace,Menlo,monospace;font-size:11.5px;white-space:pre-wrap;color:var(--value);margin-bottom:6px;';
+      m.textContent = s.metar;
+      card.appendChild(m);
+    }
+    if(s.taf){
+      const t = document.createElement('div');
+      t.style.cssText = 'font-family:ui-monospace,Menlo,monospace;font-size:11.5px;white-space:pre-wrap;color:var(--label);';
+      t.textContent = s.taf;
+      card.appendChild(t);
+    }
+    body.appendChild(card);
+  });
 }
 </script>
 </body>
