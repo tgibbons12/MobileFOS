@@ -248,6 +248,17 @@ def generate_release(leg_id):
     }
     if wb_bytes:
         payload["wb_pdf_b64"] = base64.b64encode(wb_bytes).decode("ascii")
+
+    try:
+        named_pages = release_engine.extract_named_pages(rls_bytes)
+    except Exception as e:
+        LOG.warning(f"FI/FIL page extraction failed: {e}")
+        named_pages = {}
+    if named_pages.get("fi"):
+        payload["fi_pdf_b64"] = base64.b64encode(named_pages["fi"]).decode("ascii")
+    if named_pages.get("fil"):
+        payload["fil_pdf_b64"] = base64.b64encode(named_pages["fil"]).decode("ascii")
+
     return jsonify(payload)
 
 
@@ -301,9 +312,17 @@ def render_fos_html(leg):
 
 
 LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#142c52">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="mobileFOS">
+<link rel="manifest" href="/static/manifest.json">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <title>FOS</title>
 <style>
+  html,body{height:100%;}
   body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#eef1f4;margin:0;padding:24px;color:#1a1f29;}
   h1{font-size:18px;color:#144e94;}
   label{display:block;font-size:13px;font-weight:600;margin:10px 0 4px;}
@@ -511,7 +530,14 @@ FOS_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#142c52">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="mobileFOS">
+<link rel="manifest" href="/static/manifest.json">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <title>Flight $flight_number \u2013 FOS</title>
 <style>
   :root{
@@ -520,12 +546,13 @@ FOS_TEMPLATE = """<!DOCTYPE html>
     --red:#e0393e; --inactive:#9aa1ab; --radius:6px;
   }
   *{box-sizing:border-box;}
-  html,body{margin:0;padding:0;}
+  html,body{margin:0;padding:0;height:100%;}
   body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--value);-webkit-font-smoothing:antialiased;}
   button{font-family:inherit;}
   :focus-visible{outline:2px solid var(--blue-dark);outline-offset:2px;}
   @media (prefers-reduced-motion: reduce){ *{transition:none !important;animation:none !important;} }
-  .app-shell{display:flex;min-height:100vh;max-width:900px;margin:0 auto;box-shadow:0 0 0 1px var(--border);}
+  .app-shell{display:flex;min-height:100vh;min-height:100dvh;max-width:900px;margin:0 auto;box-shadow:0 0 0 1px var(--border);padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom);}
+  @media (max-width:900px){ .app-shell{box-shadow:none;} }
   .sidebar{width:64px;flex:0 0 64px;background:var(--navy);display:flex;flex-direction:column;align-items:center;padding:14px 0;gap:6px;}
   .side-btn{width:44px;height:44px;display:flex;align-items:center;justify-content:center;background:transparent;border:none;color:#9db3d6;border-radius:8px;cursor:pointer;position:relative;}
   .side-btn svg{width:22px;height:22px;}
@@ -709,19 +736,36 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           <div><div class="code">EFLIGHT PLAN</div><div class="desc">eFlight Plan</div></div>
           <div class="actions">
             <svg class="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" onclick="showToast('Acknowledged')"><path d="M20 6L9 17l-5-5"/></svg>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="showToast('Opening eFlight Plan')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('rls','eFlight Plan')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg>
           </div>
         </div>
         <div class="doc-row">
           <div><div class="code">FI</div><div class="desc">Flight Details \u2013 GMT</div></div>
-          <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="showToast('Opening Flight Details')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
+          <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('fi','Flight Details \u2013 GMT')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
+        </div>
+        <div class="doc-row">
+          <div><div class="code">FIL</div><div class="desc">Flight Details \u2013 Local</div></div>
+          <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('fil','Flight Details \u2013 Local')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
         </div>
         <div class="doc-row" style="border-bottom:none;">
           <div><div class="code">G*L/SS</div><div class="desc">Customers Requiring Special Services</div></div>
-          <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="showToast('Opening special services list')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
+          <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="showToast('Not available \u2014 no data source for this document yet')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
         </div>
       </div>
     </section>
+
+    <div id="pdf-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:50;">
+      <div style="position:absolute;inset:12px;background:#fff;border-radius:8px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 8px 30px rgba(0,0,0,.3);">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);flex:0 0 auto;">
+          <span id="pdf-overlay-title" style="font-weight:600;font-size:14px;color:var(--value);"></span>
+          <div style="display:flex;gap:16px;align-items:center;">
+            <a id="pdf-export-link" style="font-size:13px;color:var(--blue-dark);text-decoration:none;font-weight:600;">Export</a>
+            <button onclick="closePdfOverlay()" style="margin:0;background:none;color:var(--label);font-size:22px;line-height:1;padding:10px;cursor:pointer;">&times;</button>
+          </div>
+        </div>
+        <iframe id="pdf-frame" style="flex:1;border:none;width:100%;background:#525659;"></iframe>
+      </div>
+    </div>
     <section id="release-view" class="view">
       <div class="topbar">
         <button class="back-link" onclick="showView('overview')">Back</button>
@@ -830,6 +874,39 @@ function showToast(msg){
   t.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(()=>t.classList.remove('show'), 1600);
+}
+
+let _releaseCache = null;
+async function ensureRelease(){
+  if(_releaseCache) return _releaseCache;
+  const userId = localStorage.getItem('fos_simbrief_user');
+  if(!userId){ showToast('Set a SimBrief username on the Release tab first'); return null; }
+  showToast('Generating release…');
+  let r, data;
+  try {
+    r = await fetch('/fos/' + LEG_ID + '/release', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({user_id:userId})});
+    data = await r.json();
+  } catch(e) { showToast('Request failed: ' + e); return null; }
+  if(!r.ok){ showToast('Failed: ' + (data.error || 'unknown error')); return null; }
+  _releaseCache = data;
+  return data;
+}
+async function viewDoc(kind, label){
+  const data = await ensureRelease();
+  if(!data) return;
+  const field = {rls:'rls_pdf_b64', fi:'fi_pdf_b64', fil:'fil_pdf_b64'}[kind];
+  const b64 = data[field];
+  if(!b64){ showToast(label + ' not available in this release'); return; }
+  document.getElementById('pdf-overlay-title').textContent = label;
+  document.getElementById('pdf-frame').src = 'data:application/pdf;base64,' + b64;
+  const exportLink = document.getElementById('pdf-export-link');
+  exportLink.href = 'data:application/pdf;base64,' + b64;
+  exportLink.download = kind === 'rls' ? data.filename : (data.filename || 'release.pdf').replace('-RLS.pdf', '-' + kind.toUpperCase() + '.pdf');
+  document.getElementById('pdf-overlay').style.display = 'block';
+}
+function closePdfOverlay(){
+  document.getElementById('pdf-overlay').style.display = 'none';
+  document.getElementById('pdf-frame').src = '';
 }
 </script>
 </body>

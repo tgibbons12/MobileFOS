@@ -19,6 +19,7 @@ produced, reads them back as bytes, and cleans up.
 """
 
 import glob
+import io
 import os
 import sys
 import tempfile
@@ -129,3 +130,38 @@ def generate_release_pdfs(user_id):
                 wb_bytes = f.read()
 
         return rls_bytes, wb_bytes, os.path.basename(rls_files[-1])
+
+
+def extract_named_pages(rls_bytes):
+    """
+    Pull the FI ("Flight Details – GMT") and FIL ("Flight Details – Local")
+    pages out of the full release PDF as their own single-page PDFs, so the
+    Documents view can show just one page instead of the whole release.
+
+    fos_pages.build_fi_page()/build_fil_page() give each page a distinctive
+    header line — "FI<flt>/<date>/<time> <orig>" and "FIL<flt>/<date>/<orig>/APAX"
+    — so pages are found by text search rather than a fixed page number,
+    since how many pages precede them (OFP body, weather, NOTAMs) varies
+    leg to leg. Returns {"fi": bytes|None, "fil": bytes|None}; a miss just
+    means that page wasn't found, not an error — callers treat it as
+    "not available" rather than failing the whole release.
+    """
+    import re
+    from pypdf import PdfReader, PdfWriter
+
+    reader = PdfReader(io.BytesIO(rls_bytes))
+    found = {"fi": None, "fil": None}
+    for page in reader.pages:
+        text = (page.extract_text() or "")[:300]
+        kind = None
+        if re.search(r'\bFIL\d', text):
+            kind = "fil"
+        elif re.search(r'\bFI\d', text):
+            kind = "fi"
+        if kind and found[kind] is None:
+            writer = PdfWriter()
+            writer.add_page(page)
+            buf = io.BytesIO()
+            writer.write(buf)
+            found[kind] = buf.getvalue()
+    return found
