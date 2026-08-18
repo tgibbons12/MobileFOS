@@ -538,6 +538,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
 <meta name="apple-mobile-web-app-title" content="mobileFOS">
 <link rel="manifest" href="/static/manifest.json">
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <title>Flight $flight_number \u2013 FOS</title>
 <style>
   :root{
@@ -766,7 +767,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
             <button onclick="closePdfOverlay()" style="margin:0;background:none;color:var(--label);font-size:22px;line-height:1;padding:10px;cursor:pointer;">&times;</button>
           </div>
         </div>
-        <iframe id="pdf-frame" style="flex:1;border:none;width:100%;background:#525659;"></iframe>
+        <div id="pdf-pages" style="flex:1;overflow:auto;background:#525659;padding:12px;display:flex;flex-direction:column;align-items:center;gap:12px;-webkit-overflow-scrolling:touch;"></div>
       </div>
     </div>
     <section id="release-view" class="view">
@@ -894,33 +895,68 @@ async function ensureRelease(){
   _releaseCache = data;
   return data;
 }
-function b64ToBlob(b64, mime){
+function b64ToBytes(b64){
   const bin = atob(b64);
   const bytes = new Uint8Array(bin.length);
   for(let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return new Blob([bytes], {type: mime});
+  return bytes;
+}
+if(window.pdfjsLib){
+  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 }
 let _pdfObjectUrl = null;
+let _pdfRenderToken = 0;
+async function renderPdfInline(bytes){
+  const token = ++_pdfRenderToken;
+  const container = document.getElementById('pdf-pages');
+  container.innerHTML = '<p style="color:#fff;">Rendering…</p>';
+  const pdf = await pdfjsLib.getDocument({data: bytes}).promise;
+  if(token !== _pdfRenderToken) return; // a newer viewDoc() call superseded this one
+  container.innerHTML = '';
+  const targetWidth = Math.max(container.clientWidth - 24, 280);
+  for(let pageNum = 1; pageNum <= pdf.numPages; pageNum++){
+    if(token !== _pdfRenderToken) return;
+    const page = await pdf.getPage(pageNum);
+    const scale = targetWidth / page.getViewport({scale:1}).width;
+    const viewport = page.getViewport({scale});
+    const canvas = document.createElement('canvas');
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    canvas.style.width = '100%';
+    canvas.style.maxWidth = targetWidth + 'px';
+    canvas.style.background = '#fff';
+    canvas.style.boxShadow = '0 1px 4px rgba(0,0,0,.35)';
+    container.appendChild(canvas);
+    await page.render({canvasContext: canvas.getContext('2d'), viewport}).promise;
+  }
+}
 async function viewDoc(kind, label){
   const data = await ensureRelease();
   if(!data) return;
   const field = {rls:'rls_pdf_b64', fi:'fi_pdf_b64', fil:'fil_pdf_b64', wb:'wb_pdf_b64'}[kind];
   const b64 = data[field];
   if(!b64){ showToast(label + ' not available in this release'); return; }
-  // iOS Safari renders data: URIs in an iframe unreliably (often kicks out to
-  // the system PDF viewer instead of showing it inline) — blob: URLs work.
-  if(_pdfObjectUrl) URL.revokeObjectURL(_pdfObjectUrl);
-  _pdfObjectUrl = URL.createObjectURL(b64ToBlob(b64, 'application/pdf'));
   document.getElementById('pdf-overlay-title').textContent = label;
-  document.getElementById('pdf-frame').src = _pdfObjectUrl;
+  document.getElementById('pdf-overlay').style.display = 'block';
+  // Export still uses a blob: URL (fine for downloads) — the inline VIEW uses
+  // PDF.js on canvas instead of an iframe, since iOS Safari routinely refuses
+  // to render PDFs inside an iframe at all (blob or data:, doesn't matter)
+  // and silently kicks out to the system PDF viewer instead.
+  if(_pdfObjectUrl) URL.revokeObjectURL(_pdfObjectUrl);
+  _pdfObjectUrl = URL.createObjectURL(new Blob([b64ToBytes(b64)], {type:'application/pdf'}));
   const exportLink = document.getElementById('pdf-export-link');
   exportLink.href = _pdfObjectUrl;
   exportLink.download = kind === 'rls' ? data.filename : (data.filename || 'release.pdf').replace('-RLS.pdf', '-' + kind.toUpperCase() + '.pdf');
-  document.getElementById('pdf-overlay').style.display = 'block';
+  try {
+    await renderPdfInline(b64ToBytes(b64));
+  } catch(e) {
+    document.getElementById('pdf-pages').innerHTML = '<p style="color:#fff;padding:20px;">Failed to render this PDF: ' + e + '</p>';
+  }
 }
 function closePdfOverlay(){
+  _pdfRenderToken++; // cancel any render still in flight
   document.getElementById('pdf-overlay').style.display = 'none';
-  document.getElementById('pdf-frame').src = 'about:blank';
+  document.getElementById('pdf-pages').innerHTML = '';
   if(_pdfObjectUrl){ URL.revokeObjectURL(_pdfObjectUrl); _pdfObjectUrl = null; }
 }
 </script>
