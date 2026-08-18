@@ -16,6 +16,7 @@ call to /generate. See build_leg_from_sources() below for the seam.
 import base64
 import logging
 import os
+from datetime import datetime, timezone
 
 from flask import Flask, request, jsonify, Response
 from string import Template
@@ -38,7 +39,10 @@ DEFAULT_LEG = {
     "flight_time": "", "odl_time": "", "duty_time": "", "ground_time": "",
     "tz_diff": "", "hotel_details": "", "limo_details": "",
     "signed_in": False, "fit_for_duty": False,
+    "signature": "", "signed_at": "",
 }
+
+_signature_log = []
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +219,39 @@ def toggle_ffd(leg_id):
     return jsonify({"fit_for_duty": record["fit_for_duty"]})
 
 
+@app.route("/fos/<int:leg_id>/sign", methods=["POST"])
+def sign_leg(leg_id):
+    record = next((r for r in _store["archive"] if r["id"] == leg_id), None)
+    if not record:
+        return jsonify({"error": "not found"}), 404
+
+    body = request.get_json(silent=True) or {}
+    signature = body.get("signature")
+    if not signature or not signature.startswith("data:image/"):
+        return jsonify({"error": "no signature image given"}), 400
+
+    signed_at = datetime.now(timezone.utc).isoformat()
+    record["signature"] = signature
+    record["signed_at"] = signed_at
+
+    entry = {
+        "leg_id": leg_id, "flight_number": record.get("flight_number"),
+        "dep_date": record.get("dep_date"), "signed_at": signed_at,
+    }
+    _signature_log.append(entry)
+    LOG.info(f"SIGNATURE leg={leg_id} flight={record.get('flight_number')} at={signed_at}")
+
+    return jsonify({"signed_at": signed_at})
+
+
+@app.route("/signatures")
+def list_signatures():
+    """Audit log of every signing event this process has seen — separate
+    from the leg records themselves, so it survives a leg being regenerated
+    (re-signing overwrites record['signature'] but not this history)."""
+    return jsonify(_signature_log)
+
+
 @app.route("/release/status")
 def release_status():
     return jsonify({
@@ -307,7 +344,8 @@ def render_fos_html(leg):
     ctx["leg_id"] = str(leg.get("id", ""))
     ctx["signed_in_class"] = "" if ctx.get("signed_in") else "inactive"
     ctx["ffd_class"] = "" if ctx.get("fit_for_duty") else "inactive"
-    str_ctx = {k: ("" if v is None else str(v)) for k, v in ctx.items()}
+    ctx["signed_class"] = "signed" if ctx.get("signature") else ""
+    str_ctx = {k: ("" if v is None else str(v)) for k, v in ctx.items() if k != "signature"}
     return Template(FOS_TEMPLATE).safe_substitute(**str_ctx)
 
 
@@ -597,7 +635,9 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .doc-row .desc{font-size:12px;color:var(--label);margin-top:1px;}
   .doc-row .actions{display:flex;align-items:center;gap:12px;flex:0 0 auto;}
   .doc-row .actions svg{width:19px;height:19px;color:#5b6472;cursor:pointer;}
-  .doc-row .check{color:var(--blue);}
+  .doc-row .check{color:var(--inactive,#9aa1ab);cursor:pointer;}
+  .doc-row .check.signed{color:var(--green);}
+  #sign-pad{touch-action:none;background:#fff;border:1px solid var(--border);border-radius:6px;width:100%;height:220px;}
   .placeholder-note{padding:12px 14px;color:var(--label);font-style:italic;font-size:13px;background:var(--card);}
   .view{display:none;}
   .view.active{display:block;}
@@ -735,7 +775,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         <div class="doc-row">
           <div><div class="code">EFLIGHT PLAN</div><div class="desc">eFlight Plan</div></div>
           <div class="actions">
-            <svg class="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" onclick="showToast('Acknowledged')"><path d="M20 6L9 17l-5-5"/></svg>
+            <svg id="sign-check" class="check $signed_class" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" onclick="openSignPad()"><path d="M20 6L9 17l-5-5"/></svg>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('rls','eFlight Plan')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg>
           </div>
         </div>
@@ -770,6 +810,25 @@ FOS_TEMPLATE = """<!DOCTYPE html>
       </div>
       <div id="pdf-pages" style="background:#525659;margin:0 -16px;padding:12px 12px 32px;display:flex;flex-direction:column;align-items:center;gap:12px;"></div>
     </section>
+
+    <section id="sign-view" class="view">
+      <div class="topbar">
+        <button class="back-link" onclick="showView('documents')">Back</button>
+        <div class="topbar-title">
+          <h1>Sign eFlight Plan</h1>
+          <p id="sign-status-line">Acknowledges receipt of the current release</p>
+        </div>
+      </div>
+      <div class="search-block">
+        <label>Sign below</label>
+        <canvas id="sign-pad"></canvas>
+        <div style="display:flex;gap:10px;margin-top:10px;">
+          <button onclick="clearSignPad()" style="margin:0;background:var(--label);color:#fff;border:none;padding:10px 16px;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;flex:0 0 auto;">Clear</button>
+          <button id="sign-submit-btn" onclick="submitSignature()" style="margin:0;background:var(--blue);color:#fff;border:none;padding:10px 16px;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;flex:1;">Sign &amp; Submit</button>
+        </div>
+        <div id="sign-msg" style="margin-top:10px;font-size:13px;color:var(--label);"></div>
+      </div>
+    </section>
     <section id="release-view" class="view">
       <div class="topbar">
         <button class="back-link" onclick="showView('overview')">Back</button>
@@ -802,11 +861,13 @@ function showView(view){
   document.getElementById('documents-view').classList.toggle('active', view==='documents');
   document.getElementById('release-view').classList.toggle('active', view==='release');
   document.getElementById('pdf-view').classList.toggle('active', view==='pdf');
+  document.getElementById('sign-view').classList.toggle('active', view==='sign');
   document.getElementById('nav-home').classList.toggle('active', view==='overview');
   document.getElementById('nav-docs').classList.toggle('active', view==='documents');
   document.getElementById('nav-release').classList.toggle('active', view==='release');
   window.scrollTo(0,0);
   if(view === 'release') initReleaseView();
+  if(view === 'sign') initSignPad();
 }
 let _releaseStatusChecked = false;
 function initReleaseView(){
@@ -959,6 +1020,77 @@ function closePdfView(){
   document.getElementById('pdf-pages').innerHTML = '';
   if(_pdfObjectUrl){ URL.revokeObjectURL(_pdfObjectUrl); _pdfObjectUrl = null; }
   showView('documents');
+}
+
+function openSignPad(){
+  showView('sign');
+}
+let _signCtx = null, _signDrawing = false, _signHasStrokes = false;
+function initSignPad(){
+  const canvas = document.getElementById('sign-pad');
+  const rect = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  _signCtx = canvas.getContext('2d');
+  _signCtx.scale(dpr, dpr);
+  _signCtx.lineWidth = 2.2;
+  _signCtx.lineCap = 'round';
+  _signCtx.lineJoin = 'round';
+  _signCtx.strokeStyle = '#1a1f29';
+  _signHasStrokes = false;
+  document.getElementById('sign-msg').textContent = '';
+
+  const pos = (e) => {
+    const r = canvas.getBoundingClientRect();
+    return {x: e.clientX - r.left, y: e.clientY - r.top};
+  };
+  canvas.onpointerdown = (e) => {
+    _signDrawing = true;
+    _signHasStrokes = true;
+    const p = pos(e);
+    _signCtx.beginPath();
+    _signCtx.moveTo(p.x, p.y);
+    canvas.setPointerCapture(e.pointerId);
+  };
+  canvas.onpointermove = (e) => {
+    if(!_signDrawing) return;
+    const p = pos(e);
+    _signCtx.lineTo(p.x, p.y);
+    _signCtx.stroke();
+  };
+  const stop = () => { _signDrawing = false; };
+  canvas.onpointerup = stop;
+  canvas.onpointercancel = stop;
+  canvas.onpointerleave = stop;
+}
+function clearSignPad(){
+  const canvas = document.getElementById('sign-pad');
+  _signCtx.clearRect(0, 0, canvas.width, canvas.height);
+  _signHasStrokes = false;
+}
+async function submitSignature(){
+  const el = document.getElementById('sign-msg');
+  if(!_signHasStrokes){ el.textContent = 'Sign in the box first.'; el.style.color = '#c0392b'; return; }
+  const btn = document.getElementById('sign-submit-btn');
+  btn.disabled = true;
+  el.textContent = 'Submitting…';
+  el.style.color = '';
+  const dataUrl = document.getElementById('sign-pad').toDataURL('image/png');
+  try {
+    const r = await fetch('/fos/' + LEG_ID + '/sign', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({signature: dataUrl})});
+    const data = await r.json();
+    btn.disabled = false;
+    if(!r.ok){ el.textContent = data.error || 'Sign failed'; el.style.color = '#c0392b'; return; }
+    const check = document.getElementById('sign-check');
+    if(check) check.classList.add('signed');
+    showToast('Signed');
+    showView('documents');
+  } catch(e) {
+    btn.disabled = false;
+    el.textContent = 'Request failed: ' + e;
+    el.style.color = '#c0392b';
+  }
 }
 </script>
 </body>
