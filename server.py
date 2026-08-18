@@ -406,6 +406,9 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
 </div>
 
 <div id="tab-pbs" class="tab-panel active">
+  <label for="pbs-file">Import from file</label>
+  <input type="file" id="pbs-file" accept=".txt,text/plain" onchange="loadPbsFile(event)">
+  <div style="margin:10px 0 4px;color:#6b7380;font-size:12px;">— or paste below —</div>
   <textarea id="pbs-text" placeholder="Paste your crew pairing builder's PBS bid-pack export here"></textarea><br>
   <button onclick="importPbs()">Import</button>
   <div id="import-msg" class="msg"></div>
@@ -462,6 +465,21 @@ function loadArchive(){
   });
 }
 
+function loadPbsFile(e){
+  const file = e.target.files[0];
+  if(!file) return;
+  const el = document.getElementById('import-msg');
+  const reader = new FileReader();
+  reader.onload = () => {
+    document.getElementById('pbs-text').value = reader.result;
+    importPbs();
+  };
+  reader.onerror = () => {
+    el.textContent = 'Could not read that file.';
+    el.style.color = '#c0392b';
+  };
+  reader.readAsText(file);
+}
 function importPbs(){
   const el = document.getElementById('import-msg');
   const text = document.getElementById('pbs-text').value;
