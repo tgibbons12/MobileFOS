@@ -203,10 +203,24 @@ def _store_leg(leg):
 @app.route("/generate", methods=["POST"])
 def generate():
     payload = request.get_json(silent=True) or {}
+    # A SimBrief-import generate (simbrief_user set, nothing else) almost
+    # always lands on a fresh record — the OFP's real dep_date practically
+    # never matches the "" dep_date a PBS/manual leg started with, so
+    # _find() below can't dedupe them into one. Gates applied via AeroAPI
+    # before sending to SimBrief live only on that older record and would
+    # otherwise be silently orphaned; carry them forward explicitly since
+    # a SimBrief OFP never carries gate data of its own to conflict with.
+    carry_from = payload.pop("carry_gates_from", None)
     leg = build_leg_from_sources(payload)
     ofp_error = leg.pop("_ofp_error", None)
     if ofp_error and not leg.get("flight_number"):
         return jsonify({"error": f"couldn't load SimBrief OFP: {ofp_error}"}), 502
+    if carry_from:
+        src = next((r for r in _store["archive"] if str(r["id"]) == str(carry_from)), None)
+        if src:
+            for key in ("dep_gate", "arr_gate"):
+                if src.get(key) and not leg.get(key):
+                    leg[key] = src[key]
     record = _store_leg(leg)
     return jsonify({"fos_url": f"/fos/{record['id']}", "id": record["id"]})
 
@@ -1818,7 +1832,7 @@ async function pollSimbriefReady(user, beforeTs, el, btn, attempt){
     el.textContent = 'Flight plan ready — loading it…';
     el.style.color = '#2fa355';
     try {
-      const r2 = await fetch('/generate', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({simbrief_user: user})});
+      const r2 = await fetch('/generate', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({simbrief_user: user, carry_gates_from: LEG_ID})});
       const data2 = await r2.json();
       if(!r2.ok){ el.textContent = data2.error || 'Generated, but could not load it into FOS'; el.style.color = '#c0392b'; btn.disabled = false; return; }
       window.location.href = data2.fos_url + '?view=confirm';
