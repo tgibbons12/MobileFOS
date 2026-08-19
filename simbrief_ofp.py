@@ -19,6 +19,26 @@ import requests
 OFP_URL = "https://www.simbrief.com/api/xml.fetcher.php"
 
 
+def fetch_ofp_generated_at(simbrief_user, timeout=15):
+    """
+    The pilot's current OFP's <params><time_generated> — a Unix timestamp
+    SimBrief stamps on every OFP it builds, whether the pilot dispatches via
+    the old signed-popup API or their own dispatch.simbrief.com page. Used
+    to tell "a new plan just got generated" apart from "there's an old one
+    already sitting on the account" when we have no signed request of our
+    own to correlate against. Returns "" (not raises) on any failure — this
+    is a best-effort freshness check, not a required step.
+    """
+    try:
+        resp = requests.get(OFP_URL, params={"username": simbrief_user}, timeout=timeout)
+        resp.raise_for_status()
+        root = ET.fromstring(resp.text)
+        el = root.find("params/time_generated")
+        return el.text.strip() if el is not None and el.text else ""
+    except (requests.RequestException, ET.ParseError):
+        return ""
+
+
 def fetch_ofp_leg_fields(simbrief_user, timeout=15):
     """
     Returns a dict of FOS-schema leg fields populated from the pilot's

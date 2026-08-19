@@ -29,7 +29,6 @@ import pbs_parser
 import release_engine
 from fos_pages import AIRLINE_IATA
 import simbrief_ofp
-import simbrief_apiv1
 
 # PBS's "OPERATOR / FLEET" line carries the two-letter IATA code; SimBrief's
 # generate-flight-plan form wants the three-letter ICAO code instead. Reuse
@@ -38,10 +37,9 @@ import simbrief_apiv1
 _IATA_TO_ICAO = {iata: icao for icao, iata in AIRLINE_IATA.items()}
 
 # PBS station codes are 3-letter IATA (e.g. LAX); SimBrief's orig/dest params
-# — and the api_code signature/ofp_id hash derived from them — need the
-# 4-letter ICAO identifier instead. Lazily built from OurAirports' public
-# airports.csv (CC0) and disk-cached for a week; falls back to {} on any
-# network hiccup so a stale/missing cache just means no conversion happens.
+# need the 4-letter ICAO identifier instead. Lazily built from OurAirports'
+# public airports.csv (CC0) and disk-cached for a week; falls back to {} on
+# any network hiccup so a stale/missing cache just means no conversion happens.
 _AIRPORTS_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ourairports_airports.csv")
 _AIRPORTS_CACHE_MAX_AGE = 7 * 24 * 3600
 _iata_to_icao_airport = None
@@ -404,36 +402,15 @@ def leg_weather(leg_id):
     return jsonify(briefing)
 
 
-@app.route("/simbrief-api/prepare", methods=["POST"])
-def simbrief_api_prepare():
-    if not simbrief_apiv1.is_configured():
-        return jsonify({"error": "SimBrief API key not configured on this server"}), 503
-
-    body = request.get_json(silent=True) or {}
-    orig = (body.get("orig") or "").strip().upper()
-    dest = (body.get("dest") or "").strip().upper()
-    actype = (body.get("type") or "").strip().lower()
-    outputpage = (body.get("outputpage") or "").strip()
-    if not (orig and dest and actype and outputpage):
-        return jsonify({"error": "orig, dest, type, and outputpage are all required"}), 400
-
-    timestamp = int(time.time())
-    outputpage_calc = outputpage.replace("http://", "").replace("https://", "")
-    api_req = f"{orig}{dest}{actype}{timestamp}{outputpage_calc}"
-    return jsonify({
-        "api_code": simbrief_apiv1.sign(api_req),
-        "ofp_id": simbrief_apiv1.compute_ofp_id(orig, dest, actype, timestamp),
-        "timestamp": timestamp,
-        "outputpage_calc": outputpage_calc,
-    })
-
-
-@app.route("/simbrief-api/check")
-def simbrief_api_check():
-    ofp_id = request.args.get("ofp_id", "")
-    if not ofp_id:
-        return jsonify({"error": "ofp_id required"}), 400
-    return jsonify({"available": simbrief_apiv1.check_ofp_ready(ofp_id)})
+@app.route("/simbrief-api/generated-at")
+def simbrief_api_generated_at():
+    """Freshness probe for the pilot's current OFP — see
+    simbrief_ofp.fetch_ofp_generated_at for why this replaces the old
+    signed-request/deterministic-ofp_id check."""
+    user_id = request.args.get("user", "")
+    if not user_id:
+        return jsonify({"error": "user required"}), 400
+    return jsonify({"time_generated": simbrief_ofp.fetch_ofp_generated_at(user_id)})
 
 
 @app.route("/release/status")
@@ -1191,7 +1168,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           <label><input id="sbgen-etops" type="checkbox">ETOPS Planning</label>
         </div>
         <div style="padding:14px;background:var(--card);">
-          <button id="sbgen-btn" onclick="submitSimbriefGen()" style="margin:0;width:100%;background:var(--blue);color:#fff;border:none;padding:11px;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;">Generate Flight Plan</button>
+          <button id="sbgen-btn" onclick="submitSimbriefGen()" style="margin:0;width:100%;background:var(--blue);color:#fff;border:none;padding:11px;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;">Open in SimBrief Dispatch</button>
           <div id="sbgen-msg" style="margin-top:10px;font-size:13px;color:var(--label);"></div>
         </div>
       </div>
@@ -1769,10 +1746,38 @@ async function submitSimbriefGen(){
   localStorage.setItem('fos_simbrief_user', user);
   localStorage.setItem('fos_simbrief_airframe', type);
 
+  const params = new URLSearchParams();
+  const set = (k, v) => { if(v) params.set(k, v); };
+  set('orig', orig); set('dest', dest); set('type', type); set('route', route);
+  set('airline', airline); set('fltnum', fltnum); set('date', date);
+  if(time && time.length === 4){ set('deph', time.slice(0, 2)); set('depm', time.slice(2, 4)); }
+  if(steh && steh.length === 4){ set('steh', steh.slice(0, 2)); set('stem', steh.slice(2, 4)); }
+  set('reg', reg); set('selcal', selcal); set('planformat', planformat);
+  set('units', units); set('contpct', contpct); set('resvrule', resvrule); set('maps', maps);
+  params.set('navlog', navlog ? '1' : '0');
+  params.set('stepclimbs', stepclimbs ? '1' : '0');
+  params.set('tlr', tlr ? '1' : '0');
+  params.set('notams', notams ? '1' : '0');
+  params.set('firnot', firnot ? '1' : '0');
+  params.set('etops', etops ? '1' : '0');
+  set('fin', fin); set('callsign', callsign); set('cpt', cpt); set('dxname', dxname); set('pid', pid);
+  set('pax', pax); set('cargo', cargo); set('fuelfactor', fuelfactor); set('manualzfw', manualzfw);
+  if(addedfuel){ set('addedfuel', addedfuel); set('addedfuel_units', addedfuelUnits); }
+  set('taxiout', taxiout); set('taxiin', taxiin); set('civalue', civalue); set('etopsrule', etopsrule);
+  set('origrwy', origrwy); set('destrwy', destrwy); set('fl', fl);
+  set('climb', climb); set('descent', descent); set('cruise', cruise);
+  params.set('omit_sids', omitSids ? '1' : '0');
+  params.set('omit_stars', omitStars ? '1' : '0');
+  params.set('find_sidstar', findSidstar ? '1' : '0');
+  set('altn', altn); set('altn_avoid', altnAvoid); set('static_id', staticId); set('manualrmk', manualrmk);
+  const url = 'https://dispatch.simbrief.com/options/custom?' + params.toString();
+
   // Popup must open synchronously, before any await — Safari (and others)
   // stop treating window.open as user-initiated once you're a tick removed
-  // from the actual click via an awaited fetch, and silently block it.
-  const popup = window.open('about:blank', 'SBworker', 'width=600,height=650');
+  // from the actual click via an awaited fetch, and silently block it. We
+  // have everything we need synchronously now (no signed request to fetch
+  // first), so open straight to the real URL.
+  const popup = window.open(url, 'SBworker', 'width=900,height=800');
   if(!popup){
     el.textContent = 'Please allow pop-ups for this site, then try again.';
     el.style.color = '#c0392b';
@@ -1780,120 +1785,41 @@ async function submitSimbriefGen(){
   }
 
   btn.disabled = true;
-  el.textContent = 'Preparing…';
+  el.textContent = 'Complete the flight plan on SimBrief’s dispatch page — this tab will pick it up once you’re done.';
   el.style.color = '';
 
-  const outputpage = location.origin + location.pathname;
-  let prep;
+  // No signed request means no deterministic ofp_id to poll for — instead,
+  // snapshot the account's current OFP generation timestamp now, and after
+  // the tab closes, wait for that timestamp to change before treating a
+  // plan as "new" (rather than re-pulling whatever was already there).
+  let beforeTs = '';
   try {
-    const r = await fetch('/simbrief-api/prepare', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({orig, dest, type, outputpage}),
-    });
-    prep = await r.json();
-    if(!r.ok){ el.textContent = prep.error || 'Prepare failed'; el.style.color = '#c0392b'; btn.disabled = false; popup.close(); return; }
-  } catch(e) {
-    el.textContent = 'Request failed: ' + e; el.style.color = '#c0392b'; btn.disabled = false; popup.close(); return;
-  }
-
-  const form = document.createElement('form');
-  form.method = 'get';
-  form.action = 'https://www.simbrief.com/ofp/ofp.loader.api.php';
-  form.target = 'SBworker';
-  const addField = (name, value) => {
-    const input = document.createElement('input');
-    input.type = 'hidden';
-    input.name = name;
-    input.value = value;
-    form.appendChild(input);
-  };
-  addField('orig', orig);
-  addField('dest', dest);
-  addField('type', type);
-  if(route) addField('route', route);
-  if(airline) addField('airline', airline);
-  if(fltnum) addField('fltnum', fltnum);
-  if(date) addField('date', date);
-  if(time && time.length === 4){
-    addField('deph', time.slice(0, 2));
-    addField('depm', time.slice(2, 4));
-  }
-  if(steh && steh.length === 4){
-    addField('steh', steh.slice(0, 2));
-    addField('stem', steh.slice(2, 4));
-  }
-  if(reg) addField('reg', reg);
-  if(selcal) addField('selcal', selcal);
-  if(planformat) addField('planformat', planformat);
-  addField('units', units);
-  addField('contpct', contpct);
-  addField('resvrule', resvrule);
-  addField('maps', maps);
-  addField('navlog', navlog ? '1' : '0');
-  addField('stepclimbs', stepclimbs ? '1' : '0');
-  addField('tlr', tlr ? '1' : '0');
-  addField('notams', notams ? '1' : '0');
-  addField('firnot', firnot ? '1' : '0');
-  addField('etops', etops ? '1' : '0');
-  if(fin) addField('fin', fin);
-  if(callsign) addField('callsign', callsign);
-  if(cpt) addField('cpt', cpt);
-  if(dxname) addField('dxname', dxname);
-  if(pid) addField('pid', pid);
-  if(pax) addField('pax', pax);
-  if(cargo) addField('cargo', cargo);
-  if(fuelfactor) addField('fuelfactor', fuelfactor);
-  if(manualzfw) addField('manualzfw', manualzfw);
-  if(addedfuel){ addField('addedfuel', addedfuel); addField('addedfuel_units', addedfuelUnits); }
-  if(taxiout) addField('taxiout', taxiout);
-  if(taxiin) addField('taxiin', taxiin);
-  if(civalue) addField('civalue', civalue);
-  if(etopsrule) addField('etopsrule', etopsrule);
-  if(origrwy) addField('origrwy', origrwy);
-  if(destrwy) addField('destrwy', destrwy);
-  if(fl) addField('fl', fl);
-  if(climb) addField('climb', climb);
-  if(descent) addField('descent', descent);
-  if(cruise) addField('cruise', cruise);
-  addField('omit_sids', omitSids ? '1' : '0');
-  addField('omit_stars', omitStars ? '1' : '0');
-  addField('find_sidstar', findSidstar ? '1' : '0');
-  if(altn) addField('altn', altn);
-  if(altnAvoid) addField('altn_avoid', altnAvoid);
-  if(staticId) addField('static_id', staticId);
-  if(manualrmk) addField('manualrmk', manualrmk);
-  addField('apicode', prep.api_code);
-  addField('outputpage', prep.outputpage_calc);
-  addField('timestamp', String(prep.timestamp));
-  document.body.appendChild(form);
-  form.submit();
-  form.remove();
-
-  el.textContent = 'Complete the flight plan in the pop-up window — this page will pick it up once you’re done.';
-  el.style.color = '';
+    const r = await fetch('/simbrief-api/generated-at?user=' + encodeURIComponent(user));
+    beforeTs = (await r.json()).time_generated || '';
+  } catch(e) { /* best-effort */ }
 
   const closeWatcher = setInterval(() => {
     if(!popup.closed) return;
     clearInterval(closeWatcher);
     el.textContent = 'Checking for the generated flight plan…';
-    pollSimbriefReady(prep.ofp_id, user, el, btn, 0);
+    pollSimbriefReady(user, beforeTs, el, btn, 0);
   }, 500);
 }
 
-async function pollSimbriefReady(ofpId, user, el, btn, attempt){
+async function pollSimbriefReady(user, beforeTs, el, btn, attempt){
   if(attempt > 40){
-    el.textContent = 'Still not showing up on SimBrief — try Load from SimBrief manually once it’s ready.';
+    el.textContent = 'No new flight plan detected — if you generated one, try Load from SimBrief manually.';
     el.style.color = '#c0392b';
     btn.disabled = false;
     return;
   }
-  let data = {available: false};
+  let ts = '';
   try {
-    const r = await fetch('/simbrief-api/check?ofp_id=' + encodeURIComponent(ofpId));
-    data = await r.json();
+    const r = await fetch('/simbrief-api/generated-at?user=' + encodeURIComponent(user));
+    ts = (await r.json()).time_generated || '';
   } catch(e) { /* keep polling */ }
 
-  if(data.available){
+  if(ts && ts !== beforeTs){
     el.textContent = 'Flight plan ready — loading it…';
     el.style.color = '#2fa355';
     try {
@@ -1908,7 +1834,7 @@ async function pollSimbriefReady(ofpId, user, el, btn, attempt){
     }
     return;
   }
-  setTimeout(() => pollSimbriefReady(ofpId, user, el, btn, attempt + 1), 3000);
+  setTimeout(() => pollSimbriefReady(user, beforeTs, el, btn, attempt + 1), 3000);
 }
 
 let _weatherLoaded = false;
