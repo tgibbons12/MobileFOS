@@ -74,10 +74,21 @@ def _get(path, api_key, params=None):
 def _aa_airport_flights(api_key, airport, direction):
     """AA's flights that recently departed (direction='departures') or
     arrived ('arrivals') at a single airport — AeroAPI itself only returns
-    completed ones for these two endpoints, newest first."""
+    completed ones for these two endpoints, newest first.
+
+    Two things this got wrong on the first pass, per AeroAPI's OpenAPI
+    spec: (1) unlike /flights/{ident} and .../to/{dest_id}, these two
+    endpoints key their array as `departures`/`arrivals` — literally
+    `direction` — not `flights`, so reading data["flights"] here silently
+    returned [] no matter what actually came back. (2) the endpoint's own
+    `airline` query param filter is unconfirmed in the spec (only a bare
+    "UAL" example, no stated ICAO/IATA requirement), so filter by
+    operator_icao client-side instead — same proven approach the route
+    lookup below already uses successfully."""
     start = (datetime.now(timezone.utc) - timedelta(days=_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
-    data = _get(f"/airports/{airport}/flights/{direction}", api_key, {"airline": AA_ICAO, "start": start})
-    return data.get("flights", [])
+    data = _get(f"/airports/{airport}/flights/{direction}", api_key, {"start": start, "max_pages": 3})
+    flights = data.get(direction, [])
+    return [f for f in flights if (f.get("operator_icao") or "").upper() == AA_ICAO]
 
 
 def _aa_route_between(api_key, orig, dest):
