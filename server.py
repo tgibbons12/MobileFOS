@@ -433,6 +433,17 @@ def _store_leg(leg):
         existing.flight_number = merged.get("flight_number")
         existing.dep_date = merged.get("dep_date")
         row = existing
+        # PBS-sourced legs always start with dep_date="" (a bid pack is a
+        # schedule pattern, never a real calendar date — see
+        # pbs_leg_to_fos_leg), so two genuinely different pairings sharing a
+        # flight number dedupe onto this same row via _find() above. Its
+        # cached release (keyed only on leg id) belongs to whatever content
+        # was here before this overwrite — stale now, not just for this
+        # flight_number/dep_date collision case but any time a leg's
+        # content changes under an existing id.
+        cached = ReleaseCache.query.filter_by(leg_id=row.id).first()
+        if cached:
+            db.session.delete(cached)
     else:
         row = Leg(
             user_id=current_user.id, flight_number=leg.get("flight_number"),
