@@ -2290,7 +2290,7 @@ function todayZuluISO(){
 // "DDMMMYY" (e.g. "18AUG26"). Split on '-' rather than parsing as a Date
 // to avoid UTC/local timezone shifting the day.
 function isoDateToDDMMMYY(iso){
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || '');
+  const m = /^(\\d{4})-(\\d{2})-(\\d{2})$/.exec(iso || '');
   if(!m) return '';
   const [, year, month, day] = m;
   return day + _DDMMMYY_MONTHS[parseInt(month, 10) - 1] + year.slice(-2);
