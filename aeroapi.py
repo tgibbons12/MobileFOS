@@ -5,13 +5,10 @@ history. Each pilot brings their own AeroAPI key (a paid FlightAware
 subscription); this module is a stateless pass-through for it — the key is
 never written to disk here, only sent on to FlightAware per request.
 
-Schema below (route/gate_origin/gate_destination/terminal_origin/
-terminal_destination on the flight object) matches AeroAPI v4's documented
-/flights/{ident} response: https://www.flightaware.com/aeroapi/portal/documentation
-Not independently verified against a live key from this repo — if
-FlightAware's real response shapes these differently, treat that as a
-doc/reality drift to fix here, not a bug in the caching/suggestion logic
-around it.
+Schema (route/gate_origin/gate_destination/terminal_origin/
+terminal_destination/actual_in on the flight object) verified 2026-08-19
+against a live key hitting GET /flights/AAL100 — field names below match
+the real response, not just AeroAPI's docs.
 """
 import time
 from collections import Counter
@@ -37,10 +34,36 @@ def _mode(values):
     return counts.most_common(1)[0][0] if counts else ""
 
 
+def _first_present(flights, key):
+    """First truthy `key` walking `flights` in order, or ""."""
+    return next((f.get(key) for f in flights if f.get(key)), "")
+
+
+def _suggest_field(flown, flights, key, use_mode):
+    """Best-effort value for `key`, in order:
+    1) the modal value across the recent-flown sample (only for gates —
+       route has no "most common" concept worth computing);
+    2) failing that, the single most recently *flown* flight that has it
+       (walks the full flown history, not just the capped sample);
+    3) failing that — this ident has never actually flown — whatever's on
+       the current/scheduled record, e.g. a pre-assigned gate.
+    Always resolves to the last-flown value when one exists; only reaches
+    for scheduled/filed data when there's no flown history to draw from.
+    """
+    if use_mode:
+        modal = _mode(f.get(key) for f in flown[:10])
+        if modal:
+            return modal
+    val = _first_present(flown, key)
+    if val:
+        return val
+    return _first_present(flights, key)
+
+
 def get_suggestions(api_key, ident):
-    """Route + gate suggestion for `ident` (e.g. "AAL1234"), derived from up
-    to its last 10 completed flights. Raises AeroApiError on any failure —
-    callers should treat that as "suggestion unavailable," not fatal."""
+    """Route + gate suggestion for `ident` (e.g. "AAL1234"). Raises
+    AeroApiError on any failure — callers should treat that as "suggestion
+    unavailable," not fatal."""
     cached = _cache.get(ident)
     if cached and time.time() - cached[0] < _CACHE_TTL:
         return cached[1]
@@ -66,22 +89,23 @@ def get_suggestions(api_key, ident):
     except ValueError:
         raise AeroApiError("AeroAPI returned unparseable data")
 
-    # Prefer flights that actually landed (a real gate was used, not just
-    # filed) but fall back to whatever's on file if none have completed yet.
-    completed = [f for f in flights if f.get("actual_in")] or flights
-    completed = completed[:10]
-
-    if not completed:
+    if not flights:
         raise AeroApiError(f"no flights on file for {ident}")
+
+    # AeroAPI returns this ident's flights newest-first (upcoming/current
+    # ahead of history), so filtering to actual_in and taking them in order
+    # already walks from most-recently-landed backwards through time.
+    flown = [f for f in flights if f.get("actual_in")]
 
     result = {
         "ident": ident,
-        "route": next((f.get("route") for f in completed if f.get("route")), ""),
-        "gate_origin": _mode(f.get("gate_origin") for f in completed),
-        "gate_destination": _mode(f.get("gate_destination") for f in completed),
-        "terminal_origin": _mode(f.get("terminal_origin") for f in completed),
-        "terminal_destination": _mode(f.get("terminal_destination") for f in completed),
-        "sample_size": len(completed),
+        "route": _suggest_field(flown, flights, "route", use_mode=False),
+        "gate_origin": _suggest_field(flown, flights, "gate_origin", use_mode=True),
+        "gate_destination": _suggest_field(flown, flights, "gate_destination", use_mode=True),
+        "terminal_origin": _suggest_field(flown, flights, "terminal_origin", use_mode=True),
+        "terminal_destination": _suggest_field(flown, flights, "terminal_destination", use_mode=True),
+        "sample_size": len(flown[:10]),
+        "never_flown": len(flown) == 0,
     }
     _cache[ident] = (time.time(), result)
     return result

@@ -1217,7 +1217,9 @@ async function fetchAeroSuggestions(){
     document.getElementById('aero-route-val').textContent = data.route || '(no filed route on record)';
     document.getElementById('aero-gate-orig').textContent = data.gate_origin || '—';
     document.getElementById('aero-gate-dest').textContent = data.gate_destination || '—';
-    document.getElementById('aero-basis').textContent = `Based on ${data.sample_size} recent flight(s) for ${ident}.`;
+    document.getElementById('aero-basis').textContent = data.never_flown
+      ? `${ident} has no completed-flight history yet — showing scheduled/filed data instead.`
+      : `Based on the last ${data.sample_size} flown flight(s) for ${ident}.`;
     document.getElementById('aero-results').style.display = 'block';
     msg.textContent = '';
   } catch(e) {
