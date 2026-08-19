@@ -224,6 +224,13 @@ def _require_login():
 AUTH_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#142c52">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="mobileFOS">
+<link rel="manifest" href="/static/manifest.json">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="icon" href="/static/icon-192.png">
 <title>$title – FOS</title>
 <style>
   html,body{overscroll-behavior:none;background:#eef1f4;}
@@ -986,6 +993,7 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
 <meta name="apple-mobile-web-app-title" content="mobileFOS">
 <link rel="manifest" href="/static/manifest.json">
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="icon" href="/static/icon-192.png">
 <title>FOS</title>
 <style>
   html,body{height:100%;overscroll-behavior:none;background:#eef1f4;}
@@ -1324,6 +1332,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
 <meta name="apple-mobile-web-app-title" content="mobileFOS">
 <link rel="manifest" href="/static/manifest.json">
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="icon" href="/static/icon-192.png">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <title>Flight $flight_number \u2013 FOS</title>
 <style>
