@@ -196,7 +196,14 @@ def _store_leg(leg):
     leg = {**DEFAULT_LEG, **leg}
     existing = _find(leg.get("flight_number"), leg.get("dep_date"))
     if existing:
-        signed_in, ffd, rec_id = existing["signed_in"], existing["fit_for_duty"], existing["id"]
+        # OR, not overwrite: a regenerate (e.g. "Request New Data" re-sending
+        # to SimBrief) must never flip a real attestation back off, but it
+        # also shouldn't swallow build_leg_from_sources() setting signed_in
+        # True on fresh OFP data — plain overwrite-from-old was doing exactly
+        # that, silently discarding the auto-sign-in this same session added.
+        signed_in = existing["signed_in"] or leg.get("signed_in", False)
+        ffd = existing["fit_for_duty"] or leg.get("fit_for_duty", False)
+        rec_id = existing["id"]
         existing.update(leg)
         existing["signed_in"], existing["fit_for_duty"], existing["id"] = signed_in, ffd, rec_id
         record = existing
@@ -890,13 +897,13 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   :focus-visible{outline:2px solid var(--blue-dark);outline-offset:2px;}
   @media (prefers-reduced-motion: reduce){ *{transition:none !important;animation:none !important;} }
   .app-shell{display:flex;min-height:100vh;min-height:100dvh;width:100%;padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom);padding-left:env(safe-area-inset-left);padding-right:env(safe-area-inset-right);}
-  .sidebar{width:64px;flex:0 0 64px;background:var(--navy);display:flex;flex-direction:column;align-items:center;padding:14px 0;gap:6px;}
+  .sidebar{width:64px;flex:0 0 64px;background:var(--navy);display:flex;flex-direction:column;align-items:center;padding:14px 0;gap:6px;position:sticky;top:env(safe-area-inset-top);align-self:flex-start;max-height:100vh;max-height:100dvh;overflow-y:auto;z-index:20;}
   .side-btn{width:44px;height:44px;display:flex;align-items:center;justify-content:center;background:transparent;border:none;color:#9db3d6;border-radius:8px;cursor:pointer;position:relative;}
   .side-btn svg{width:22px;height:22px;}
   .side-btn.active{background:var(--blue-dark);color:#fff;}
   .side-btn .badge{position:absolute;top:2px;right:2px;width:15px;height:15px;border-radius:50%;background:var(--red);color:#fff;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;}
   .main{flex:1;min-width:0;padding:14px 16px 44px;}
-  .topbar{display:flex;flex-wrap:wrap;align-items:center;margin-bottom:10px;}
+  .topbar{display:flex;flex-wrap:wrap;align-items:center;margin-bottom:10px;position:sticky;top:0;z-index:10;background:var(--bg);padding-top:6px;margin-top:-6px;margin-left:-16px;margin-right:-16px;padding-left:16px;padding-right:16px;}
   .back-link{order:1;color:var(--blue-dark);font-size:14px;font-weight:500;background:none;border:none;cursor:pointer;padding:4px 2px;}
   .topbar-actions{order:2;margin-left:auto;display:flex;align-items:center;gap:14px;}
   .topbar-title{order:3;flex:1 1 100%;text-align:center;margin-top:2px;}
@@ -926,9 +933,6 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .search-block input,.search-block select{width:100%;padding:9px 10px;border:1px solid var(--border);border-radius:5px;font-size:13.5px;background:#fbfbfc;}
   .search-row{display:flex;gap:10px;background:var(--card);padding:12px 14px;border-bottom:1px solid var(--border);}
   .search-row .search-block{flex:1;border-bottom:none;padding:0;background:none;}
-  .check-grid{display:flex;flex-wrap:wrap;gap:10px 18px;background:var(--card);padding:12px 14px;border-bottom:1px solid var(--border);}
-  .check-grid label{display:flex;align-items:center;gap:7px;font-size:13px;font-weight:600;margin:0;}
-  .check-grid input{width:auto;}
   .section-bar{display:flex;align-items:center;justify-content:space-between;background:var(--blue);color:#fff;padding:10px 14px;font-size:14px;font-weight:600;cursor:pointer;border:none;width:100%;text-align:left;}
   .section-bar svg{width:16px;height:16px;transition:transform .15s ease;}
   .section-bar.collapsed svg.chevron{transform:rotate(180deg);}
@@ -1011,6 +1015,8 @@ FOS_TEMPLATE = """<!DOCTYPE html>
       </div>
       <button class="docs-btn" onclick="showView('documents')">Pre-Flight Documents</button>
       <button class="docs-btn" id="pairing-btn" style="background:var(--blue-dark);border-top:1px solid rgba(255,255,255,.2);" onclick="showView('pairing')">View Full Pairing</button>
+      <button class="docs-btn" style="background:var(--green);border-top:1px solid rgba(255,255,255,.2);" onclick="localStorage.removeItem('fos_last_leg');window.location.href='/'">Create a Flight</button>
+      <button class="docs-btn" style="background:var(--label);border-top:1px solid rgba(255,255,255,.2);" onclick="showView('release')">Request New Data</button>
       <div class="card">
         <div class="content-grid">
           <div class="col-divider">
@@ -1505,7 +1511,7 @@ let _releaseCache = null;
 async function ensureRelease(){
   if(_releaseCache) return _releaseCache;
   const userId = localStorage.getItem('fos_simbrief_user');
-  if(!userId){ showToast('Set a SimBrief username on the Release tab first'); return null; }
+  if(!userId){ showToast('Send this flight to SimBrief first to get a username on file'); return null; }
   showToast('Generating release…');
   let r, data;
   try {
@@ -1841,12 +1847,19 @@ async function submitSimbriefGen(){
   if(time && time.length === 4){ set('deph', time.slice(0, 2)); set('depm', time.slice(2, 4)); }
   const url = 'https://dispatch.simbrief.com/options/custom?' + params.toString();
 
-  // Popup must open synchronously, before any await — Safari (and others)
-  // stop treating window.open as user-initiated once you're a tick removed
-  // from the actual click via an awaited fetch, and silently block it. We
-  // have everything we need synchronously now (no signed request to fetch
+  // Must open synchronously, before any await — Safari (and others) stop
+  // treating window.open as user-initiated once you're a tick removed from
+  // the actual click via an awaited fetch, and silently block it. We have
+  // everything we need synchronously now (no signed request to fetch
   // first), so open straight to the real URL.
-  const popup = window.open(url, 'SBworker', 'width=900,height=800');
+  //
+  // Deliberately NOT a named/sized popup ('SBworker', 'width=…,height=…')
+  // — those window features are exactly what makes a browser (and, in a
+  // home-screen PWA, the OS) treat this as an in-app popup instead of a
+  // real new tab. A plain window.open(url, '_blank') is what actually
+  // hands off to the external browser on a home-screen-installed app,
+  // while still returning a handle we can poll for .closed below.
+  const popup = window.open(url, '_blank');
   if(!popup){
     el.textContent = 'Please allow pop-ups for this site, then try again.';
     el.style.color = '#c0392b';
