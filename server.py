@@ -30,7 +30,7 @@ import aeroapi
 import pbs_parser
 import release_engine
 from fos_pages import AIRLINE_IATA
-from models import db, User, Leg, PbsImport, SignatureLog
+from models import db, User, Leg, PbsImport, SignatureLog, ReleaseCache
 import simbrief_ofp
 
 # PBS's "OPERATOR / FLEET" line carries the two-letter IATA code; SimBrief's
@@ -141,6 +141,16 @@ def _fleet_type_icao(code):
     code = (code or "").strip().upper()
     return _FLEET_TYPE_ICAO.get(code, code)
 
+
+def _js_str(s):
+    """Escape for embedding inside a double-quoted JS string literal, for
+    the "$var" pattern these templates' <script> blocks use throughout
+    (e.g. const LEG_ID = "$leg_id";). html.escape() is the wrong escaping
+    for this context — it's for HTML attributes/text, not JS string
+    content — and would corrupt (not just fail to protect) any value
+    containing a literal quote or backslash."""
+    return (s or "").replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "")
+
 app = Flask(__name__)
 LOG = logging.getLogger(__name__)
 
@@ -169,8 +179,25 @@ def _load_user(user_id):
     return db.session.get(User, int(user_id))
 
 
+def _ensure_columns():
+    """Bare-bones migration for the columns this app has added since its
+    first deploy — db.create_all() only creates tables that don't exist
+    yet, it never alters an existing one, so a new model column needs this
+    to actually show up on a database that's already running. Fine for this
+    app's pace of schema change; a real migrations tool (Alembic) would
+    replace this if that ever stops being true."""
+    from sqlalchemy import inspect, text as sa_text
+    inspector = inspect(db.engine)
+    existing = {c["name"] for c in inspector.get_columns("users")}
+    if "aeroapi_key" not in existing:
+        with db.engine.begin() as conn:
+            conn.execute(sa_text("ALTER TABLE users ADD COLUMN aeroapi_key VARCHAR(255)"))
+        LOG.info("Migrated: added users.aeroapi_key")
+
+
 with app.app_context():
     db.create_all()
+    _ensure_columns()
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +226,8 @@ AUTH_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
 <meta name="theme-color" content="#142c52">
 <title>$title – FOS</title>
 <style>
-  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#eef1f4;margin:0;padding:24px;color:#1a1f29;}
+  html,body{overscroll-behavior:none;background:#eef1f4;}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;margin:0;padding:24px;color:#1a1f29;}
   h1{font-size:18px;color:#144e94;margin:0 0 16px;}
   label{display:block;font-size:13px;font-weight:600;margin:10px 0 4px;}
   input[type=text],input[type=password]{width:100%;max-width:320px;font-family:inherit;font-size:13.5px;padding:9px 10px;border:1px solid #e3e6ea;border-radius:5px;box-sizing:border-box;background:#fbfbfc;}
@@ -496,6 +524,30 @@ def list_pbs_sequences():
     return jsonify(out)
 
 
+@app.route("/pbs/sequences", methods=["DELETE"])
+def clear_pbs_sequences():
+    """Clears this pilot's whole PBS import — the "start over" option
+    alongside deleting one sequence at a time below."""
+    row = _pbs_row()
+    if row:
+        db.session.delete(row)
+        db.session.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/pbs/sequences/<seq_number>", methods=["DELETE"])
+def delete_pbs_sequence(seq_number):
+    row = _pbs_row()
+    if not row:
+        return jsonify({"error": "not found"}), 404
+    remaining = [s for s in (row.sequences or []) if s["seq"] != seq_number]
+    if len(remaining) == len(row.sequences or []):
+        return jsonify({"error": "not found"}), 404
+    row.sequences = remaining
+    db.session.commit()
+    return jsonify({"ok": True})
+
+
 @app.route("/pbs/sequences/<seq_number>")
 def get_pbs_sequence(seq_number):
     seq = next((s for s in _pbs_sequences() if s["seq"] == seq_number), None)
@@ -686,14 +738,25 @@ def release_status():
 
 @app.route("/fos/<int:leg_id>/release", methods=["POST"])
 def generate_release(leg_id):
+    """Generates (or, by far the common case, just returns) this leg's
+    release PDFs. generate_release_pdfs() is a real SimBrief OFP fetch +
+    PDF render that takes up to a minute — both the Confirm view's
+    "Generate Release" button and the Documents PDF viewer hit this same
+    route/cache now, instead of each independently re-running it on every
+    click or page load. Pass {"force": true} to regenerate anyway (e.g.
+    gates changed since the cached copy, or the weather's gone stale)."""
     record = _get_leg(leg_id)
     if not record:
         return jsonify({"error": "not found"}), 404
 
+    body = request.get_json(silent=True) or {}
+    cached = ReleaseCache.query.filter_by(leg_id=leg_id).first()
+    if cached and not body.get("force"):
+        return jsonify({**cached.payload, "cached": True, "generated_at": cached.generated_at.isoformat()})
+
     if not release_engine.is_available():
         return jsonify({"error": release_engine.import_error()}), 503
 
-    body = request.get_json(silent=True) or {}
     user_id = body.get("user_id") or os.environ.get("SIMBRIEF_USER")
     if not user_id:
         return jsonify({"error": "no SimBrief user id — pass \"user_id\" or set SIMBRIEF_USER"}), 400
@@ -716,12 +779,19 @@ def generate_release(leg_id):
     except Exception as e:
         LOG.warning(f"Named-page extraction failed: {e}")
         named_pages = {}
-    for kind, field in (("fi", "fi_pdf_b64"), ("fil", "fil_pdf_b64"),
+    for kind, field in (("fi", "fi_pdf_b64"), ("fil", "fil_pdf_b64"), ("weather", "weather_pdf_b64"),
                          ("notams", "notams_pdf_b64"), ("field_report", "field_report_pdf_b64")):
         if named_pages.get(kind):
             payload[field] = base64.b64encode(named_pages[kind]).decode("ascii")
 
-    return jsonify(payload)
+    generated_at = datetime.now(timezone.utc)
+    if cached:
+        cached.filename, cached.payload, cached.generated_at = filename, payload, generated_at
+    else:
+        db.session.add(ReleaseCache(leg_id=leg_id, filename=filename, payload=payload, generated_at=generated_at))
+    db.session.commit()
+
+    return jsonify({**payload, "cached": False, "generated_at": generated_at.isoformat()})
 
 
 def _archive_rows():
@@ -744,6 +814,37 @@ def archive():
     return jsonify(slim)
 
 
+@app.route("/fos/<int:leg_id>", methods=["DELETE"])
+def delete_leg(leg_id):
+    """Removes one archived flight. Its cached release (tied 1:1 to this
+    leg) goes with it; the signature log is a separate audit trail and is
+    deliberately left alone — same reasoning as it already surviving a
+    leg being regenerated."""
+    row = _get_leg_row(leg_id)
+    if not row:
+        return jsonify({"error": "not found"}), 404
+    cached = ReleaseCache.query.filter_by(leg_id=leg_id).first()
+    if cached:
+        db.session.delete(cached)
+    if current_user.current_leg_id == leg_id:
+        current_user.current_leg_id = None
+    db.session.delete(row)
+    db.session.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/archive", methods=["DELETE"])
+def clear_archive():
+    """Removes every archived flight for this pilot."""
+    ReleaseCache.query.filter(ReleaseCache.leg_id.in_(
+        db.session.query(Leg.id).filter_by(user_id=current_user.id)
+    )).delete(synchronize_session=False)
+    Leg.query.filter_by(user_id=current_user.id).delete(synchronize_session=False)
+    current_user.current_leg_id = None
+    db.session.commit()
+    return jsonify({"ok": True})
+
+
 @app.route("/health")
 def health():
     # Unauthenticated (Railway healthcheck) — a DB-wide count, not scoped to
@@ -753,11 +854,21 @@ def health():
 
 @app.route("/settings/simbrief-user", methods=["POST"])
 def set_default_simbrief_user():
-    """Persists the pilot's SimBrief username on their account so it's
-    remembered on a new device/browser too — localStorage's fos_simbrief_user
-    stays the fast local read, this is just what seeds it elsewhere."""
+    """Persists the pilot's SimBrief username on their account — the
+    Settings view's release-user input is the only place this lives now,
+    server-rendered from here on every page load."""
     body = request.get_json(silent=True) or {}
     current_user.default_simbrief_user = (body.get("simbrief_user") or "").strip() or None
+    db.session.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/settings/aeroapi-key", methods=["POST"])
+def set_aeroapi_key():
+    """Persists the pilot's FlightAware AeroAPI key on their account, at
+    their explicit request — see the note on models.User.aeroapi_key."""
+    body = request.get_json(silent=True) or {}
+    current_user.aeroapi_key = (body.get("aeroapi_key") or "").strip() or None
     db.session.commit()
     return jsonify({"ok": True})
 
@@ -787,13 +898,19 @@ def _home_tile(icon_key, title, sub, href, enabled):
     )
 
 
+_TRASH_ICON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg>'
+
+
 def render_launcher_html():
+    archive_rows = _archive_rows()
     rows = "".join(
-        f'<a class="arow" href="/fos/{r["id"]}">{html.escape(r.get("flight_number") or "")} '
+        f'<div class="arow"><a class="arow-link" href="/fos/{r["id"]}">{html.escape(r.get("flight_number") or "")} '
         f'{html.escape(r.get("origin") or "")}\u2192{html.escape(r.get("destination") or "")} '
         f'<span>{html.escape(r.get("dep_date") or "")}</span></a>'
-        for r in _archive_rows()
+        f'<button class="arow-del" title="Delete this flight" onclick="deleteLeg({r["id"]})">{_TRASH_ICON_SVG}</button></div>'
+        for r in archive_rows
     ) or '<p class="empty">No legs generated yet.</p>'
+    clear_flights_link = '<button class="clear-all-link" onclick="clearAllFlights()">Clear All</button>' if archive_rows else ''
 
     current_leg = _get_leg(current_user.current_leg_id) if current_user.current_leg_id else None
     if current_leg:
@@ -806,8 +923,8 @@ def render_launcher_html():
 
     return Template(LAUNCHER_TEMPLATE).safe_substitute(
         rows=rows, current_flight_button=current_flight_button, request_data_button=request_data_button,
-        username=html.escape(current_user.username),
-        default_simbrief_user=html.escape(current_user.default_simbrief_user or ""),
+        username=html.escape(current_user.username), clear_flights_link=clear_flights_link,
+        default_simbrief_user=_js_str(current_user.default_simbrief_user),
     )
 
 
@@ -851,7 +968,11 @@ def render_fos_html(leg):
     ctx["signed_in_class"] = "" if ctx.get("signed_in") else "inactive"
     ctx["ffd_class"] = "" if ctx.get("fit_for_duty") else "inactive"
     ctx["signed_class"] = "signed" if ctx.get("signature") else ""
-    ctx["default_simbrief_user"] = current_user.default_simbrief_user or ""
+    # Raw user-typed account settings, not OFP/PBS data — escaped before
+    # landing in an HTML attribute since, unlike the rest of ctx, a pilot
+    # can type anything here.
+    ctx["default_simbrief_user"] = html.escape(current_user.default_simbrief_user or "")
+    ctx["aeroapi_key"] = html.escape(current_user.aeroapi_key or "")
     str_ctx = {k: ("" if v is None else str(v)) for k, v in ctx.items() if k != "signature"}
     return Template(FOS_TEMPLATE).safe_substitute(**str_ctx)
 
@@ -867,15 +988,20 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <title>FOS</title>
 <style>
-  html,body{height:100%;}
-  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#eef1f4;margin:0;padding:24px;color:#1a1f29;}
+  html,body{height:100%;overscroll-behavior:none;background:#eef1f4;}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;margin:0;padding:24px;color:#1a1f29;}
   h1{font-size:18px;color:#144e94;margin:0 0 16px;}
   label{display:block;font-size:13px;font-weight:600;margin:10px 0 4px;}
   textarea, select, input[type=text]{width:100%;max-width:640px;font-family:inherit;font-size:13.5px;padding:9px 10px;border:1px solid #e3e6ea;border-radius:5px;box-sizing:border-box;background:#fbfbfc;}
   textarea{height:160px;font-family:ui-monospace,Menlo,monospace;font-size:12.5px;}
   button{margin-top:10px;background:#1c63b7;color:#fff;border:none;padding:10px 18px;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;}
   button.secondary{background:#2fa355;}
-  .arow{display:block;background:#fff;border:1px solid #e3e6ea;border-radius:6px;padding:10px 14px;margin-bottom:8px;text-decoration:none;color:#1a1f29;font-size:13.5px;max-width:640px;}
+  .arow{display:flex;align-items:center;justify-content:space-between;gap:10px;background:#fff;border:1px solid #e3e6ea;border-radius:6px;padding:10px 14px;margin-bottom:8px;max-width:640px;}
+  .arow-link{flex:1;min-width:0;text-decoration:none;color:#1a1f29;font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .arow-del{flex:0 0 auto;background:none;border:none;color:#9aa1ab;cursor:pointer;padding:6px;margin:-6px;display:flex;}
+  .arow-del svg{width:16px;height:16px;}
+  .arow-del:hover{color:#c0392b;}
+  .clear-all-link{float:right;color:#1c63b7;font-size:12.5px;font-weight:600;background:none;border:none;cursor:pointer;padding:0;}
   .arow span{color:#6b7380;float:right;}
   .empty{color:#6b7380;font-style:italic;}
   .msg{margin-top:8px;font-size:13px;}
@@ -919,7 +1045,7 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
     $request_data_button
   </div>
 
-  <h1 style="margin-top:28px;font-size:15px;">Recent Flights</h1>
+  <h1 style="margin-top:28px;font-size:15px;">Recent Flights $clear_flights_link</h1>
   <div id="archive-list">$rows</div>
   <form method="POST" action="/logout" style="margin-top:28px;max-width:640px;">
     <button type="submit" style="width:100%;background:#6b7380;">Sign Out ($username)</button>
@@ -941,7 +1067,7 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
     <input type="file" id="pbs-file" accept=".txt,text/plain" onchange="loadPbsFile(event)">
     <div id="import-msg" class="msg"></div>
 
-    <h1 style="margin-top:28px;">Sequences</h1>
+    <h1 style="margin-top:28px;">Sequences <button class="clear-all-link" onclick="clearAllSequences()">Clear All</button></h1>
     <div id="seq-list"><p class="empty">No sequences imported yet.</p></div>
     <div id="seq-open-msg" class="msg"></div>
   </div>
@@ -1034,13 +1160,31 @@ function importPbs(text){
     .catch(e=>{ el.textContent = 'Request failed: ' + e; el.style.color = '#c0392b'; });
 }
 
+const TRASH_ICON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg>';
 function loadSequences(){
   fetch('/pbs/sequences').then(r=>r.json()).then(seqs=>{
     const list = document.getElementById('seq-list');
-    list.innerHTML = seqs.map(s =>
-      `<a class="arow" href="#" onclick="openSequence('${s.seq}');return false;">SEQ ${s.seq} — ${(s.routing||[]).join('-')} <span>${s.days} day(s)</span></a>`
-    ).join('') || '<p class="empty">No sequences imported yet.</p>';
+    list.innerHTML = seqs.map(s => `<div class="arow">
+      <a class="arow-link" href="#" onclick="openSequence('${s.seq}');return false;">SEQ ${s.seq} — ${(s.routing||[]).join('-')} <span>${s.days} day(s)</span></a>
+      <button class="arow-del" title="Delete this sequence" onclick="deleteSequence('${s.seq}')">${TRASH_ICON_SVG}</button>
+    </div>`).join('') || '<p class="empty">No sequences imported yet.</p>';
   });
+}
+function deleteSequence(seq){
+  if(!confirm('Delete SEQ ' + seq + '? This cannot be undone.')) return;
+  fetch('/pbs/sequences/' + encodeURIComponent(seq), {method:'DELETE'}).then(loadSequences);
+}
+function clearAllSequences(){
+  if(!confirm('Delete every imported sequence? This cannot be undone.')) return;
+  fetch('/pbs/sequences', {method:'DELETE'}).then(loadSequences);
+}
+function deleteLeg(id){
+  if(!confirm('Delete this flight? This cannot be undone.')) return;
+  fetch('/fos/' + id, {method:'DELETE'}).then(() => window.location.reload());
+}
+function clearAllFlights(){
+  if(!confirm('Delete every recent flight? This cannot be undone.')) return;
+  fetch('/archive', {method:'DELETE'}).then(() => window.location.reload());
 }
 
 async function openSequence(seq){
@@ -1189,8 +1333,8 @@ FOS_TEMPLATE = """<!DOCTYPE html>
     --red:#e0393e; --inactive:#9aa1ab; --radius:6px;
   }
   *{box-sizing:border-box;}
-  html,body{margin:0;padding:0;height:100%;}
-  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--value);-webkit-font-smoothing:antialiased;}
+  html,body{margin:0;padding:0;height:100%;overscroll-behavior:none;background:var(--bg);}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:var(--value);-webkit-font-smoothing:antialiased;}
   button{font-family:inherit;}
   :focus-visible{outline:2px solid var(--blue-dark);outline-offset:2px;}
   @media (prefers-reduced-motion: reduce){ *{transition:none !important;animation:none !important;} }
@@ -1282,6 +1426,9 @@ FOS_TEMPLATE = """<!DOCTYPE html>
       </button>
       <button class="side-btn" title="Web" onclick="showToast('Web')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.5 2.6 2.5 15.4 0 18M12 3c-2.5 2.6-2.5 15.4 0 18"/></svg>
+      </button>
+      <button class="side-btn" id="nav-settings" title="Settings" onclick="showView('settings')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.34 1.87l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.7 1.7 0 00-1.87-.34 1.7 1.7 0 00-1 1.55V21a2 2 0 11-4 0v-.09A1.7 1.7 0 009 19.4a1.7 1.7 0 00-1.87.34l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.7 1.7 0 004.6 15a1.7 1.7 0 00-1.55-1H3a2 2 0 110-4h.09A1.7 1.7 0 004.6 9a1.7 1.7 0 00-.34-1.87l-.06-.06a2 2 0 112.83-2.83l.06.06A1.7 1.7 0 009 4.6a1.7 1.7 0 001-1.55V3a2 2 0 114 0v.09a1.7 1.7 0 001 1.55 1.7 1.7 0 001.87-.34l.06-.06a2 2 0 112.83 2.83l-.06.06A1.7 1.7 0 0019.4 9a1.7 1.7 0 001.55 1H21a2 2 0 110 4h-.09a1.7 1.7 0 00-1.55 1z"/></svg>
       </button>
     </div>
   </nav>
@@ -1418,7 +1565,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         </div>
         <div class="doc-row">
           <div><div class="code">WX*</div><div class="desc">Winds &amp; Weather</div></div>
-          <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="showView('weather')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
+          <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('weather','Winds &amp; Weather')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
         </div>
         <div class="doc-row" style="border-bottom:none;">
           <div><div class="code">G*L/SS</div><div class="desc">Customers Requiring Special Services</div></div>
@@ -1487,20 +1634,13 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         </div>
       </div>
       <div class="status-bar"><span>SEQ $seq</span><span>$date</span></div>
-      <div class="search-block">
-        <label for="release-user">SimBrief Username</label>
-        <input id="release-user" type="text" placeholder="Your SimBrief username">
-      </div>
+      <p class="placeholder-note">SimBrief username and AeroAPI key are set once under <a href="#" onclick="showView('settings');return false;" style="color:var(--blue-dark);font-weight:600;">Settings</a> and apply to every flight.</p>
 
       <button class="section-bar" id="aero-bar" onclick="toggleSection('aero')">
         Route &amp; Gate Suggestions (FlightAware)
         <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
       </button>
       <div id="aero-body">
-        <div class="search-block">
-          <label for="aero-key">FlightAware AeroAPI Key</label>
-          <input id="aero-key" type="password" placeholder="Your AeroAPI key" onchange="localStorage.setItem('fos_aeroapi_key', this.value.trim())">
-        </div>
         <div style="padding:14px;background:var(--card);">
           <button id="aero-btn" onclick="fetchAeroSuggestions()" style="margin:0;width:100%;background:var(--blue);color:#fff;border:none;padding:11px;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;">Get Suggestions</button>
           <div id="aero-msg" style="margin-top:10px;font-size:13px;color:var(--label);"></div>
@@ -1525,8 +1665,8 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           <div class="search-block"><label for="sbgen-dest">Destination (ICAO)</label><input id="sbgen-dest" type="text" placeholder="ZZZZ"></div>
         </div>
         <div class="search-block">
-          <label for="sbgen-type">Aircraft Type — code (b738) or your saved airframe's Internal ID (123456_1582090020)</label>
-          <input id="sbgen-type" type="text" placeholder="b738 or 123456_1582090020">
+          <label for="sbgen-type">Aircraft Type — ICAO code (B738) or your saved airframe's Internal ID (123456_1582090020)</label>
+          <input id="sbgen-type" type="text" placeholder="B738 or 123456_1582090020">
         </div>
         <div class="search-block">
           <label for="sbgen-route">Route (optional — blank uses SimBrief's last-used route for this city pair)</label>
@@ -1537,8 +1677,8 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           <div class="search-block"><label for="sbgen-fltnum">Flight Number</label><input id="sbgen-fltnum" type="text"></div>
         </div>
         <div class="search-row">
-          <div class="search-block"><label for="sbgen-date">Date (DDMMMYY)</label><input id="sbgen-date" type="text" placeholder="18AUG26"></div>
-          <div class="search-block"><label for="sbgen-time">Dep Time, local (HHMM)</label><input id="sbgen-time" type="text"></div>
+          <div class="search-block"><label for="sbgen-date">Date</label><input id="sbgen-date" type="date"></div>
+          <div class="search-block"><label for="sbgen-time">Dep Time, local</label><input id="sbgen-time" type="time"></div>
         </div>
         <div class="search-block">
           <label for="sbgen-reg">Tail Number (optional)</label>
@@ -1551,6 +1691,24 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         </div>
       </div>
 
+    </section>
+    <section id="settings-view" class="view">
+      <div class="topbar">
+        <button class="back-link" onclick="showView('overview')">Back</button>
+        <div class="topbar-title">
+          <h1>Settings</h1>
+          <p>Applies to every flight on this account</p>
+        </div>
+      </div>
+      <div class="search-block">
+        <label for="release-user">SimBrief Username</label>
+        <input id="release-user" type="text" placeholder="Your SimBrief username" value="$default_simbrief_user" onchange="saveSimbriefUser(this.value)">
+      </div>
+      <div class="search-block">
+        <label for="aero-key">FlightAware AeroAPI Key</label>
+        <input id="aero-key" type="password" placeholder="Your AeroAPI key" value="$aeroapi_key" onchange="saveAeroApiKey(this.value)">
+      </div>
+      <div id="settings-msg" class="placeholder-note"></div>
     </section>
     <section id="confirm-view" class="view">
       <div class="topbar">
@@ -1601,7 +1759,6 @@ FOS_TEMPLATE = """<!DOCTYPE html>
 <div id="toast"></div>
 <script>
 const LEG_ID = "$leg_id";
-const SERVER_SIMBRIEF_USER = "$default_simbrief_user";
 const LEG_FLIGHT_NUMBER = "$flight_number";
 const LEG_ORIGIN = "$origin";
 const LEG_DESTINATION = "$destination";
@@ -1619,10 +1776,12 @@ function showView(view){
   document.getElementById('sign-view').classList.toggle('active', view==='sign');
   document.getElementById('pairing-view').classList.toggle('active', view==='pairing');
   document.getElementById('weather-view').classList.toggle('active', view==='weather');
+  document.getElementById('settings-view').classList.toggle('active', view==='settings');
   document.getElementById('nav-home').classList.toggle('active', view==='overview');
   document.getElementById('nav-docs').classList.toggle('active', view==='documents');
   document.getElementById('nav-release').classList.toggle('active', view==='release' || view==='confirm');
   document.getElementById('nav-pairing').classList.toggle('active', view==='pairing');
+  document.getElementById('nav-settings').classList.toggle('active', view==='settings');
   window.scrollTo(0,0);
   if(view === 'release') initReleaseView();
   if(view === 'confirm') initConfirmView();
@@ -1630,10 +1789,19 @@ function showView(view){
   if(view === 'pairing') initPairingView();
   if(view === 'weather' && !_weatherLoaded) loadWeather();
 }
+function saveSimbriefUser(value){
+  const user = value.trim();
+  fetch('/settings/simbrief-user', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({simbrief_user: user})})
+    .then(()=>{ document.getElementById('settings-msg').textContent = 'Saved.'; })
+    .catch(()=>{ document.getElementById('settings-msg').textContent = 'Could not save — try again.'; });
+}
+function saveAeroApiKey(value){
+  const key = value.trim();
+  fetch('/settings/aeroapi-key', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({aeroapi_key: key})})
+    .then(()=>{ document.getElementById('settings-msg').textContent = 'Saved.'; })
+    .catch(()=>{ document.getElementById('settings-msg').textContent = 'Could not save — try again.'; });
+}
 function initReleaseView(){
-  const input = document.getElementById('release-user');
-  const saved = localStorage.getItem('fos_simbrief_user') || SERVER_SIMBRIEF_USER;
-  if(saved && !input.value) input.value = saved;
   prefillSimbriefGen();
 }
 let _releaseStatusChecked = false;
@@ -1650,7 +1818,8 @@ function initConfirmView(){
   }).catch(()=>{});
 }
 async function prefillSimbriefGen(){
-  document.getElementById('aero-key').value = localStorage.getItem('fos_aeroapi_key') || '';
+  // aero-key and release-user are pre-filled server-side (Settings, under
+  // current_user) via the input's value attribute — nothing to do here.
   // Leg-specific aircraft data wins over the last-remembered one: a
   // SimBrief-loaded leg's fleet_type is already a real ICAO type code
   // (aircraft/icaocode); a PBS-pairing leg's raw equipment token gets
@@ -1659,8 +1828,8 @@ async function prefillSimbriefGen(){
   // unchanged otherwise.
   document.getElementById('sbgen-type').value = LEG_FLEET_TYPE_ICAO || LEG_EQUIPMENT_TYPE || localStorage.getItem('fos_simbrief_airframe') || '';
   document.getElementById('sbgen-fltnum').value = LEG_FLIGHT_NUMBER || '';
-  document.getElementById('sbgen-date').value = todayZuluDDMMMYY();
-  document.getElementById('sbgen-time').value = (LEG_SCHED_OUT || '').replace(':', '');
+  document.getElementById('sbgen-date').value = todayZuluISO();
+  document.getElementById('sbgen-time').value = LEG_SCHED_OUT || '';
   document.getElementById('sbgen-reg').value = LEG_TAIL_NUMBER || '';
 
   let orig = LEG_ORIGIN, dest = LEG_DESTINATION, airline = '';
@@ -1676,7 +1845,9 @@ async function prefillSimbriefGen(){
             if(l.flight_number === LEG_FLIGHT_NUMBER && l.origin === LEG_ORIGIN && l.destination === LEG_DESTINATION){
               orig = l.origin_icao || l.origin;
               dest = l.destination_icao || l.destination;
-              if(!document.getElementById('sbgen-time').value) document.getElementById('sbgen-time').value = l.dep_local || '';
+              if(!document.getElementById('sbgen-time').value && l.dep_local && l.dep_local.length === 4){
+                document.getElementById('sbgen-time').value = l.dep_local.slice(0, 2) + ':' + l.dep_local.slice(2);
+              }
               break outer;
             }
           }
@@ -1699,7 +1870,6 @@ async function fetchAeroSuggestions(){
   document.getElementById('aero-results').style.display = 'none';
   if(!key){ msg.textContent = 'Enter your AeroAPI key first.'; msg.style.color = '#c0392b'; return; }
   if(!orig || !dest){ msg.textContent = 'Origin and Destination are required — set those in Generate Flight Plan below first.'; msg.style.color = '#c0392b'; return; }
-  localStorage.setItem('fos_aeroapi_key', key);
 
   btn.disabled = true;
   msg.textContent = 'Looking up AA at ' + orig + ' / ' + dest + '…';
@@ -1743,21 +1913,23 @@ async function applyAeroGates(){
     showToast('Gates applied');
   } catch(e) { showToast('Request failed: ' + e); }
 }
-function generateRelease(){
+function generateRelease(force){
   const btn = document.getElementById('release-gen-btn');
   const status = document.getElementById('release-status');
-  const userId = localStorage.getItem('fos_simbrief_user') || SERVER_SIMBRIEF_USER;
-  if(!userId){ status.textContent = 'No SimBrief username on file — go back and send this flight to SimBrief first.'; status.style.color = '#c0392b'; return; }
+  const userId = document.getElementById('release-user').value.trim();
+  if(!userId){ status.textContent = 'No SimBrief username on file — set one in Settings first.'; status.style.color = '#c0392b'; return; }
   btn.disabled = true;
   status.style.color = '';
-  status.textContent = 'Generating release — this can take up to a minute…';
+  status.textContent = force ? 'Regenerating — this can take up to a minute…' : 'Generating release — this can take up to a minute…';
   document.getElementById('release-downloads').style.display = 'none';
-  fetch('/fos/' + LEG_ID + '/release', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({user_id:userId})})
+  fetch('/fos/' + LEG_ID + '/release', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({user_id:userId, force: !!force})})
     .then(r => r.json().then(data => ({ok:r.ok, data})))
     .then(({ok, data}) => {
       btn.disabled = false;
       if(!ok){ status.textContent = 'Failed: ' + (data.error || 'unknown error'); status.style.color = '#c0392b'; return; }
-      status.textContent = 'Release generated.';
+      _releaseCache = data; // ensureRelease()/viewDoc() reuse this — one generation serves both paths
+      status.innerHTML = (data.cached ? 'Release already on file (generated ' + new Date(data.generated_at).toLocaleString() + ').' : 'Release generated.')
+        + ' <a href="#" onclick="generateRelease(true);return false;" style="color:inherit;">Regenerate</a>';
       status.style.color = '#2fa355';
       const rlsLink = document.getElementById('release-rls-link');
       rlsLink.href = 'data:application/pdf;base64,' + data.rls_pdf_b64;
@@ -1810,7 +1982,7 @@ function showToast(msg){
 let _releaseCache = null;
 async function ensureRelease(){
   if(_releaseCache) return _releaseCache;
-  const userId = localStorage.getItem('fos_simbrief_user') || SERVER_SIMBRIEF_USER;
+  const userId = document.getElementById('release-user').value.trim();
   if(!userId){ showToast('Send this flight to SimBrief first to get a username on file'); return null; }
   showToast('Generating release…');
   let r, data;
@@ -2110,27 +2282,36 @@ async function cacheAllPairingLegs(seqData, position, msgEl){
   msgEl.style.color = fails.length ? '#c0392b' : '#2fa355';
 }
 
-function todayZuluDDMMMYY(){
-  const months = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
-  const d = new Date();
-  return String(d.getUTCDate()).padStart(2, '0') + months[d.getUTCMonth()] + String(d.getUTCFullYear()).slice(-2);
+const _DDMMMYY_MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+function todayZuluISO(){
+  return new Date().toISOString().slice(0, 10);
+}
+// The date input hands back "YYYY-MM-DD"; SimBrief's URL param wants
+// "DDMMMYY" (e.g. "18AUG26"). Split on '-' rather than parsing as a Date
+// to avoid UTC/local timezone shifting the day.
+function isoDateToDDMMMYY(iso){
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || '');
+  if(!m) return '';
+  const [, year, month, day] = m;
+  return day + _DDMMMYY_MONTHS[parseInt(month, 10) - 1] + year.slice(-2);
 }
 
 async function submitSimbriefGen(){
   const el = document.getElementById('sbgen-msg');
   const btn = document.getElementById('sbgen-btn');
   const user = document.getElementById('release-user').value.trim();
-  const type = document.getElementById('sbgen-type').value.trim().toLowerCase();
+  const type = document.getElementById('sbgen-type').value.trim().toUpperCase();
   const orig = document.getElementById('sbgen-orig').value.trim().toUpperCase();
   const dest = document.getElementById('sbgen-dest').value.trim().toUpperCase();
   const route = document.getElementById('sbgen-route').value.trim();
   const airline = document.getElementById('sbgen-airline').value.trim().toUpperCase();
   const fltnum = document.getElementById('sbgen-fltnum').value.trim();
-  const date = document.getElementById('sbgen-date').value.trim().toUpperCase();
+  const date = isoDateToDDMMMYY(document.getElementById('sbgen-date').value);
   const time = document.getElementById('sbgen-time').value.trim();
+  const [depH, depM] = time.split(':');
   const reg = document.getElementById('sbgen-reg').value.trim().toUpperCase();
 
-  if(!user){ el.textContent = 'Enter your SimBrief username first.'; el.style.color = '#c0392b'; return; }
+  if(!user){ el.textContent = 'Set your SimBrief username in Settings first.'; el.style.color = '#c0392b'; return; }
   if(!orig || !dest){ el.textContent = 'Origin and destination are required.'; el.style.color = '#c0392b'; return; }
   if(!type){ el.textContent = 'Enter the SimBrief aircraft type code first.'; el.style.color = '#c0392b'; return; }
   localStorage.setItem('fos_simbrief_user', user);
@@ -2145,52 +2326,54 @@ async function submitSimbriefGen(){
   const set = (k, v) => { if(v) params.set(k, v); };
   set('orig', orig); set('dest', dest); set('type', type); set('route', route);
   set('airline', airline); set('fltnum', fltnum); set('date', date); set('reg', reg);
-  if(time && time.length === 4){ set('deph', time.slice(0, 2)); set('depm', time.slice(2, 4)); }
+  if(depH && depM){ set('deph', depH); set('depm', depM); }
   const url = 'https://dispatch.simbrief.com/options/custom?' + params.toString();
 
-  // Must open synchronously, before any await — Safari (and others) stop
-  // treating window.open as user-initiated once you're a tick removed from
-  // the actual click via an awaited fetch, and silently block it. We have
+  // Must fire synchronously, before any await — Safari (and others) stop
+  // treating this as user-initiated once you're a tick removed from the
+  // actual click via an awaited fetch, and silently block it. We have
   // everything we need synchronously now (no signed request to fetch
   // first), so open straight to the real URL.
   //
-  // Deliberately NOT a named/sized popup ('SBworker', 'width=…,height=…')
-  // — those window features are exactly what makes a browser (and, in a
-  // home-screen PWA, the OS) treat this as an in-app popup instead of a
-  // real new tab. A plain window.open(url, '_blank') is what actually
-  // hands off to the external browser on a home-screen-installed app,
-  // while still returning a handle we can poll for .closed below.
-  const popup = window.open(url, '_blank');
-  if(!popup){
-    el.textContent = 'Please allow pop-ups for this site, then try again.';
-    el.style.color = '#c0392b';
-    return;
-  }
+  // A real <a target="_blank"> click, not window.open() — on a home-screen
+  // installed iPad/iPhone PWA (standalone display mode, no browser chrome
+  // to open a new tab in), window.open() routinely no-ops instead of
+  // handing off to Safari. WebKit's standalone-mode webview does honor a
+  // genuine anchor click with target="_blank" as an external-link intent
+  // the way window.open() isn't reliably treated as. This degrades to an
+  // ordinary new tab everywhere else window.open() already worked.
+  const link = document.createElement('a');
+  link.href = url;
+  link.target = '_blank';
+  link.rel = 'noopener';
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
 
   btn.disabled = true;
-  el.textContent = 'Complete the flight plan on SimBrief’s dispatch page — this tab will pick it up once you’re done.';
+  el.textContent = 'Complete the flight plan on SimBrief’s dispatch page — this tab will pick it up automatically once you’re done.';
   el.style.color = '';
 
-  // No signed request means no deterministic ofp_id to poll for — instead,
-  // snapshot the account's current OFP generation timestamp now, and after
-  // the tab closes, wait for that timestamp to change before treating a
-  // plan as "new" (rather than re-pulling whatever was already there).
+  // No signed request means no deterministic ofp_id to poll for, and no
+  // window handle to watch for .closed (an <a> click doesn't hand one
+  // back the way window.open() did) — so snapshot the account's current
+  // OFP generation timestamp and poll straight away for it to change,
+  // rather than waiting on any "they came back" signal at all.
   let beforeTs = '';
   try {
     const r = await fetch('/simbrief-api/generated-at?user=' + encodeURIComponent(user));
     beforeTs = (await r.json()).time_generated || '';
   } catch(e) { /* best-effort */ }
 
-  const closeWatcher = setInterval(() => {
-    if(!popup.closed) return;
-    clearInterval(closeWatcher);
-    el.textContent = 'Checking for the generated flight plan…';
-    pollSimbriefReady(user, beforeTs, el, btn, 0);
-  }, 500);
+  pollSimbriefReady(user, beforeTs, el, btn, 0);
 }
 
 async function pollSimbriefReady(user, beforeTs, el, btn, attempt){
-  if(attempt > 40){
+  // Polling starts the moment the SimBrief tab opens now (no "tab closed"
+  // signal to wait on — see submitSimbriefGen), so this has to cover
+  // however long someone takes filling out fuel/alternates/etc. on
+  // SimBrief's own page, not just a quick confirm. ~15 minutes at 5s.
+  if(attempt > 180){
     el.textContent = 'No new flight plan detected — if you generated one, try Load from SimBrief manually.';
     el.style.color = '#c0392b';
     btn.disabled = false;
@@ -2217,13 +2400,13 @@ async function pollSimbriefReady(user, beforeTs, el, btn, attempt){
     }
     return;
   }
-  setTimeout(() => pollSimbriefReady(user, beforeTs, el, btn, attempt + 1), 3000);
+  setTimeout(() => pollSimbriefReady(user, beforeTs, el, btn, attempt + 1), 5000);
 }
 
 let _weatherLoaded = false;
 async function loadWeather(){
   const body = document.getElementById('weather-body');
-  const userId = localStorage.getItem('fos_simbrief_user') || SERVER_SIMBRIEF_USER;
+  const userId = document.getElementById('release-user').value.trim();
   if(!userId){
     body.innerHTML = '<p class="placeholder-note">Send this flight to SimBrief first to get a username on file.</p>';
     return;

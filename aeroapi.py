@@ -6,9 +6,12 @@ code might say. "American" here means mainline AA (operator_icao "AAL") or
 a regional partner flying it under an American Eagle codeshare (see
 _is_aa_flight) — most short/thin AA markets are regional-only, so mainline
 alone under-reports real AA service. Each pilot brings their own AeroAPI
-key (a paid FlightAware subscription); this module is a stateless
-pass-through for it — the key is never written to disk here, only sent on
-to FlightAware per request.
+key (a paid FlightAware subscription); this module itself is a stateless
+pass-through for it — it never writes the key anywhere, only relays it to
+FlightAware per request. Callers may still persist it themselves: as of
+2026-08-19, server.py saves it on the pilot's own account (models.User.
+aeroapi_key) at their explicit request, a deliberate reversal of this
+module's original "never stored" design.
 
 Gates come from AA's *airport*-level recent departures/arrivals — AA's
 typical gate at an airport doesn't depend on which city pair is being

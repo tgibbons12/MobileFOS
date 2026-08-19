@@ -28,6 +28,10 @@ class User(UserMixin, db.Model):
     # Replaces the old fos_simbrief_user localStorage key so it follows the
     # pilot across devices instead of being stuck on one browser.
     default_simbrief_user = db.Column(db.String(64))
+    # A paid FlightAware credential, persisted per pilot at their explicit
+    # request (2026-08-19) — this reverses aeroapi.py's original "never
+    # stored" design; that module's docstring has been updated to match.
+    aeroapi_key = db.Column(db.String(255))
     # Replaces fos_last_leg — which leg this pilot was last on, so "Current
     # Flight" / "Request New Data" on Home can be computed server-side.
     current_leg_id = db.Column(db.Integer)
@@ -60,6 +64,22 @@ class PbsImport(db.Model):
     meta = db.Column(db.JSON)
     sequences = db.Column(db.JSON, default=list)
     updated_at = db.Column(db.DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class ReleaseCache(db.Model):
+    """The last-generated release PDFs for a leg, keyed 1:1 on the leg —
+    generate_release_pdfs() takes up to a minute (it's a real SimBrief OFP
+    fetch + PDF render), so both the Confirm view's "Generate Release"
+    button and the Documents PDF viewer hit this cache instead of each
+    independently re-running it on every click/page load. payload holds
+    the same {rls_pdf_b64, wb_pdf_b64, fi_pdf_b64, ...} dict the /release
+    route already returned before caching existed."""
+    __tablename__ = "release_cache"
+    id = db.Column(db.Integer, primary_key=True)
+    leg_id = db.Column(db.Integer, db.ForeignKey("legs.id"), unique=True, nullable=False)
+    filename = db.Column(db.String(255))
+    payload = db.Column(db.JSON, nullable=False, default=dict)
+    generated_at = db.Column(db.DateTime(timezone=True), default=_now)
 
 
 class SignatureLog(db.Model):

@@ -154,6 +154,11 @@ def extract_named_pages(rls_bytes):
       fi / fil       — fos_pages.build_fi_page()/build_fil_page()'s header
                         lines ("FI<flt>/..." / "FIL<flt>/..."). First match
                         only — each is always exactly one page.
+      weather        — MASTERLOG's weather section (_apt_header + a
+                        _cat_banner("TAF")/_cat_banner("METAR") per station,
+                        rendered right before NOTAMs "in NOTAM-compatible
+                        token format"). All matching pages combined, in
+                        document order.
       notams         — MASTERLOG._airport_notam_header()'s banner
                         ('=' * 72 rules around each airport block). All
                         matching pages are combined into one PDF, in
@@ -162,27 +167,39 @@ def extract_named_pages(rls_bytes):
                         REPORT *" header, one per origin/destination
                         station. All matches combined the same way.
 
+    weather and notams share the exact same '=' * 72 airport-block banner
+    by design (_apt_header / _airport_notam_header both "match OFP badge
+    style") — that banner alone can't tell them apart. What does: every
+    weather station block always renders a "TAF"/"METAR" category banner
+    right after its header (_cat_banner), even when the underlying report
+    is NIL, so checking for that text first (before falling through to the
+    bare '=' banner check) is what keeps weather pages out of the notams
+    bucket instead of silently merged into it.
+
     Not independently verified against a real generated release from this
     app (needs a live SimBrief OFP this environment doesn't have) — if a
     kind turns out empty or wrong, that's a marker-pattern fix here, not a
     sign the underlying page generation is broken.
 
-    Returns {"fi": bytes|None, "fil": bytes|None, "notams": bytes|None,
-    "field_report": bytes|None}; a miss just means that page wasn't found,
-    not an error — callers treat it as "not available", not fatal.
+    Returns {"fi": bytes|None, "fil": bytes|None, "weather": bytes|None,
+    "notams": bytes|None, "field_report": bytes|None}; a miss just means
+    that page wasn't found, not an error — callers treat it as "not
+    available", not fatal.
     """
     import re
     from pypdf import PdfReader, PdfWriter
 
     reader = PdfReader(io.BytesIO(rls_bytes))
     single = {"fi": None, "fil": None}
-    multi = {"notams": [], "field_report": []}
+    multi = {"weather": [], "notams": [], "field_report": []}
     for page in reader.pages:
         text = (page.extract_text() or "")[:600]
         if re.search(r'\bFIL\d', text) and single["fil"] is None:
             single["fil"] = page
         elif re.search(r'\bFI\d', text) and single["fi"] is None:
             single["fi"] = page
+        elif re.search(r'\bMETAR\b|\bTAF\b', text):
+            multi["weather"].append(page)
         elif re.search(r'={20,}', text):
             multi["notams"].append(page)
         elif re.search(r'FIELD REPORT', text):
