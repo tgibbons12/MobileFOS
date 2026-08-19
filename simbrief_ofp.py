@@ -96,10 +96,23 @@ def fetch_ofp_leg_fields(simbrief_user, timeout=15):
         except ValueError:
             return ""
 
+    def tz_diff():
+        """Destination minus origin UTC offset (hours), signed — same two
+        OFP fields fos_pages.py already reads for the printed release, just
+        never surfaced on the FOS leg schema until now."""
+        orig_raw, dest_raw = text("times/orig_timezone"), text("times/dest_timezone")
+        if not orig_raw or not dest_raw:
+            return ""
+        try:
+            return f"{int(float(dest_raw)) - int(float(orig_raw)):+d}"
+        except ValueError:
+            return ""
+
     fields = {
         "flight_number": text("general/flight_number"),
         "origin": text("origin/icao_code"),
         "destination": text("destination/icao_code"),
+        "tz_diff": tz_diff(),
         "dep_date": epoch_to("%m/%d/%y", "times/sched_out"),
         "arr_date": epoch_to("%m/%d/%y", "times/sched_in"),
         "sched_out": epoch_to("%H:%M", "times/sched_out"),

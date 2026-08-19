@@ -23,12 +23,14 @@ import time
 from datetime import datetime, timezone
 
 import requests
-from flask import Flask, request, jsonify, Response, redirect
+from flask import Flask, request, jsonify, Response, redirect, url_for
+from flask_login import LoginManager, current_user, login_user, logout_user
 from string import Template
 import aeroapi
 import pbs_parser
 import release_engine
 from fos_pages import AIRLINE_IATA
+from models import db, User, Leg, PbsImport, SignatureLog
 import simbrief_ofp
 
 # PBS's "OPERATOR / FLEET" line carries the two-letter IATA code; SimBrief's
@@ -99,28 +101,181 @@ def _airport_icao(code):
     return _load_iata_to_icao_airports().get(code, code)
 
 
-# PBS's A320-family equipment codes are keyed by sub-fleet prefix, not the
-# aircraft's own type number — confirmed convention, not a guess: 31x is
-# the A319 sub-fleet, 21x is the A321 sub-fleet, 32x is the A320 sub-fleet.
-# Extend as more prefixes get confirmed; anything unmapped (including
-# already-ICAO codes like "B738" from a SimBrief-loaded leg) passes
-# through unchanged.
-_FLEET_TYPE_ICAO_PREFIX = {
-    "31": "A319",
-    "21": "A321",
-    "32": "A320",
+# PBS's equipment codes are keyed by exact sub-fleet code, not a shared
+# prefix — a prefix scheme can't work here since it collides on real codes
+# (21A/21C/21D/21S are A321ceo but 21Q is A321neo; 73G is a 737-700 but
+# 73S/73W are 737-800; 39E is a 767 but 39N is an A330; E70 is an E170 but
+# E7L/E7S/E7W are E175s; E90 is an E190 but E95 is an E195). Table below is
+# straight off the operator's own OPERATOR/FLEET sub-fleet reference
+# (equipment code -> aircraft), not guessed. Extend as more codes get
+# confirmed; anything unmapped (including already-ICAO codes like "B738"
+# from a SimBrief-loaded leg) passes through unchanged.
+_FLEET_TYPE_ICAO = {
+    "19E": "A319", "19F": "A319", "19S": "A319",
+    "1NX": "A21N",
+    "20N": "A20N",
+    "21A": "A321", "21C": "A321", "21D": "A321", "21S": "A321",
+    "21Q": "A21N",
+    "2NX": "A21N", "2NY": "A21N",
+    "32A": "A320", "32B": "A320", "32C": "A320", "32S": "A320",
+    "32N": "A20N",
+    "39E": "B739",
+    "39N": "A339",
+    "738": "B738",
+    "73G": "B737",
+    "73S": "B738", "73W": "B738",
+    "75E": "B753",
+    "75F": "B752", "75P": "B752", "75S": "B752",
+    "76F": "B763", "76J": "B763", "76T": "B763",
+    "77E": "B772",
+    "7M8": "B38M",
+    "DH4": "DH8D",
+    "E70": "E170",
+    "E7L": "E175", "E7S": "E175", "E7W": "E175",
+    "E90": "E190",
+    "E95": "E195",
 }
 
 
 def _fleet_type_icao(code):
     code = (code or "").strip().upper()
-    return _FLEET_TYPE_ICAO_PREFIX.get(code[:2], code)
+    return _FLEET_TYPE_ICAO.get(code, code)
 
 app = Flask(__name__)
 LOG = logging.getLogger(__name__)
 
-_store = {"current": None, "archive": [], "next_id": 1}
-_pbs_store = {"meta": None, "sequences": []}
+# Railway's Postgres plugin injects DATABASE_URL as "postgres://", which
+# SQLAlchemy 1.4+/psycopg2 reject — they want "postgresql://". Falls back to
+# a local SQLite file when DATABASE_URL isn't set at all, so local dev never
+# needs a real Postgres instance running.
+_db_url = os.environ.get("DATABASE_URL", "sqlite:///fos.db")
+if _db_url.startswith("postgres://"):
+    _db_url = _db_url.replace("postgres://", "postgresql://", 1)
+app.config["SQLALCHEMY_DATABASE_URI"] = _db_url
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+app.secret_key = os.environ.get("SECRET_KEY")
+if not app.secret_key:
+    app.secret_key = "dev-insecure-secret-change-me"
+    LOG.warning("SECRET_KEY not set — using an insecure dev default. Set a real SECRET_KEY before deploying.")
+db.init_app(app)
+
+login_manager = LoginManager()
+login_manager.init_app(app)
+login_manager.login_view = "login"
+
+
+@login_manager.user_loader
+def _load_user(user_id):
+    return db.session.get(User, int(user_id))
+
+
+with app.app_context():
+    db.create_all()
+
+
+# ---------------------------------------------------------------------------
+# Auth — this is a personal/crew tool, not a public site, so the whole app
+# sits behind a login rather than decorating each of the ~18 routes below.
+# ---------------------------------------------------------------------------
+_PUBLIC_ENDPOINTS = {"login", "register", "health", "static"}
+
+
+@app.before_request
+def _require_login():
+    if request.endpoint in _PUBLIC_ENDPOINTS or request.endpoint is None:
+        return None
+    if current_user.is_authenticated:
+        return None
+    # A redirect would hand back an HTML login page to a fetch() call that
+    # expects JSON — only the full-page GETs (opening a URL directly) should
+    # redirect; POST/etc (all the in-app API calls) get a plain 401 instead.
+    if request.method == "GET":
+        return redirect(url_for("login", next=request.path))
+    return jsonify({"error": "login required"}), 401
+
+
+AUTH_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#142c52">
+<title>$title – FOS</title>
+<style>
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#eef1f4;margin:0;padding:24px;color:#1a1f29;}
+  h1{font-size:18px;color:#144e94;margin:0 0 16px;}
+  label{display:block;font-size:13px;font-weight:600;margin:10px 0 4px;}
+  input[type=text],input[type=password]{width:100%;max-width:320px;font-family:inherit;font-size:13.5px;padding:9px 10px;border:1px solid #e3e6ea;border-radius:5px;box-sizing:border-box;background:#fbfbfc;}
+  button{margin-top:16px;background:#1c63b7;color:#fff;border:none;padding:10px 18px;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;}
+  .panel{max-width:320px;padding:14px;background:#fff;border:1px solid #e3e6ea;border-radius:6px;margin-top:10px;}
+  .msg{margin-top:8px;font-size:13px;color:#c0392b;}
+  .switch{margin-top:14px;font-size:13px;}
+  .switch a{color:#1c63b7;}
+</style></head><body>
+<h1>$title</h1>
+<div class="panel">
+  <form method="POST">
+    <label for="username">Username</label>
+    <input id="username" name="username" type="text" autocomplete="username" required autofocus>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="$autocomplete" required>
+    <br><button type="submit">$button_label</button>
+  </form>
+  $error_html
+</div>
+<div class="switch">$switch_html</div>
+</body></html>"""
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if current_user.is_authenticated:
+        return redirect(url_for("index"))
+    error = ""
+    if request.method == "POST":
+        username = (request.form.get("username") or "").strip()
+        password = request.form.get("password") or ""
+        user = User.query.filter_by(username=username).first()
+        if user and user.check_password(password):
+            login_user(user, remember=True)
+            return redirect(request.args.get("next") or url_for("index"))
+        error = "Wrong username or password."
+    error_html = f'<div class="msg">{html.escape(error)}</div>' if error else ""
+    return Response(Template(AUTH_TEMPLATE).safe_substitute(
+        title="Sign In", autocomplete="current-password", button_label="Sign In",
+        error_html=error_html, switch_html='New here? <a href="/register">Create an account</a>',
+    ), mimetype="text/html")
+
+
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    if current_user.is_authenticated:
+        return redirect(url_for("index"))
+    error = ""
+    if request.method == "POST":
+        username = (request.form.get("username") or "").strip()
+        password = request.form.get("password") or ""
+        if not username or not password:
+            error = "Username and password are both required."
+        elif len(password) < 8:
+            error = "Password must be at least 8 characters."
+        elif User.query.filter_by(username=username).first():
+            error = "That username is taken."
+        else:
+            user = User(username=username)
+            user.set_password(password)
+            db.session.add(user)
+            db.session.commit()
+            login_user(user, remember=True)
+            return redirect(url_for("index"))
+    error_html = f'<div class="msg">{html.escape(error)}</div>' if error else ""
+    return Response(Template(AUTH_TEMPLATE).safe_substitute(
+        title="Create Account", autocomplete="new-password", button_label="Create Account",
+        error_html=error_html, switch_html='Already have an account? <a href="/login">Sign in</a>',
+    ), mimetype="text/html")
+
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    logout_user()
+    return redirect(url_for("login"))
 
 DEFAULT_LEG = {
     "seq": "", "date": "", "flight_number": "", "origin": "", "destination": "",
@@ -135,9 +290,6 @@ DEFAULT_LEG = {
     "block_fuel": "", "takeoff_fuel": "", "landing_fuel": "", "trip_fuel": "",
     "taxi_fuel": "", "reserve_fuel": "", "alternate_fuel": "", "contingency_fuel": "", "extra_fuel": "",
 }
-
-_signature_log = []
-
 
 # ---------------------------------------------------------------------------
 # Integration seam. This is where your existing tools plug in. Left as a
@@ -182,10 +334,47 @@ def build_leg_from_sources(payload):
 
 
 def _find(flight_number, dep_date):
-    for rec in _store["archive"]:
-        if rec.get("flight_number") == flight_number and rec.get("dep_date") == dep_date:
-            return rec
-    return None
+    """The ORM row (not a plain dict) — only consumer is _store_leg, which
+    needs to mutate/insert it."""
+    return Leg.query.filter_by(
+        user_id=current_user.id, flight_number=flight_number, dep_date=dep_date,
+    ).first()
+
+
+def _get_leg_row(leg_id):
+    return Leg.query.filter_by(id=leg_id, user_id=current_user.id).first()
+
+
+def _get_leg(leg_id):
+    """Plain dict (with "id") for a read-only route — see _get_leg_row for
+    routes that need to mutate it."""
+    row = _get_leg_row(leg_id)
+    return {**row.data, "id": row.id} if row else None
+
+
+def _save_leg(row, data):
+    """Persist a leg dict back onto its row. JSON columns only pick up
+    reassignment, not in-place mutation — always hand this a fresh dict
+    built with {**row.data, ...}, never row.data[...] = ... directly."""
+    data = dict(data)
+    data.pop("id", None)
+    row.data = data
+    db.session.commit()
+    return {**row.data, "id": row.id}
+
+
+def _pbs_row():
+    return PbsImport.query.filter_by(user_id=current_user.id).first()
+
+
+def _pbs_sequences():
+    row = _pbs_row()
+    return row.sequences if row and row.sequences else []
+
+
+def _pbs_meta():
+    row = _pbs_row()
+    return (row.meta if row else None) or {}
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +383,7 @@ def _find(flight_number, dep_date):
 def _store_leg(leg):
     """Shared by /generate and the PBS import path: dedupe-or-insert + archive."""
     leg = {**DEFAULT_LEG, **leg}
+    leg.pop("id", None)
     existing = _find(leg.get("flight_number"), leg.get("dep_date"))
     if existing:
         # OR, not overwrite: a regenerate (e.g. "Request New Data" re-sending
@@ -201,19 +391,23 @@ def _store_leg(leg):
         # also shouldn't swallow build_leg_from_sources() setting signed_in
         # True on fresh OFP data — plain overwrite-from-old was doing exactly
         # that, silently discarding the auto-sign-in this same session added.
-        signed_in = existing["signed_in"] or leg.get("signed_in", False)
-        ffd = existing["fit_for_duty"] or leg.get("fit_for_duty", False)
-        rec_id = existing["id"]
-        existing.update(leg)
-        existing["signed_in"], existing["fit_for_duty"], existing["id"] = signed_in, ffd, rec_id
-        record = existing
+        signed_in = existing.data.get("signed_in") or leg.get("signed_in", False)
+        ffd = existing.data.get("fit_for_duty") or leg.get("fit_for_duty", False)
+        merged = {**existing.data, **leg, "signed_in": signed_in, "fit_for_duty": ffd}
+        existing.data = merged
+        existing.flight_number = merged.get("flight_number")
+        existing.dep_date = merged.get("dep_date")
+        row = existing
     else:
-        record = dict(leg)
-        record["id"] = _store["next_id"]
-        _store["next_id"] += 1
-        _store["archive"].insert(0, record)
-    _store["current"] = record
-    return record
+        row = Leg(
+            user_id=current_user.id, flight_number=leg.get("flight_number"),
+            dep_date=leg.get("dep_date"), data=leg,
+        )
+        db.session.add(row)
+        db.session.flush()  # populate row.id before we use it below
+    current_user.current_leg_id = row.id
+    db.session.commit()
+    return {**row.data, "id": row.id}
 
 
 @app.route("/generate", methods=["POST"])
@@ -232,11 +426,14 @@ def generate():
     if ofp_error and not leg.get("flight_number"):
         return jsonify({"error": f"couldn't load SimBrief OFP: {ofp_error}"}), 502
     if carry_from:
-        src = next((r for r in _store["archive"] if str(r["id"]) == str(carry_from)), None)
-        if src:
+        try:
+            src_row = _get_leg_row(int(carry_from))
+        except (TypeError, ValueError):
+            src_row = None
+        if src_row:
             for key in ("dep_gate", "arr_gate"):
-                if src.get(key) and not leg.get(key):
-                    leg[key] = src[key]
+                if src_row.data.get(key) and not leg.get(key):
+                    leg[key] = src_row.data[key]
     record = _store_leg(leg)
     return jsonify({"fos_url": f"/fos/{record['id']}", "id": record["id"]})
 
@@ -251,8 +448,13 @@ def import_pbs():
         return jsonify({"error": "empty body — POST the raw PBS bid-pack text"}), 400
     meta = pbs_parser.parse_pbs_meta(text)
     sequences = pbs_parser.parse_pbs(text)
-    _pbs_store["meta"] = meta
-    _pbs_store["sequences"] = sequences
+    row = _pbs_row()
+    if not row:
+        row = PbsImport(user_id=current_user.id)
+        db.session.add(row)
+    row.meta = meta
+    row.sequences = sequences
+    db.session.commit()
     return jsonify({
         "meta": meta,
         "sequences_parsed": len(sequences),
@@ -278,7 +480,7 @@ def _sequence_routing(seq):
 @app.route("/pbs/sequences")
 def list_pbs_sequences():
     out = []
-    for s in _pbs_store["sequences"]:
+    for s in _pbs_sequences():
         first_day = s["duty_days"][0]
         last_day = s["duty_days"][-1]
         first_leg = first_day["legs"][0] if first_day["legs"] else None
@@ -296,11 +498,11 @@ def list_pbs_sequences():
 
 @app.route("/pbs/sequences/<seq_number>")
 def get_pbs_sequence(seq_number):
-    seq = next((s for s in _pbs_store["sequences"] if s["seq"] == seq_number), None)
+    seq = next((s for s in _pbs_sequences() if s["seq"] == seq_number), None)
     if not seq:
         return jsonify({"error": "not found"}), 404
     out = dict(seq)
-    operator_iata = _pbs_store["meta"].get("operator", "").upper()
+    operator_iata = _pbs_meta().get("operator", "").upper()
     out["operator"] = _IATA_TO_ICAO.get(operator_iata, operator_iata)
     out["duty_days"] = [
         {**day, "legs": [
@@ -314,7 +516,7 @@ def get_pbs_sequence(seq_number):
 
 @app.route("/pbs/sequences/<seq_number>/generate", methods=["POST"])
 def generate_from_pbs(seq_number):
-    seq = next((s for s in _pbs_store["sequences"] if s["seq"] == seq_number), None)
+    seq = next((s for s in _pbs_sequences() if s["seq"] == seq_number), None)
     if not seq:
         return jsonify({"error": "sequence not found — POST /import-pbs first"}), 404
 
@@ -328,7 +530,7 @@ def generate_from_pbs(seq_number):
         return jsonify({"error": "duty_day/leg_index out of range"}), 400
     leg = day["legs"][leg_index]
 
-    fos_leg = pbs_parser.pbs_leg_to_fos_leg(_pbs_store["meta"], seq, day, leg, position)
+    fos_leg = pbs_parser.pbs_leg_to_fos_leg(_pbs_meta(), seq, day, leg, position)
     if body.get("simbrief_user"):
         fos_leg["simbrief_user"] = body["simbrief_user"]
     fos_leg = build_leg_from_sources(fos_leg)
@@ -339,44 +541,50 @@ def generate_from_pbs(seq_number):
 
 @app.route("/fos/<int:leg_id>")
 def view_fos(leg_id):
-    record = next((r for r in _store["archive"] if r["id"] == leg_id), None)
+    record = _get_leg(leg_id)
     if not record:
         return Response(
             f"No leg with id {leg_id}. POST a leg to /generate first.",
             status=404, mimetype="text/plain",
         )
+    # Viewing a leg (not just generating one) makes it "current" too —
+    # matches the old fos_last_leg-on-every-page-load localStorage behavior.
+    current_user.current_leg_id = leg_id
+    db.session.commit()
     return Response(render_fos_html(record), mimetype="text/html")
 
 
 @app.route("/fos/<int:leg_id>/signin", methods=["POST"])
 def toggle_signin(leg_id):
-    record = next((r for r in _store["archive"] if r["id"] == leg_id), None)
-    if not record:
+    row = _get_leg_row(leg_id)
+    if not row:
         return jsonify({"error": "not found"}), 404
-    record["signed_in"] = not record.get("signed_in", False)
-    return jsonify({"signed_in": record["signed_in"]})
+    data = _save_leg(row, {**row.data, "signed_in": not row.data.get("signed_in", False)})
+    return jsonify({"signed_in": data["signed_in"]})
 
 
 @app.route("/fos/<int:leg_id>/fit-for-duty", methods=["POST"])
 def toggle_ffd(leg_id):
-    record = next((r for r in _store["archive"] if r["id"] == leg_id), None)
-    if not record:
+    row = _get_leg_row(leg_id)
+    if not row:
         return jsonify({"error": "not found"}), 404
-    record["fit_for_duty"] = not record.get("fit_for_duty", False)
-    return jsonify({"fit_for_duty": record["fit_for_duty"]})
+    data = _save_leg(row, {**row.data, "fit_for_duty": not row.data.get("fit_for_duty", False)})
+    return jsonify({"fit_for_duty": data["fit_for_duty"]})
 
 
 @app.route("/fos/<int:leg_id>/gates", methods=["POST"])
 def set_gates(leg_id):
-    record = next((r for r in _store["archive"] if r["id"] == leg_id), None)
-    if not record:
+    row = _get_leg_row(leg_id)
+    if not row:
         return jsonify({"error": "not found"}), 404
     body = request.get_json(silent=True) or {}
+    changes = {}
     if "dep_gate" in body:
-        record["dep_gate"] = body["dep_gate"]
+        changes["dep_gate"] = body["dep_gate"]
     if "arr_gate" in body:
-        record["arr_gate"] = body["arr_gate"]
-    return jsonify({"dep_gate": record.get("dep_gate", ""), "arr_gate": record.get("arr_gate", "")})
+        changes["arr_gate"] = body["arr_gate"]
+    data = _save_leg(row, {**row.data, **changes})
+    return jsonify({"dep_gate": data.get("dep_gate", ""), "arr_gate": data.get("arr_gate", "")})
 
 
 @app.route("/aeroapi/suggest", methods=["POST"])
@@ -402,8 +610,8 @@ def aeroapi_suggest():
 
 @app.route("/fos/<int:leg_id>/sign", methods=["POST"])
 def sign_leg(leg_id):
-    record = next((r for r in _store["archive"] if r["id"] == leg_id), None)
-    if not record:
+    row = _get_leg_row(leg_id)
+    if not row:
         return jsonify({"error": "not found"}), 404
 
     body = request.get_json(silent=True) or {}
@@ -412,30 +620,35 @@ def sign_leg(leg_id):
         return jsonify({"error": "no signature image given"}), 400
 
     signed_at = datetime.now(timezone.utc).isoformat()
-    record["signature"] = signature
-    record["signed_at"] = signed_at
+    data = _save_leg(row, {**row.data, "signature": signature, "signed_at": signed_at})
 
-    entry = {
-        "leg_id": leg_id, "flight_number": record.get("flight_number"),
-        "dep_date": record.get("dep_date"), "signed_at": signed_at,
-    }
-    _signature_log.append(entry)
-    LOG.info(f"SIGNATURE leg={leg_id} flight={record.get('flight_number')} at={signed_at}")
+    db.session.add(SignatureLog(
+        user_id=current_user.id, leg_id=leg_id,
+        flight_number=data.get("flight_number"), dep_date=data.get("dep_date"),
+        signed_at=signed_at,
+    ))
+    db.session.commit()
+    LOG.info(f"SIGNATURE leg={leg_id} flight={data.get('flight_number')} at={signed_at}")
 
     return jsonify({"signed_at": signed_at})
 
 
 @app.route("/signatures")
 def list_signatures():
-    """Audit log of every signing event this process has seen — separate
+    """Audit log of every signing event this pilot has seen — separate
     from the leg records themselves, so it survives a leg being regenerated
-    (re-signing overwrites record['signature'] but not this history)."""
-    return jsonify(_signature_log)
+    (re-signing overwrites the leg's own signature field but not this
+    history)."""
+    rows = SignatureLog.query.filter_by(user_id=current_user.id).order_by(SignatureLog.id.desc()).all()
+    return jsonify([
+        {"leg_id": r.leg_id, "flight_number": r.flight_number, "dep_date": r.dep_date, "signed_at": r.signed_at}
+        for r in rows
+    ])
 
 
 @app.route("/fos/<int:leg_id>/weather", methods=["POST"])
 def leg_weather(leg_id):
-    record = next((r for r in _store["archive"] if r["id"] == leg_id), None)
+    record = _get_leg(leg_id)
     if not record:
         return jsonify({"error": "not found"}), 404
 
@@ -473,7 +686,7 @@ def release_status():
 
 @app.route("/fos/<int:leg_id>/release", methods=["POST"])
 def generate_release(leg_id):
-    record = next((r for r in _store["archive"] if r["id"] == leg_id), None)
+    record = _get_leg(leg_id)
     if not record:
         return jsonify({"error": "not found"}), 404
 
@@ -511,6 +724,12 @@ def generate_release(leg_id):
     return jsonify(payload)
 
 
+def _archive_rows():
+    """This pilot's legs, newest first, as plain dicts (each with "id")."""
+    rows = Leg.query.filter_by(user_id=current_user.id).order_by(Leg.created_at.desc()).all()
+    return [{**r.data, "id": r.id} for r in rows]
+
+
 @app.route("/archive")
 def archive():
     slim = [
@@ -520,14 +739,27 @@ def archive():
             "dep_date": r.get("dep_date"), "signed_in": r.get("signed_in"),
             "fit_for_duty": r.get("fit_for_duty"),
         }
-        for r in _store["archive"]
+        for r in _archive_rows()
     ]
     return jsonify(slim)
 
 
 @app.route("/health")
 def health():
-    return jsonify({"status": "ok", "archived_legs": len(_store["archive"])})
+    # Unauthenticated (Railway healthcheck) — a DB-wide count, not scoped to
+    # any one pilot, just proves the process is up and the DB is reachable.
+    return jsonify({"status": "ok", "archived_legs": Leg.query.count()})
+
+
+@app.route("/settings/simbrief-user", methods=["POST"])
+def set_default_simbrief_user():
+    """Persists the pilot's SimBrief username on their account so it's
+    remembered on a new device/browser too — localStorage's fos_simbrief_user
+    stays the fast local read, this is just what seeds it elsewhere."""
+    body = request.get_json(silent=True) or {}
+    current_user.default_simbrief_user = (body.get("simbrief_user") or "").strip() or None
+    db.session.commit()
+    return jsonify({"ok": True})
 
 
 @app.route("/")
@@ -538,14 +770,45 @@ def index():
 # ---------------------------------------------------------------------------
 # Rendering — string.Template so the CSS's { } never fights Python's
 # ---------------------------------------------------------------------------
+_HOME_TILE_ICONS = {
+    "current_flight": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.8 19.2L16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-1 .1-1.3.5l-.7.9c-.4.4-.2 1.1.3 1.3L9 12l-2 3H4l-1 1 3 2 2 3 1-1v-3l3-2 2.8 5.8c.3.5.9.7 1.4.3l.9-.7c.3-.3.5-.8.4-1.2z"/></svg>',
+    "request_data": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 11-3-6.7"/><path d="M21 3v6h-6"/></svg>',
+}
+
+
+def _home_tile(icon_key, title, sub, href, enabled):
+    onclick = f"window.location.href='{href}'" if enabled else ""
+    disabled = "" if enabled else " disabled"
+    return (
+        f'<button class="home-tile" onclick="{onclick}"{disabled}>'
+        f'{_HOME_TILE_ICONS[icon_key]}'
+        f'<div><div class="tile-title">{html.escape(title)}</div><div class="tile-sub">{html.escape(sub)}</div></div>'
+        f'</button>'
+    )
+
+
 def render_launcher_html():
     rows = "".join(
-        f'<a class="arow" href="/fos/{r["id"]}">{r.get("flight_number","")} '
-        f'{r.get("origin","")}\u2192{r.get("destination","")} '
-        f'<span>{r.get("dep_date","")}</span></a>'
-        for r in _store["archive"]
+        f'<a class="arow" href="/fos/{r["id"]}">{html.escape(r.get("flight_number") or "")} '
+        f'{html.escape(r.get("origin") or "")}\u2192{html.escape(r.get("destination") or "")} '
+        f'<span>{html.escape(r.get("dep_date") or "")}</span></a>'
+        for r in _archive_rows()
     ) or '<p class="empty">No legs generated yet.</p>'
-    return Template(LAUNCHER_TEMPLATE).safe_substitute(rows=rows)
+
+    current_leg = _get_leg(current_user.current_leg_id) if current_user.current_leg_id else None
+    if current_leg:
+        desc = f'{current_leg.get("flight_number","")} {current_leg.get("origin","")}\u2192{current_leg.get("destination","")}'.strip()
+        current_flight_button = _home_tile("current_flight", "Current Flight", desc, f'/fos/{current_leg["id"]}', True)
+        request_data_button = _home_tile("request_data", "Request New Data", f'Re-send {desc} to SimBrief', f'/fos/{current_leg["id"]}?view=release', True)
+    else:
+        current_flight_button = _home_tile("current_flight", "Current Flight", "No active flight yet", "", False)
+        request_data_button = _home_tile("request_data", "Request New Data", "No active flight yet", "", False)
+
+    return Template(LAUNCHER_TEMPLATE).safe_substitute(
+        rows=rows, current_flight_button=current_flight_button, request_data_button=request_data_button,
+        username=html.escape(current_user.username),
+        default_simbrief_user=html.escape(current_user.default_simbrief_user or ""),
+    )
 
 
 def render_fos_html(leg):
@@ -588,6 +851,7 @@ def render_fos_html(leg):
     ctx["signed_in_class"] = "" if ctx.get("signed_in") else "inactive"
     ctx["ffd_class"] = "" if ctx.get("fit_for_duty") else "inactive"
     ctx["signed_class"] = "signed" if ctx.get("signature") else ""
+    ctx["default_simbrief_user"] = current_user.default_simbrief_user or ""
     str_ctx = {k: ("" if v is None else str(v)) for k, v in ctx.items() if k != "signature"}
     return Template(FOS_TEMPLATE).safe_substitute(**str_ctx)
 
@@ -643,18 +907,23 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>
       <div><div class="tile-title">Load New Sequence</div><div class="tile-sub">Import a PBS bid pack, or start a flight manually</div></div>
     </button>
+    <button class="home-tile" onclick="showHomeView('load-sequence');showTab('manual');">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+      <div><div class="tile-title">Create a Flight</div><div class="tile-sub">Skip PBS — just origin, destination, and flight number</div></div>
+    </button>
     <button class="home-tile" onclick="showHomeView('import-simbrief')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg>
       <div><div class="tile-title">Import from SimBrief</div><div class="tile-sub">Load whatever OFP is on your account right now</div></div>
     </button>
-    <button class="home-tile" id="current-flight-tile" onclick="goToCurrentFlight()" disabled>
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.8 19.2L16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-1 .1-1.3.5l-.7.9c-.4.4-.2 1.1.3 1.3L9 12l-2 3H4l-1 1 3 2 2 3 1-1v-3l3-2 2.8 5.8c.3.5.9.7 1.4.3l.9-.7c.3-.3.5-.8.4-1.2z"/></svg>
-      <div><div class="tile-title">Current Flight</div><div class="tile-sub" id="current-flight-sub">Checking…</div></div>
-    </button>
+    $current_flight_button
+    $request_data_button
   </div>
 
   <h1 style="margin-top:28px;font-size:15px;">Recent Flights</h1>
   <div id="archive-list">$rows</div>
+  <form method="POST" action="/logout" style="margin-top:28px;max-width:640px;">
+    <button type="submit" style="width:100%;background:#6b7380;">Sign Out ($username)</button>
+  </form>
 </div>
 
 <div id="load-sequence-view" class="sub-view">
@@ -670,9 +939,6 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
   <div id="tab-pbs" class="tab-panel active">
     <label for="pbs-file">Import from file</label>
     <input type="file" id="pbs-file" accept=".txt,text/plain" onchange="loadPbsFile(event)">
-    <div style="margin:10px 0 4px;color:#6b7380;font-size:12px;">— or paste below —</div>
-    <textarea id="pbs-text" placeholder="Paste your crew pairing builder's PBS bid-pack export here"></textarea><br>
-    <button onclick="importPbs()">Import</button>
     <div id="import-msg" class="msg"></div>
 
     <h1 style="margin-top:28px;">Sequences</h1>
@@ -695,6 +961,16 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
   </div>
 </div>
 
+<div id="pick-leg-view" class="sub-view">
+  <div class="subview-topbar">
+    <button class="back-link" onclick="showHomeView('load-sequence')">Back</button>
+    <h1>Pick a Leg</h1>
+  </div>
+  <div id="pick-leg-summary" style="font-size:13px;color:#6b7380;margin-bottom:10px;max-width:640px;"></div>
+  <div id="pick-leg-list" style="max-width:640px;"></div>
+  <div id="pick-leg-msg" class="msg"></div>
+</div>
+
 <div id="import-simbrief-view" class="sub-view">
   <div class="subview-topbar">
     <button class="back-link" onclick="showHomeView('home')">Back</button>
@@ -710,10 +986,12 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
 </div>
 
 <script>
+const SERVER_SIMBRIEF_USER = "$default_simbrief_user";
 function showHomeView(view){
   document.getElementById('home-view').classList.toggle('active', view==='home');
   document.getElementById('load-sequence-view').classList.toggle('active', view==='load-sequence');
   document.getElementById('import-simbrief-view').classList.toggle('active', view==='import-simbrief');
+  document.getElementById('pick-leg-view').classList.toggle('active', view==='pick-leg');
 }
 function showTab(tab){
   document.getElementById('tab-pbs').classList.toggle('active', tab==='pbs');
@@ -735,20 +1013,16 @@ function loadPbsFile(e){
   if(!file) return;
   const el = document.getElementById('import-msg');
   const reader = new FileReader();
-  reader.onload = () => {
-    document.getElementById('pbs-text').value = reader.result;
-    importPbs();
-  };
+  reader.onload = () => importPbs(reader.result);
   reader.onerror = () => {
     el.textContent = 'Could not read that file.';
     el.style.color = '#c0392b';
   };
   reader.readAsText(file);
 }
-function importPbs(){
+function importPbs(text){
   const el = document.getElementById('import-msg');
-  const text = document.getElementById('pbs-text').value;
-  if(!text.trim()){ el.textContent = 'Paste bid-pack text first.'; el.style.color = '#c0392b'; return; }
+  if(!text || !text.trim()){ el.textContent = 'That file was empty.'; el.style.color = '#c0392b'; return; }
   fetch('/import-pbs', {method:'POST', headers:{'Content-Type':'text/plain'}, body: text})
     .then(r => r.json().then(data => ({ok:r.ok, data})))
     .then(({ok, data}) => {
@@ -777,10 +1051,55 @@ async function openSequence(seq){
     const seqR = await fetch('/pbs/sequences/' + seq);
     const seqData = await seqR.json();
     if(!seqR.ok){ el.textContent = seqData.error || 'Sequence not found'; el.style.color = '#c0392b'; return; }
-    const position = (seqData.positions && seqData.positions[0]) || '';
-    const genR = await fetch('/pbs/sequences/' + seq + '/generate', {
+    el.textContent = '';
+    renderLegPicker(seqData);
+    showHomeView('pick-leg');
+  } catch(e) {
+    el.textContent = 'Request failed: ' + e;
+    el.style.color = '#c0392b';
+  }
+}
+
+function renderLegPicker(seqData){
+  const position = (seqData.positions && seqData.positions[0]) || '';
+  const stations = [];
+  (seqData.duty_days || []).forEach(day => (day.legs || []).forEach(leg => {
+    if(!stations.length) stations.push(leg.origin);
+    stations.push(leg.destination);
+  }));
+  document.getElementById('pick-leg-summary').textContent =
+    'SEQ ' + seqData.seq + '  ·  ' + stations.join('-') +
+    '  ·  ' + (seqData.positions || []).join('/');
+  const list = document.getElementById('pick-leg-list');
+  list.innerHTML = '';
+  (seqData.duty_days || []).forEach(day => {
+    const heading = document.createElement('div');
+    heading.style.cssText = 'font-size:13px;font-weight:600;color:#144e94;margin:14px 0 6px;';
+    heading.textContent = 'Day ' + day.duty_day + ' — RPT ' + (day.report || '');
+    list.appendChild(heading);
+    (day.legs || []).forEach((leg, i) => {
+      const row = document.createElement('a');
+      row.className = 'arow';
+      row.href = '#';
+      row.innerHTML = (leg.flight_number || '—') + ' ' + (leg.origin || '') + '→' + (leg.destination || '') +
+        ' <span>' + (leg.dep_local || '') + '/' + (leg.arr_local || '') + '</span>';
+      row.onclick = (e) => { e.preventDefault(); generateFromSequence(seqData.seq, day.duty_day, i, position); };
+      list.appendChild(row);
+    });
+  });
+  if(!list.children.length){
+    list.innerHTML = '<p class="empty">No duty days on this sequence.</p>';
+  }
+}
+
+async function generateFromSequence(seq, dutyDay, legIndex, position){
+  const el = document.getElementById('pick-leg-msg');
+  el.textContent = 'Starting…';
+  el.style.color = '';
+  try {
+    const genR = await fetch('/pbs/sequences/' + encodeURIComponent(seq) + '/generate', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({duty_day: 1, leg_index: 0, position: position}),
+      body: JSON.stringify({duty_day: dutyDay, leg_index: legIndex, position: position}),
     });
     const genData = await genR.json();
     if(!genR.ok){ el.textContent = genData.error || 'Generate failed'; el.style.color = '#c0392b'; return; }
@@ -822,6 +1141,7 @@ function loadFromSimbrief(){
   const user = document.getElementById('sb-user').value.trim();
   if(!user){ el.textContent = 'Enter a SimBrief username first.'; el.style.color = '#c0392b'; return; }
   localStorage.setItem('fos_simbrief_user', user);
+  fetch('/settings/simbrief-user', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({simbrief_user: user})});
   el.textContent = 'Loading current flight…';
   el.style.color = '';
   fetch('/generate', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({simbrief_user: user})})
@@ -833,35 +1153,13 @@ function loadFromSimbrief(){
     .catch(e=>{ el.textContent = 'Request failed: ' + e; el.style.color = '#c0392b'; });
 }
 
-// "Current Flight" is deliberately not an auto-redirect — Home is always
-// reachable and always shows all three options. This just checks whether
-// there's something to resume and reports it right on the tile, verified
-// against /archive so a stale id (leg gone after a backend restart, which
-// currently wipes everything since there's no persistent store yet)
-// disables the tile instead of leading somewhere broken.
-function goToCurrentFlight(){
-  const lastLeg = localStorage.getItem('fos_last_leg');
-  if(lastLeg) window.location.href = '/fos/' + lastLeg;
-}
-(function(){
-  const tile = document.getElementById('current-flight-tile');
-  const sub = document.getElementById('current-flight-sub');
-  const lastLeg = localStorage.getItem('fos_last_leg');
-  if(!lastLeg){ sub.textContent = 'No active flight yet'; return; }
-  fetch('/archive').then(r => r.json()).then(rows => {
-    const match = rows.find(r => String(r.id) === lastLeg);
-    if(match){
-      sub.textContent = `${match.flight_number || ''} ${match.origin || ''}→${match.destination || ''}`.trim();
-      tile.disabled = false;
-    } else {
-      localStorage.removeItem('fos_last_leg');
-      sub.textContent = 'No active flight yet';
-    }
-  }).catch(() => { sub.textContent = 'No active flight yet'; });
-})();
+// Current Flight / Request New Data are rendered server-side now (see
+// render_launcher_html / current_user.current_leg_id) instead of a client
+// fetch('/archive') + localStorage lookup — the server already knows which
+// pilot is asking, so it can just say whether there's something to resume.
 
 (function(){
-  const saved = localStorage.getItem('fos_simbrief_user');
+  const saved = localStorage.getItem('fos_simbrief_user') || SERVER_SIMBRIEF_USER;
   if(saved) document.getElementById('sb-user').value = saved;
 })();
 
@@ -897,13 +1195,14 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   :focus-visible{outline:2px solid var(--blue-dark);outline-offset:2px;}
   @media (prefers-reduced-motion: reduce){ *{transition:none !important;animation:none !important;} }
   .app-shell{display:flex;min-height:100vh;min-height:100dvh;width:100%;padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom);padding-left:env(safe-area-inset-left);padding-right:env(safe-area-inset-right);}
-  .sidebar{width:64px;flex:0 0 64px;background:var(--navy);display:flex;flex-direction:column;align-items:center;padding:14px 0;gap:6px;position:sticky;top:env(safe-area-inset-top);align-self:flex-start;max-height:100vh;max-height:100dvh;overflow-y:auto;z-index:20;}
+  .sidebar{width:64px;flex:0 0 64px;background:var(--navy);z-index:20;}
+  .sidebar-nav{display:flex;flex-direction:column;align-items:center;padding:14px 0;gap:6px;position:sticky;top:env(safe-area-inset-top);max-height:100vh;max-height:100dvh;overflow-y:auto;}
   .side-btn{width:44px;height:44px;display:flex;align-items:center;justify-content:center;background:transparent;border:none;color:#9db3d6;border-radius:8px;cursor:pointer;position:relative;}
   .side-btn svg{width:22px;height:22px;}
   .side-btn.active{background:var(--blue-dark);color:#fff;}
   .side-btn .badge{position:absolute;top:2px;right:2px;width:15px;height:15px;border-radius:50%;background:var(--red);color:#fff;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;}
   .main{flex:1;min-width:0;padding:14px 16px 44px;}
-  .topbar{display:flex;flex-wrap:wrap;align-items:center;margin-bottom:10px;position:sticky;top:0;z-index:10;background:var(--bg);padding-top:6px;margin-top:-6px;margin-left:-16px;margin-right:-16px;padding-left:16px;padding-right:16px;}
+  .topbar{display:flex;flex-wrap:wrap;align-items:center;margin-bottom:10px;position:sticky;top:env(safe-area-inset-top);z-index:10;background:var(--bg);padding-top:6px;margin-top:-6px;margin-left:-16px;margin-right:-16px;padding-left:16px;padding-right:16px;}
   .back-link{order:1;color:var(--blue-dark);font-size:14px;font-weight:500;background:none;border:none;cursor:pointer;padding:4px 2px;}
   .topbar-actions{order:2;margin-left:auto;display:flex;align-items:center;gap:14px;}
   .topbar-title{order:3;flex:1 1 100%;text-align:center;margin-top:2px;}
@@ -952,7 +1251,8 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   #toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(12px);background:#1a1f29;color:#fff;padding:9px 16px;border-radius:20px;font-size:13px;opacity:0;pointer-events:none;transition:opacity .18s ease, transform .18s ease;box-shadow:0 4px 14px rgba(0,0,0,.25);z-index:10;}
   #toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
   @media (max-width:640px){
-    .sidebar{width:52px;flex-basis:52px;padding:10px 0;}
+    .sidebar{width:52px;flex-basis:52px;}
+    .sidebar-nav{padding:10px 0;}
     .side-btn{width:38px;height:38px;}
     .content-grid{grid-template-columns:1fr;}
     .col-divider{border-right:none;border-bottom:6px solid var(--bg);}
@@ -963,30 +1263,32 @@ FOS_TEMPLATE = """<!DOCTYPE html>
 <body>
 <div class="app-shell">
   <nav class="sidebar" aria-label="Primary">
-    <button class="side-btn active" id="nav-home" title="Home" onclick="showView('overview')">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></svg>
-    </button>
-    <button class="side-btn" id="nav-pairing" title="Pairing" onclick="showView('pairing')">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18"/><path d="M8 3v4M16 3v4"/></svg>
-    </button>
-    <button class="side-btn" title="Messages" onclick="showToast('Messages')">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 6l9 7 9-7"/></svg>
-      <span class="badge">1</span>
-    </button>
-    <button class="side-btn" id="nav-docs" title="Documents" onclick="showView('documents')">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5"/><path d="M9.5 13h5M9.5 16h5"/></svg>
-    </button>
-    <button class="side-btn" id="nav-release" title="Release" onclick="showView('release')">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5"/><path d="M12 11v6"/><path d="M9.5 14.5L12 17l2.5-2.5"/></svg>
-    </button>
-    <button class="side-btn" title="Web" onclick="showToast('Web')">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.5 2.6 2.5 15.4 0 18M12 3c-2.5 2.6-2.5 15.4 0 18"/></svg>
-    </button>
+    <div class="sidebar-nav">
+      <button class="side-btn active" id="nav-home" title="Home" onclick="showView('overview')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></svg>
+      </button>
+      <button class="side-btn" id="nav-pairing" title="Pairing" onclick="showView('pairing')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18"/><path d="M8 3v4M16 3v4"/></svg>
+      </button>
+      <button class="side-btn" title="Messages" onclick="showToast('Messages')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 6l9 7 9-7"/></svg>
+        <span class="badge">1</span>
+      </button>
+      <button class="side-btn" id="nav-docs" title="Documents" onclick="showView('documents')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5"/><path d="M9.5 13h5M9.5 16h5"/></svg>
+      </button>
+      <button class="side-btn" id="nav-release" title="Release" onclick="showView('release')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5"/><path d="M12 11v6"/><path d="M9.5 14.5L12 17l2.5-2.5"/></svg>
+      </button>
+      <button class="side-btn" title="Web" onclick="showToast('Web')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.5 2.6 2.5 15.4 0 18M12 3c-2.5 2.6-2.5 15.4 0 18"/></svg>
+      </button>
+    </div>
   </nav>
   <main class="main">
     <section id="overview-view" class="view active">
       <div class="topbar">
-        <a class="back-link" href="/" onclick="localStorage.removeItem('fos_last_leg')">Back</a>
+        <a class="back-link" href="/">Back</a>
         <div class="topbar-actions">
           <button class="icon-btn" title="Settings" onclick="showToast('Settings')">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.34 1.87l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.7 1.7 0 00-1.87-.34 1.7 1.7 0 00-1 1.55V21a2 2 0 11-4 0v-.09A1.7 1.7 0 009 19.4a1.7 1.7 0 00-1.87.34l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.7 1.7 0 004.6 15a1.7 1.7 0 00-1.55-1H3a2 2 0 110-4h.09A1.7 1.7 0 004.6 9a1.7 1.7 0 00-.34-1.87l-.06-.06a2 2 0 112.83-2.83l.06.06A1.7 1.7 0 009 4.6a1.7 1.7 0 001-1.55V3a2 2 0 114 0v.09a1.7 1.7 0 001 1.55 1.7 1.7 0 001.87-.34l.06-.06a2 2 0 112.83 2.83l-.06.06A1.7 1.7 0 0019.4 9a1.7 1.7 0 001.55 1H21a2 2 0 110 4h-.09a1.7 1.7 0 00-1.55 1z"/></svg>
@@ -1015,8 +1317,6 @@ FOS_TEMPLATE = """<!DOCTYPE html>
       </div>
       <button class="docs-btn" onclick="showView('documents')">Pre-Flight Documents</button>
       <button class="docs-btn" id="pairing-btn" style="background:var(--blue-dark);border-top:1px solid rgba(255,255,255,.2);" onclick="showView('pairing')">View Full Pairing</button>
-      <button class="docs-btn" style="background:var(--green);border-top:1px solid rgba(255,255,255,.2);" onclick="localStorage.removeItem('fos_last_leg');window.location.href='/'">Create a Flight</button>
-      <button class="docs-btn" style="background:var(--label);border-top:1px solid rgba(255,255,255,.2);" onclick="showView('release')">Request New Data</button>
       <div class="card">
         <div class="content-grid">
           <div class="col-divider">
@@ -1301,7 +1601,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
 <div id="toast"></div>
 <script>
 const LEG_ID = "$leg_id";
-if(LEG_ID) localStorage.setItem('fos_last_leg', LEG_ID);
+const SERVER_SIMBRIEF_USER = "$default_simbrief_user";
 const LEG_FLIGHT_NUMBER = "$flight_number";
 const LEG_ORIGIN = "$origin";
 const LEG_DESTINATION = "$destination";
@@ -1332,7 +1632,7 @@ function showView(view){
 }
 function initReleaseView(){
   const input = document.getElementById('release-user');
-  const saved = localStorage.getItem('fos_simbrief_user');
+  const saved = localStorage.getItem('fos_simbrief_user') || SERVER_SIMBRIEF_USER;
   if(saved && !input.value) input.value = saved;
   prefillSimbriefGen();
 }
@@ -1446,7 +1746,7 @@ async function applyAeroGates(){
 function generateRelease(){
   const btn = document.getElementById('release-gen-btn');
   const status = document.getElementById('release-status');
-  const userId = localStorage.getItem('fos_simbrief_user');
+  const userId = localStorage.getItem('fos_simbrief_user') || SERVER_SIMBRIEF_USER;
   if(!userId){ status.textContent = 'No SimBrief username on file — go back and send this flight to SimBrief first.'; status.style.color = '#c0392b'; return; }
   btn.disabled = true;
   status.style.color = '';
@@ -1510,7 +1810,7 @@ function showToast(msg){
 let _releaseCache = null;
 async function ensureRelease(){
   if(_releaseCache) return _releaseCache;
-  const userId = localStorage.getItem('fos_simbrief_user');
+  const userId = localStorage.getItem('fos_simbrief_user') || SERVER_SIMBRIEF_USER;
   if(!userId){ showToast('Send this flight to SimBrief first to get a username on file'); return null; }
   showToast('Generating release…');
   let r, data;
@@ -1835,6 +2135,7 @@ async function submitSimbriefGen(){
   if(!type){ el.textContent = 'Enter the SimBrief aircraft type code first.'; el.style.color = '#c0392b'; return; }
   localStorage.setItem('fos_simbrief_user', user);
   localStorage.setItem('fos_simbrief_airframe', type);
+  fetch('/settings/simbrief-user', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({simbrief_user: user})});
 
   // Everything not listed here (fuel, alternates, crew, output options...)
   // is set by the pilot on SimBrief's own dispatch page instead of
@@ -1922,7 +2223,7 @@ async function pollSimbriefReady(user, beforeTs, el, btn, attempt){
 let _weatherLoaded = false;
 async function loadWeather(){
   const body = document.getElementById('weather-body');
-  const userId = localStorage.getItem('fos_simbrief_user');
+  const userId = localStorage.getItem('fos_simbrief_user') || SERVER_SIMBRIEF_USER;
   if(!userId){
     body.innerHTML = '<p class="placeholder-note">Send this flight to SimBrief first to get a username on file.</p>';
     return;

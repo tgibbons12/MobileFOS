@@ -5,6 +5,10 @@ __pycache__/
 config.json
 ourairports_airports.csv
 
+# Local SQLite fallback DB (dev only — Railway prod uses Postgres via DATABASE_URL)
+# Flask-SQLAlchemy resolves a relative sqlite:/// path against instance_path.
+instance/
+
 # SimBrief's own terms prohibit redistributing this package without their
 # written consent (see SimBrief_APIv1/README.txt) — keep it out of git.
 SimBrief_APIv1/

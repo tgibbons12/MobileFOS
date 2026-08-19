@@ -2,9 +2,13 @@
 Thin client for FlightAware's AeroAPI (v4) — suggests a likely gate at the
 origin and destination airports, and a filed route for the exact city pair,
 all scoped to American Airlines regardless of what a caller's VA livery
-code might say. Each pilot brings their own AeroAPI key (a paid FlightAware
-subscription); this module is a stateless pass-through for it — the key is
-never written to disk here, only sent on to FlightAware per request.
+code might say. "American" here means mainline AA (operator_icao "AAL") or
+a regional partner flying it under an American Eagle codeshare (see
+_is_aa_flight) — most short/thin AA markets are regional-only, so mainline
+alone under-reports real AA service. Each pilot brings their own AeroAPI
+key (a paid FlightAware subscription); this module is a stateless
+pass-through for it — the key is never written to disk here, only sent on
+to FlightAware per request.
 
 Gates come from AA's *airport*-level recent departures/arrivals — AA's
 typical gate at an airport doesn't depend on which city pair is being
@@ -13,9 +17,9 @@ connected nonstop. Route comes from a separate city-pair lookup and stays
 blank in that case, which is the correct answer, not a failure.
 
 Endpoints and field names (gate_origin, gate_destination, terminal_origin,
-terminal_destination, route, operator_icao, actual_in/actual_out, the
-`airline` filter param on the airport-flights endpoints) verified
-2026-08-19 against FlightAware's public OpenAPI spec:
+terminal_destination, route, operator_icao, codeshares, codeshares_iata,
+actual_in/actual_out, the `airline` filter param on the airport-flights
+endpoints) verified 2026-08-19 against FlightAware's public OpenAPI spec:
 https://www.flightaware.com/commercial/aeroapi/resources/aeroapi-openapi.yml
 """
 import time
@@ -71,6 +75,23 @@ def _get(path, api_key, params=None):
         raise AeroApiError("AeroAPI returned unparseable data")
 
 
+def _is_aa_flight(f):
+    """True if this flight is American — flown by mainline AA (operator_icao
+    "AAL"), or flown by a regional partner (Envoy, SkyWest, PSA, etc.) under
+    an American Eagle codeshare. Filtering on operator_icao alone only ever
+    caught mainline nonstops: most short/thin AA markets (e.g. PHX-RNO) are
+    flown entirely by a regional partner, whose own ICAO shows up as the
+    operator while "AAL" only appears in that flight's codeshares — so an
+    operator_icao-only filter reported AA doesn't serve them at all. Per
+    AeroAPI's flight schema, `codeshares`/`codeshares_iata` list the other
+    carriers selling seats on a flight actually operated by someone else."""
+    if (f.get("operator_icao") or "").upper() == AA_ICAO:
+        return True
+    if AA_ICAO in {(c or "").upper() for c in (f.get("codeshares") or [])}:
+        return True
+    return "AA" in {(c or "").upper() for c in (f.get("codeshares_iata") or [])}
+
+
 def _aa_airport_flights(api_key, airport, direction):
     """AA's flights that recently departed (direction='departures') or
     arrived ('arrivals') at a single airport — AeroAPI itself only returns
@@ -88,7 +109,7 @@ def _aa_airport_flights(api_key, airport, direction):
     start = (datetime.now(timezone.utc) - timedelta(days=_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
     data = _get(f"/airports/{airport}/flights/{direction}", api_key, {"start": start, "max_pages": 3})
     flights = data.get(direction, [])
-    return [f for f in flights if (f.get("operator_icao") or "").upper() == AA_ICAO]
+    return [f for f in flights if _is_aa_flight(f)]
 
 
 def _aa_route_between(api_key, orig, dest):
@@ -97,7 +118,7 @@ def _aa_route_between(api_key, orig, dest):
     start = (datetime.now(timezone.utc) - timedelta(days=_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
     data = _get(f"/airports/{orig}/flights/to/{dest}", api_key, {"connection": "nonstop", "start": start})
     segments = [entry["segments"][0] for entry in data.get("flights", []) if entry.get("segments")]
-    return [s for s in segments if (s.get("operator_icao") or "").upper() == AA_ICAO]
+    return [s for s in segments if _is_aa_flight(s)]
 
 
 def get_suggestions(api_key, orig, dest):
