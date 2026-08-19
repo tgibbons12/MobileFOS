@@ -1053,6 +1053,99 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           <label for="sbgen-steh">Scheduled Time Enroute, HHMM (optional)</label>
           <input id="sbgen-steh" type="text" placeholder="optional">
         </div>
+
+        <button class="section-bar collapsed" id="sbgen-crew-bar" onclick="toggleSection('sbgen-crew')">
+          Aircraft &amp; Crew
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+        </button>
+        <div id="sbgen-crew-body" style="display:none;">
+          <div class="search-row">
+            <div class="search-block"><label for="sbgen-fin">Fin Number (optional)</label><input id="sbgen-fin" type="text" placeholder="optional"></div>
+            <div class="search-block"><label for="sbgen-callsign">ATC Callsign (optional)</label><input id="sbgen-callsign" type="text" placeholder="optional"></div>
+          </div>
+          <div class="search-row">
+            <div class="search-block"><label for="sbgen-cpt">Captain Name (optional)</label><input id="sbgen-cpt" type="text" placeholder="optional"></div>
+            <div class="search-block"><label for="sbgen-dxname">Dispatcher Name (optional)</label><input id="sbgen-dxname" type="text" placeholder="optional"></div>
+          </div>
+          <div class="search-block">
+            <label for="sbgen-pid">Pilot ID (optional)</label>
+            <input id="sbgen-pid" type="text" placeholder="optional">
+          </div>
+        </div>
+
+        <button class="section-bar collapsed" id="sbgen-fuel-bar" onclick="toggleSection('sbgen-fuel')">
+          Fuel &amp; Weights
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+        </button>
+        <div id="sbgen-fuel-body" style="display:none;">
+          <div class="search-row">
+            <div class="search-block"><label for="sbgen-pax">Passenger Count (optional)</label><input id="sbgen-pax" type="text" placeholder="optional"></div>
+            <div class="search-block"><label for="sbgen-cargo">Cargo Weight (optional)</label><input id="sbgen-cargo" type="text" placeholder="optional"></div>
+          </div>
+          <div class="search-row">
+            <div class="search-block"><label for="sbgen-fuelfactor">Fuel Factor (optional)</label><input id="sbgen-fuelfactor" type="text" placeholder="optional, e.g. 1.0"></div>
+            <div class="search-block"><label for="sbgen-manualzfw">Manual ZFW (optional)</label><input id="sbgen-manualzfw" type="text" placeholder="optional"></div>
+          </div>
+          <div class="search-row">
+            <div class="search-block"><label for="sbgen-addedfuel">Extra Fuel (optional)</label><input id="sbgen-addedfuel" type="text" placeholder="optional"></div>
+            <div class="search-block">
+              <label for="sbgen-addedfuel-units">Extra Fuel Units</label>
+              <select id="sbgen-addedfuel-units"><option value="LBS" selected>LBS</option><option value="KGS">KGS</option><option value="MIN">MIN</option></select>
+            </div>
+          </div>
+          <div class="search-row">
+            <div class="search-block"><label for="sbgen-taxiout">Taxi Out, min (optional)</label><input id="sbgen-taxiout" type="text" placeholder="optional"></div>
+            <div class="search-block"><label for="sbgen-taxiin">Taxi In, min (optional)</label><input id="sbgen-taxiin" type="text" placeholder="optional"></div>
+          </div>
+          <div class="search-row">
+            <div class="search-block"><label for="sbgen-civalue">Cost Index (optional)</label><input id="sbgen-civalue" type="text" placeholder="optional"></div>
+            <div class="search-block"><label for="sbgen-etopsrule">ETOPS Rule, min (optional)</label><input id="sbgen-etopsrule" type="text" placeholder="optional"></div>
+          </div>
+        </div>
+
+        <button class="section-bar collapsed" id="sbgen-profile-bar" onclick="toggleSection('sbgen-profile')">
+          Route &amp; Profile
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+        </button>
+        <div id="sbgen-profile-body" style="display:none;">
+          <div class="search-row">
+            <div class="search-block"><label for="sbgen-origrwy">Departure Runway (optional)</label><input id="sbgen-origrwy" type="text" placeholder="optional"></div>
+            <div class="search-block"><label for="sbgen-destrwy">Arrival Runway (optional)</label><input id="sbgen-destrwy" type="text" placeholder="optional"></div>
+          </div>
+          <div class="search-block">
+            <label for="sbgen-fl">Cruise Altitude / FL (optional)</label>
+            <input id="sbgen-fl" type="text" placeholder="optional, e.g. 350">
+          </div>
+          <div class="search-row">
+            <div class="search-block"><label for="sbgen-climb">Climb Profile (optional)</label><input id="sbgen-climb" type="text" placeholder="optional"></div>
+            <div class="search-block"><label for="sbgen-descent">Descent Profile (optional)</label><input id="sbgen-descent" type="text" placeholder="optional"></div>
+          </div>
+          <div class="search-block">
+            <label for="sbgen-cruise">Cruise Profile (optional)</label>
+            <input id="sbgen-cruise" type="text" placeholder="optional">
+          </div>
+          <div class="check-grid">
+            <label><input id="sbgen-omit-sids" type="checkbox">Omit SIDs</label>
+            <label><input id="sbgen-omit-stars" type="checkbox">Omit STARs</label>
+            <label><input id="sbgen-find-sidstar" type="checkbox" checked>Auto-Select SID/STAR</label>
+          </div>
+        </div>
+
+        <button class="section-bar collapsed" id="sbgen-altn-bar" onclick="toggleSection('sbgen-altn')">
+          Alternates
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+        </button>
+        <div id="sbgen-altn-body" style="display:none;">
+          <div class="search-block">
+            <label for="sbgen-altn">Primary Alternate — ICAO (optional)</label>
+            <input id="sbgen-altn" type="text" placeholder="optional, blank lets SimBrief pick">
+          </div>
+          <div class="search-block">
+            <label for="sbgen-altn-avoid">Avoid as Alternates (optional, comma-separated ICAOs)</label>
+            <input id="sbgen-altn-avoid" type="text" placeholder="optional">
+          </div>
+        </div>
+
         <div class="search-row">
           <div class="search-block">
             <label for="sbgen-units">Units</label>
@@ -1081,9 +1174,13 @@ FOS_TEMPLATE = """<!DOCTYPE html>
             </select>
           </div>
         </div>
+        <div class="search-row">
+          <div class="search-block"><label for="sbgen-planformat">Plan Format (optional)</label><input id="sbgen-planformat" type="text" placeholder="optional, e.g. lido"></div>
+          <div class="search-block"><label for="sbgen-static-id">Static ID (optional)</label><input id="sbgen-static-id" type="text" placeholder="optional"></div>
+        </div>
         <div class="search-block">
-          <label for="sbgen-planformat">Plan Format (optional)</label>
-          <input id="sbgen-planformat" type="text" placeholder="optional, e.g. lido">
+          <label for="sbgen-manualrmk">Remarks (optional)</label>
+          <input id="sbgen-manualrmk" type="text" placeholder="optional">
         </div>
         <div class="check-grid">
           <label><input id="sbgen-navlog" type="checkbox" checked>Detailed Navlog</label>
@@ -1637,6 +1734,34 @@ async function submitSimbriefGen(){
   const notams = document.getElementById('sbgen-notams').checked;
   const firnot = document.getElementById('sbgen-firnot').checked;
   const etops = document.getElementById('sbgen-etops').checked;
+  const fin = document.getElementById('sbgen-fin').value.trim().toUpperCase();
+  const callsign = document.getElementById('sbgen-callsign').value.trim().toUpperCase();
+  const cpt = document.getElementById('sbgen-cpt').value.trim();
+  const dxname = document.getElementById('sbgen-dxname').value.trim();
+  const pid = document.getElementById('sbgen-pid').value.trim();
+  const pax = document.getElementById('sbgen-pax').value.trim();
+  const cargo = document.getElementById('sbgen-cargo').value.trim();
+  const fuelfactor = document.getElementById('sbgen-fuelfactor').value.trim();
+  const manualzfw = document.getElementById('sbgen-manualzfw').value.trim();
+  const addedfuel = document.getElementById('sbgen-addedfuel').value.trim();
+  const addedfuelUnits = document.getElementById('sbgen-addedfuel-units').value;
+  const taxiout = document.getElementById('sbgen-taxiout').value.trim();
+  const taxiin = document.getElementById('sbgen-taxiin').value.trim();
+  const civalue = document.getElementById('sbgen-civalue').value.trim();
+  const etopsrule = document.getElementById('sbgen-etopsrule').value.trim();
+  const origrwy = document.getElementById('sbgen-origrwy').value.trim().toUpperCase();
+  const destrwy = document.getElementById('sbgen-destrwy').value.trim().toUpperCase();
+  const fl = document.getElementById('sbgen-fl').value.trim();
+  const climb = document.getElementById('sbgen-climb').value.trim();
+  const descent = document.getElementById('sbgen-descent').value.trim();
+  const cruise = document.getElementById('sbgen-cruise').value.trim();
+  const omitSids = document.getElementById('sbgen-omit-sids').checked;
+  const omitStars = document.getElementById('sbgen-omit-stars').checked;
+  const findSidstar = document.getElementById('sbgen-find-sidstar').checked;
+  const altn = document.getElementById('sbgen-altn').value.trim().toUpperCase();
+  const altnAvoid = document.getElementById('sbgen-altn-avoid').value.trim().toUpperCase();
+  const staticId = document.getElementById('sbgen-static-id').value.trim();
+  const manualrmk = document.getElementById('sbgen-manualrmk').value.trim();
 
   if(!user){ el.textContent = 'Enter your SimBrief username first.'; el.style.color = '#c0392b'; return; }
   if(!orig || !dest){ el.textContent = 'Origin and destination are required.'; el.style.color = '#c0392b'; return; }
@@ -1710,6 +1835,33 @@ async function submitSimbriefGen(){
   addField('notams', notams ? '1' : '0');
   addField('firnot', firnot ? '1' : '0');
   addField('etops', etops ? '1' : '0');
+  if(fin) addField('fin', fin);
+  if(callsign) addField('callsign', callsign);
+  if(cpt) addField('cpt', cpt);
+  if(dxname) addField('dxname', dxname);
+  if(pid) addField('pid', pid);
+  if(pax) addField('pax', pax);
+  if(cargo) addField('cargo', cargo);
+  if(fuelfactor) addField('fuelfactor', fuelfactor);
+  if(manualzfw) addField('manualzfw', manualzfw);
+  if(addedfuel){ addField('addedfuel', addedfuel); addField('addedfuel_units', addedfuelUnits); }
+  if(taxiout) addField('taxiout', taxiout);
+  if(taxiin) addField('taxiin', taxiin);
+  if(civalue) addField('civalue', civalue);
+  if(etopsrule) addField('etopsrule', etopsrule);
+  if(origrwy) addField('origrwy', origrwy);
+  if(destrwy) addField('destrwy', destrwy);
+  if(fl) addField('fl', fl);
+  if(climb) addField('climb', climb);
+  if(descent) addField('descent', descent);
+  if(cruise) addField('cruise', cruise);
+  addField('omit_sids', omitSids ? '1' : '0');
+  addField('omit_stars', omitStars ? '1' : '0');
+  addField('find_sidstar', findSidstar ? '1' : '0');
+  if(altn) addField('altn', altn);
+  if(altnAvoid) addField('altn_avoid', altnAvoid);
+  if(staticId) addField('static_id', staticId);
+  if(manualrmk) addField('manualrmk', manualrmk);
   addField('apicode', prep.api_code);
   addField('outputpage', prep.outputpage_calc);
   addField('timestamp', String(prep.timestamp));
