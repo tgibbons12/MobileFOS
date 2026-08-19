@@ -1196,6 +1196,8 @@ const LEG_ORIGIN = "$origin";
 const LEG_DESTINATION = "$destination";
 const LEG_TAIL_NUMBER = "$tail_number";
 const LEG_SCHED_OUT = "$sched_out";
+const LEG_FLEET_TYPE = "$fleet_type";
+const LEG_EQUIPMENT_TYPE = "$equipment_type";
 function showView(view){
   document.getElementById('overview-view').classList.toggle('active', view==='overview');
   document.getElementById('documents-view').classList.toggle('active', view==='documents');
@@ -1231,7 +1233,12 @@ function initReleaseView(){
 }
 async function prefillSimbriefGen(){
   document.getElementById('aero-key').value = localStorage.getItem('fos_aeroapi_key') || '';
-  document.getElementById('sbgen-type').value = localStorage.getItem('fos_simbrief_airframe') || '';
+  // Leg-specific aircraft data wins over the last-remembered one: a
+  // SimBrief-loaded leg's fleet_type is already a real ICAO type code
+  // (aircraft/icaocode); a PBS-pairing leg's is the bid pack's raw
+  // equipment token, which may need hand-correcting if this fleet's PBS
+  // codes aren't already ICAO-formatted.
+  document.getElementById('sbgen-type').value = LEG_FLEET_TYPE || LEG_EQUIPMENT_TYPE || localStorage.getItem('fos_simbrief_airframe') || '';
   document.getElementById('sbgen-fltnum').value = LEG_FLIGHT_NUMBER || '';
   document.getElementById('sbgen-date').value = todayZuluDDMMMYY();
   document.getElementById('sbgen-time').value = (LEG_SCHED_OUT || '').replace(':', '');
@@ -1268,13 +1275,17 @@ async function fetchAeroSuggestions(){
   const msg = document.getElementById('aero-msg');
   const btn = document.getElementById('aero-btn');
   const key = document.getElementById('aero-key').value.trim();
-  const airline = document.getElementById('sbgen-airline').value.trim().toUpperCase();
   const fltnum = document.getElementById('sbgen-fltnum').value.trim();
   document.getElementById('aero-results').style.display = 'none';
   if(!key){ msg.textContent = 'Enter your AeroAPI key first.'; msg.style.color = '#c0392b'; return; }
-  if(!airline || !fltnum){ msg.textContent = 'Airline (ICAO) and Flight Number are required — set those in Generate Flight Plan below first.'; msg.style.color = '#c0392b'; return; }
+  if(!fltnum){ msg.textContent = 'Flight Number is required — set that in Generate Flight Plan below first.'; msg.style.color = '#c0392b'; return; }
   localStorage.setItem('fos_aeroapi_key', key);
-  const ident = airline + fltnum;
+  // Real-world route/gate history only exists under American's own ident —
+  // regional partners flying an AA-numbered route (Envoy, PSA, Republic,
+  // SkyWest, etc.) still file and fly it as "AAL", not the VA livery code
+  // in the Airline (ICAO) field above, so always look up AAL here even
+  // when that field disagrees.
+  const ident = 'AAL' + fltnum;
 
   btn.disabled = true;
   msg.textContent = 'Looking up ' + ident + '…';
