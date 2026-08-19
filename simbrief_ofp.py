@@ -89,6 +89,15 @@ def fetch_ofp_leg_fields(simbrief_user, timeout=15):
         if name
     ]
 
+    def fuel_lbs(path):
+        raw = text(path)
+        if not raw:
+            return ""
+        try:
+            return f"{int(float(raw)):,}"
+        except ValueError:
+            return ""
+
     fields = {
         "flight_number": text("general/flight_number"),
         "origin": text("origin/icao_code"),
@@ -104,6 +113,17 @@ def fetch_ofp_leg_fields(simbrief_user, timeout=15):
         "customer_load": text("general/passengers"),
         "flight_time": seconds_to_hhmm("times/sched_block"),
         "crew": crew,
+        # Fuel figures — paths match what MASTERLOG.py already reads
+        # successfully from real OFPs (fuel/plan_ramp etc.), not guessed.
+        "block_fuel": fuel_lbs("fuel/plan_ramp"),
+        "takeoff_fuel": fuel_lbs("fuel/plan_takeoff"),
+        "landing_fuel": fuel_lbs("fuel/plan_landing"),
+        "trip_fuel": fuel_lbs("fuel/enroute_burn"),
+        "taxi_fuel": fuel_lbs("fuel/taxi"),
+        "reserve_fuel": fuel_lbs("fuel/reserve"),
+        "alternate_fuel": fuel_lbs("fuel/alternate_burn"),
+        "contingency_fuel": fuel_lbs("fuel/contingency"),
+        "extra_fuel": fuel_lbs("fuel/extra"),
     }
     return {k: v for k, v in fields.items() if v}
 

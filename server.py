@@ -129,6 +129,8 @@ DEFAULT_LEG = {
     "tz_diff": "", "hotel_details": "", "limo_details": "",
     "signed_in": False, "fit_for_duty": False,
     "signature": "", "signed_at": "",
+    "block_fuel": "", "takeoff_fuel": "", "landing_fuel": "", "trip_fuel": "",
+    "taxi_fuel": "", "reserve_fuel": "", "alternate_fuel": "", "contingency_fuel": "", "extra_fuel": "",
 }
 
 _signature_log = []
@@ -522,6 +524,18 @@ def render_fos_html(leg):
     ctx["crew_display"] = ", ".join(crew) if isinstance(crew, list) else str(crew or "")
     ctx["leg_id"] = str(leg.get("id", ""))
     ctx["fleet_type_icao"] = _fleet_type_icao(ctx.get("fleet_type", ""))
+    # Neither PBS nor a SimBrief OFP ever carries a flight "status" — it's
+    # not data either source has. Derive one locally from what this app
+    # actually tracks rather than leaving it permanently blank.
+    if not ctx.get("status"):
+        if ctx.get("signature"):
+            ctx["status"] = "Released & Signed"
+        elif ctx.get("signed_in") and ctx.get("fit_for_duty"):
+            ctx["status"] = "Ready for Departure"
+        elif ctx.get("signed_in") or ctx.get("fit_for_duty"):
+            ctx["status"] = "Checking In"
+        else:
+            ctx["status"] = "Scheduled"
     ctx["signed_in_class"] = "" if ctx.get("signed_in") else "inactive"
     ctx["ffd_class"] = "" if ctx.get("fit_for_duty") else "inactive"
     ctx["signed_class"] = "signed" if ctx.get("signature") else ""
@@ -1181,11 +1195,25 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         <div class="col"><span>$origin</span><span>$destination</span></div>
         <div class="col"><span>$dep_date</span><span>$arr_date</span></div>
         <div class="col"><span>$sched_out</span><span>$sched_in</span></div>
+        <div class="col highlight"><span>$est_out</span><span>$est_in</span></div>
       </div>
       <p class="placeholder-note">Check this is the flight you just sent to SimBrief before generating the release.</p>
-      <div class="search-block">
-        <label for="confirm-user">SimBrief Username</label>
-        <input id="confirm-user" type="text" placeholder="Your SimBrief username">
+      <div class="card">
+        <div class="content-grid">
+          <div class="col-divider">
+            <div class="info-row"><span class="lbl">Block Fuel</span><span class="val">$block_fuel</span></div>
+            <div class="info-row"><span class="lbl">Taxi Fuel</span><span class="val">$taxi_fuel</span></div>
+            <div class="info-row"><span class="lbl">Trip Fuel</span><span class="val">$trip_fuel</span></div>
+            <div class="info-row"><span class="lbl">Takeoff Fuel</span><span class="val">$takeoff_fuel</span></div>
+            <div class="info-row" style="border-bottom:none;"><span class="lbl">Landing Fuel</span><span class="val">$landing_fuel</span></div>
+          </div>
+          <div>
+            <div class="info-row"><span class="lbl">Reserve Fuel</span><span class="val">$reserve_fuel</span></div>
+            <div class="info-row"><span class="lbl">Alternate Fuel</span><span class="val">$alternate_fuel</span></div>
+            <div class="info-row"><span class="lbl">Contingency Fuel</span><span class="val">$contingency_fuel</span></div>
+            <div class="info-row" style="border-bottom:none;"><span class="lbl">Extra Fuel</span><span class="val">$extra_fuel</span></div>
+          </div>
+        </div>
       </div>
       <div style="padding:14px;background:var(--card);">
         <button class="docs-btn" id="release-gen-btn" style="border-radius:5px;" onclick="generateRelease()">Generate Release</button>
@@ -1237,9 +1265,6 @@ function initReleaseView(){
 }
 let _releaseStatusChecked = false;
 function initConfirmView(){
-  const input = document.getElementById('confirm-user');
-  const saved = localStorage.getItem('fos_simbrief_user');
-  if(saved && !input.value) input.value = saved;
   if(_releaseStatusChecked) return;
   _releaseStatusChecked = true;
   fetch('/release/status').then(r=>r.json()).then(data=>{
@@ -1348,9 +1373,8 @@ async function applyAeroGates(){
 function generateRelease(){
   const btn = document.getElementById('release-gen-btn');
   const status = document.getElementById('release-status');
-  const userId = document.getElementById('confirm-user').value.trim();
-  if(!userId){ status.textContent = 'Enter a SimBrief username first.'; status.style.color = '#c0392b'; return; }
-  localStorage.setItem('fos_simbrief_user', userId);
+  const userId = localStorage.getItem('fos_simbrief_user');
+  if(!userId){ status.textContent = 'No SimBrief username on file — go back and send this flight to SimBrief first.'; status.style.color = '#c0392b'; return; }
   btn.disabled = true;
   status.style.color = '';
   status.textContent = 'Generating release — this can take up to a minute…';
