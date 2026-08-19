@@ -542,7 +542,7 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
 <style>
   html,body{height:100%;}
   body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#eef1f4;margin:0;padding:24px;color:#1a1f29;}
-  h1{font-size:18px;color:#144e94;}
+  h1{font-size:18px;color:#144e94;margin:0 0 16px;}
   label{display:block;font-size:13px;font-weight:600;margin:10px 0 4px;}
   textarea, select, input[type=text]{width:100%;max-width:640px;font-family:inherit;font-size:13.5px;padding:9px 10px;border:1px solid #e3e6ea;border-radius:5px;box-sizing:border-box;background:#fbfbfc;}
   textarea{height:160px;font-family:ui-monospace,Menlo,monospace;font-size:12.5px;}
@@ -559,27 +559,84 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
   .tab-panel{display:none;}
   .tab-panel.active{display:block;}
   hr{max-width:640px;margin:14px 0;border:none;border-top:1px solid #e3e6ea;}
+
+  .sub-view{display:none;}
+  .sub-view.active{display:block;}
+  .subview-topbar{display:flex;align-items:center;gap:14px;margin-bottom:16px;max-width:640px;}
+  .subview-topbar h1{margin:0;}
+  .back-link{color:#1c63b7;font-size:14px;font-weight:600;text-decoration:none;background:none;border:none;padding:0;margin:0;cursor:pointer;}
+  .home-tiles{display:flex;flex-direction:column;gap:12px;max-width:640px;}
+  .home-tile{display:flex;align-items:center;gap:14px;width:100%;text-align:left;background:#fff;border:1px solid #e3e6ea;border-radius:10px;padding:16px;margin:0;cursor:pointer;box-shadow:0 1px 2px rgba(0,0,0,.04);}
+  .home-tile:disabled{opacity:.55;cursor:default;}
+  .home-tile svg{width:26px;height:26px;color:#1c63b7;flex:0 0 auto;}
+  .home-tile .tile-title{font-size:15px;font-weight:700;color:#1a1f29;}
+  .home-tile .tile-sub{font-size:12.5px;color:#6b7380;margin-top:2px;}
 </style></head><body>
-<h1>FOS</h1>
-<div class="tabs">
-  <button class="tab-btn active" id="tab-pbs-btn" onclick="showTab('pbs')">Import PBS</button>
-  <button class="tab-btn" id="tab-simbrief-btn" onclick="showTab('simbrief')">Load from SimBrief</button>
+
+<div id="home-view" class="sub-view active">
+  <h1>FOS</h1>
+  <div class="home-tiles">
+    <button class="home-tile" onclick="showHomeView('load-sequence')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>
+      <div><div class="tile-title">Load New Sequence</div><div class="tile-sub">Import a PBS bid pack, or start a flight manually</div></div>
+    </button>
+    <button class="home-tile" onclick="showHomeView('import-simbrief')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+      <div><div class="tile-title">Import from SimBrief</div><div class="tile-sub">Load whatever OFP is on your account right now</div></div>
+    </button>
+    <button class="home-tile" id="current-flight-tile" onclick="goToCurrentFlight()" disabled>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.8 19.2L16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-1 .1-1.3.5l-.7.9c-.4.4-.2 1.1.3 1.3L9 12l-2 3H4l-1 1 3 2 2 3 1-1v-3l3-2 2.8 5.8c.3.5.9.7 1.4.3l.9-.7c.3-.3.5-.8.4-1.2z"/></svg>
+      <div><div class="tile-title">Current Flight</div><div class="tile-sub" id="current-flight-sub">Checking…</div></div>
+    </button>
+  </div>
+
+  <h1 style="margin-top:28px;font-size:15px;">Recent Flights</h1>
+  <div id="archive-list">$rows</div>
 </div>
 
-<div id="tab-pbs" class="tab-panel active">
-  <label for="pbs-file">Import from file</label>
-  <input type="file" id="pbs-file" accept=".txt,text/plain" onchange="loadPbsFile(event)">
-  <div style="margin:10px 0 4px;color:#6b7380;font-size:12px;">— or paste below —</div>
-  <textarea id="pbs-text" placeholder="Paste your crew pairing builder's PBS bid-pack export here"></textarea><br>
-  <button onclick="importPbs()">Import</button>
-  <div id="import-msg" class="msg"></div>
+<div id="load-sequence-view" class="sub-view">
+  <div class="subview-topbar">
+    <button class="back-link" onclick="showHomeView('home')">Back</button>
+    <h1>Load New Sequence</h1>
+  </div>
+  <div class="tabs">
+    <button class="tab-btn active" id="tab-pbs-btn" onclick="showTab('pbs')">Import PBS</button>
+    <button class="tab-btn" id="tab-manual-btn" onclick="showTab('manual')">Fill In Manually</button>
+  </div>
 
-  <h1 style="margin-top:28px;">Sequences</h1>
-  <div id="seq-list"><p class="empty">No sequences imported yet.</p></div>
-  <div id="seq-open-msg" class="msg"></div>
+  <div id="tab-pbs" class="tab-panel active">
+    <label for="pbs-file">Import from file</label>
+    <input type="file" id="pbs-file" accept=".txt,text/plain" onchange="loadPbsFile(event)">
+    <div style="margin:10px 0 4px;color:#6b7380;font-size:12px;">— or paste below —</div>
+    <textarea id="pbs-text" placeholder="Paste your crew pairing builder's PBS bid-pack export here"></textarea><br>
+    <button onclick="importPbs()">Import</button>
+    <div id="import-msg" class="msg"></div>
+
+    <h1 style="margin-top:28px;">Sequences</h1>
+    <div id="seq-list"><p class="empty">No sequences imported yet.</p></div>
+    <div id="seq-open-msg" class="msg"></div>
+  </div>
+
+  <div id="tab-manual" class="tab-panel">
+    <div class="panel">
+      <div style="font-size:13px;color:#6b7380;margin-bottom:4px;">Skips PBS entirely — just enough to identify the flight. Everything else (aircraft, times, fuel...) gets set on SimBrief's own dispatch page on the next screen.</div>
+      <label for="manual-orig">Origin</label>
+      <input id="manual-orig" type="text" placeholder="ICAO or IATA">
+      <label for="manual-dest">Destination</label>
+      <input id="manual-dest" type="text" placeholder="ICAO or IATA">
+      <label for="manual-fltnum">Flight Number</label>
+      <input id="manual-fltnum" type="text">
+      <br><button onclick="submitManualEntry()">Continue to SimBrief</button>
+      <div id="manual-msg" class="msg"></div>
+    </div>
+  </div>
 </div>
 
-<div id="tab-simbrief" class="tab-panel">
+<div id="import-simbrief-view" class="sub-view">
+  <div class="subview-topbar">
+    <button class="back-link" onclick="showHomeView('home')">Back</button>
+    <h1>Import from SimBrief</h1>
+  </div>
   <div class="panel">
     <div style="font-size:13px;color:#6b7380;margin-bottom:4px;">Loads whatever OFP is currently on this SimBrief account right now — for dispatching the flight you're on today, not for browsing a schedule.</div>
     <label for="sb-user">SimBrief Username</label>
@@ -589,14 +646,17 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
   </div>
 </div>
 
-<h1 style="margin-top:28px;">Archive</h1>
-<div id="archive-list">$rows</div>
 <script>
+function showHomeView(view){
+  document.getElementById('home-view').classList.toggle('active', view==='home');
+  document.getElementById('load-sequence-view').classList.toggle('active', view==='load-sequence');
+  document.getElementById('import-simbrief-view').classList.toggle('active', view==='import-simbrief');
+}
 function showTab(tab){
   document.getElementById('tab-pbs').classList.toggle('active', tab==='pbs');
-  document.getElementById('tab-simbrief').classList.toggle('active', tab==='simbrief');
+  document.getElementById('tab-manual').classList.toggle('active', tab==='manual');
   document.getElementById('tab-pbs-btn').classList.toggle('active', tab==='pbs');
-  document.getElementById('tab-simbrief-btn').classList.toggle('active', tab==='simbrief');
+  document.getElementById('tab-manual-btn').classList.toggle('active', tab==='manual');
 }
 
 function loadArchive(){
@@ -661,7 +721,33 @@ async function openSequence(seq){
     });
     const genData = await genR.json();
     if(!genR.ok){ el.textContent = genData.error || 'Generate failed'; el.style.color = '#c0392b'; return; }
-    window.location.href = genData.fos_url + '?view=pairing';
+    window.location.href = genData.fos_url + '?view=release';
+  } catch(e) {
+    el.textContent = 'Request failed: ' + e;
+    el.style.color = '#c0392b';
+  }
+}
+
+async function submitManualEntry(){
+  const el = document.getElementById('manual-msg');
+  const origin = document.getElementById('manual-orig').value.trim().toUpperCase();
+  const destination = document.getElementById('manual-dest').value.trim().toUpperCase();
+  const flight_number = document.getElementById('manual-fltnum').value.trim();
+  if(!origin || !destination || !flight_number){
+    el.textContent = 'Origin, destination, and flight number are all required.';
+    el.style.color = '#c0392b';
+    return;
+  }
+  el.textContent = 'Starting…';
+  el.style.color = '';
+  try {
+    const r = await fetch('/generate', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({origin, destination, flight_number}),
+    });
+    const data = await r.json();
+    if(!r.ok){ el.textContent = data.error || 'Could not start this flight'; el.style.color = '#c0392b'; return; }
+    window.location.href = data.fos_url + '?view=release';
   } catch(e) {
     el.textContent = 'Request failed: ' + e;
     el.style.color = '#c0392b';
@@ -679,31 +765,41 @@ function loadFromSimbrief(){
     .then(r => r.json().then(data => ({ok:r.ok, data})))
     .then(({ok, data}) => {
       if(!ok){ el.textContent = data.error || 'Load failed'; el.style.color = '#c0392b'; return; }
-      window.location.href = data.fos_url;
+      window.location.href = data.fos_url + '?view=confirm';
     })
     .catch(e=>{ el.textContent = 'Request failed: ' + e; el.style.color = '#c0392b'; });
 }
 
+// "Current Flight" is deliberately not an auto-redirect — Home is always
+// reachable and always shows all three options. This just checks whether
+// there's something to resume and reports it right on the tile, verified
+// against /archive so a stale id (leg gone after a backend restart, which
+// currently wipes everything since there's no persistent store yet)
+// disables the tile instead of leading somewhere broken.
+function goToCurrentFlight(){
+  const lastLeg = localStorage.getItem('fos_last_leg');
+  if(lastLeg) window.location.href = '/fos/' + lastLeg;
+}
+(function(){
+  const tile = document.getElementById('current-flight-tile');
+  const sub = document.getElementById('current-flight-sub');
+  const lastLeg = localStorage.getItem('fos_last_leg');
+  if(!lastLeg){ sub.textContent = 'No active flight yet'; return; }
+  fetch('/archive').then(r => r.json()).then(rows => {
+    const match = rows.find(r => String(r.id) === lastLeg);
+    if(match){
+      sub.textContent = `${match.flight_number || ''} ${match.origin || ''}→${match.destination || ''}`.trim();
+      tile.disabled = false;
+    } else {
+      localStorage.removeItem('fos_last_leg');
+      sub.textContent = 'No active flight yet';
+    }
+  }).catch(() => { sub.textContent = 'No active flight yet'; });
+})();
+
 (function(){
   const saved = localStorage.getItem('fos_simbrief_user');
   if(saved) document.getElementById('sb-user').value = saved;
-})();
-
-// Relaunching the app (PWA icon, browser reopen) always hits this page —
-// jump straight back to whatever flight was last open instead of dumping
-// the pilot on the import screen every time. Verify against /archive
-// first so a stale id (leg gone after a backend restart) self-heals
-// instead of redirect-looping onto a 404.
-(function(){
-  const lastLeg = localStorage.getItem('fos_last_leg');
-  if(!lastLeg) return;
-  fetch('/archive').then(r => r.json()).then(rows => {
-    if(rows.some(r => String(r.id) === lastLeg)){
-      window.location.replace('/fos/' + lastLeg);
-    } else {
-      localStorage.removeItem('fos_last_leg');
-    }
-  }).catch(() => {});
 })();
 
 loadSequences();
@@ -1002,7 +1098,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         <button class="back-link" onclick="showView('overview')">Back</button>
         <div class="topbar-title">
           <h1>Flight $flight_number</h1>
-          <p>Release Builder</p>
+          <p>Send to SimBrief</p>
         </div>
       </div>
       <div class="status-bar"><span>SEQ $seq</span><span>$date</span></div>
@@ -1070,17 +1166,35 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         </div>
       </div>
 
-      <button class="section-bar" id="relgen-bar" style="margin-top:2px;" onclick="toggleSection('relgen')">
-        Generate Release
-        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
-      </button>
-      <div id="relgen-body" style="padding:14px;background:var(--card);">
+    </section>
+    <section id="confirm-view" class="view">
+      <div class="topbar">
+        <button class="back-link" onclick="showView('overview')">Back</button>
+        <div class="topbar-title">
+          <h1>Flight $flight_number</h1>
+          <p>Confirm &amp; Generate Release</p>
+        </div>
+      </div>
+      <div class="status-bar"><span>SEQ $seq</span><span>$date</span></div>
+      <div class="flight-summary">
+        <div class="fnum">$flight_number</div>
+        <div class="col"><span>$origin</span><span>$destination</span></div>
+        <div class="col"><span>$dep_date</span><span>$arr_date</span></div>
+        <div class="col"><span>$sched_out</span><span>$sched_in</span></div>
+      </div>
+      <p class="placeholder-note">Check this is the flight you just sent to SimBrief before generating the release.</p>
+      <div class="search-block">
+        <label for="confirm-user">SimBrief Username</label>
+        <input id="confirm-user" type="text" placeholder="Your SimBrief username">
+      </div>
+      <div style="padding:14px;background:var(--card);">
         <button class="docs-btn" id="release-gen-btn" style="border-radius:5px;" onclick="generateRelease()">Generate Release</button>
         <div id="release-status" style="margin-top:10px;font-size:13px;color:var(--label);"></div>
         <div id="release-downloads" style="display:none;margin-top:10px;gap:10px;flex-wrap:wrap;">
           <a id="release-rls-link" style="display:none;background:var(--green);color:#fff;text-decoration:none;padding:9px 14px;border-radius:5px;font-size:13px;font-weight:600;">Download RLS PDF</a>
           <a id="release-wb-link" style="display:none;background:var(--blue-dark);color:#fff;text-decoration:none;padding:9px 14px;border-radius:5px;font-size:13px;font-weight:600;">Download W&amp;B PDF</a>
         </div>
+        <button id="confirm-continue-btn" style="display:none;margin-top:10px;width:100%;background:var(--label);color:#fff;border:none;padding:11px;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;" onclick="showView('overview')">Continue to Flight</button>
       </div>
     </section>
   </main>
@@ -1101,21 +1215,29 @@ function showView(view){
   document.getElementById('overview-view').classList.toggle('active', view==='overview');
   document.getElementById('documents-view').classList.toggle('active', view==='documents');
   document.getElementById('release-view').classList.toggle('active', view==='release');
+  document.getElementById('confirm-view').classList.toggle('active', view==='confirm');
   document.getElementById('pdf-view').classList.toggle('active', view==='pdf');
   document.getElementById('sign-view').classList.toggle('active', view==='sign');
   document.getElementById('pairing-view').classList.toggle('active', view==='pairing');
   document.getElementById('nav-home').classList.toggle('active', view==='overview');
   document.getElementById('nav-docs').classList.toggle('active', view==='documents');
-  document.getElementById('nav-release').classList.toggle('active', view==='release');
+  document.getElementById('nav-release').classList.toggle('active', view==='release' || view==='confirm');
   document.getElementById('nav-pairing').classList.toggle('active', view==='pairing');
   window.scrollTo(0,0);
   if(view === 'release') initReleaseView();
+  if(view === 'confirm') initConfirmView();
   if(view === 'sign') initSignPad();
   if(view === 'pairing') initPairingView();
 }
-let _releaseStatusChecked = false;
 function initReleaseView(){
   const input = document.getElementById('release-user');
+  const saved = localStorage.getItem('fos_simbrief_user');
+  if(saved && !input.value) input.value = saved;
+  prefillSimbriefGen();
+}
+let _releaseStatusChecked = false;
+function initConfirmView(){
+  const input = document.getElementById('confirm-user');
   const saved = localStorage.getItem('fos_simbrief_user');
   if(saved && !input.value) input.value = saved;
   if(_releaseStatusChecked) return;
@@ -1128,7 +1250,6 @@ function initReleaseView(){
       document.getElementById('release-gen-btn').disabled = true;
     }
   }).catch(()=>{});
-  prefillSimbriefGen();
 }
 async function prefillSimbriefGen(){
   document.getElementById('aero-key').value = localStorage.getItem('fos_aeroapi_key') || '';
@@ -1227,7 +1348,7 @@ async function applyAeroGates(){
 function generateRelease(){
   const btn = document.getElementById('release-gen-btn');
   const status = document.getElementById('release-status');
-  const userId = document.getElementById('release-user').value.trim();
+  const userId = document.getElementById('confirm-user').value.trim();
   if(!userId){ status.textContent = 'Enter a SimBrief username first.'; status.style.color = '#c0392b'; return; }
   localStorage.setItem('fos_simbrief_user', userId);
   btn.disabled = true;
@@ -1254,6 +1375,7 @@ function generateRelease(){
         wbLink.style.display = 'none';
       }
       document.getElementById('release-downloads').style.display = 'flex';
+      document.getElementById('confirm-continue-btn').style.display = 'block';
     })
     .catch(e => { btn.disabled = false; status.textContent = 'Request failed: ' + e; status.style.color = '#c0392b'; });
 }
@@ -1675,7 +1797,7 @@ async function pollSimbriefReady(user, beforeTs, el, btn, attempt){
       const r2 = await fetch('/generate', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({simbrief_user: user})});
       const data2 = await r2.json();
       if(!r2.ok){ el.textContent = data2.error || 'Generated, but could not load it into FOS'; el.style.color = '#c0392b'; btn.disabled = false; return; }
-      window.location.href = data2.fos_url + '?view=release';
+      window.location.href = data2.fos_url + '?view=confirm';
     } catch(e) {
       el.textContent = 'Generated, but loading it failed: ' + e;
       el.style.color = '#c0392b';
@@ -1774,7 +1896,7 @@ function renderWeather(stations){
 (function(){
   const params = new URLSearchParams(window.location.search);
   const view = params.get('view');
-  if(view === 'pairing' || view === 'release') showView(view);
+  if(view === 'pairing' || view === 'release' || view === 'confirm') showView(view);
 })();
 </script>
 </body>
