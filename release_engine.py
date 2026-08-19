@@ -99,9 +99,11 @@ def import_error():
     return _import_error
 
 
-def generate_release_pdfs(user_id):
+def generate_release_pdfs(user_id, gate="", arr_gate=""):
     """
     Run generate_enhanced_howgozit headlessly for the given SimBrief user_id.
+    gate/arr_gate (if known — e.g. from an AeroAPI suggestion applied to the
+    FOS leg) override the DECS pages' synthesized placeholder gates.
     Returns (rls_bytes, wb_bytes_or_None, base_filename).
     Raises RuntimeError with a human-readable message on any failure.
     """
@@ -114,7 +116,7 @@ def generate_release_pdfs(user_id):
     with tempfile.TemporaryDirectory(prefix="fos-release-") as tmpdir:
         placeholder = os.path.join(tmpdir, "placeholder.pdf")
         try:
-            result = MASTERLOG.generate_enhanced_howgozit(user_id, output_path=placeholder)
+            result = MASTERLOG.generate_enhanced_howgozit(user_id, output_path=placeholder, gate=gate, arr_gate=arr_gate)
         except SystemExit as e:
             raise RuntimeError(f"generate_enhanced_howgozit exited: {e}")
         except Exception as e:
@@ -143,34 +145,59 @@ def generate_release_pdfs(user_id):
 
 def extract_named_pages(rls_bytes):
     """
-    Pull the FI ("Flight Details – GMT") and FIL ("Flight Details – Local")
-    pages out of the full release PDF as their own single-page PDFs, so the
-    Documents view can show just one page instead of the whole release.
+    Pull specific pages out of the full release PDF as their own small PDFs,
+    so the Documents view can show just the relevant part instead of the
+    whole release. Each kind is found by a distinctive text marker rather
+    than a fixed page number, since how many pages precede it (OFP body,
+    weather, NOTAMs, DECS pages) varies leg to leg:
 
-    fos_pages.build_fi_page()/build_fil_page() give each page a distinctive
-    header line — "FI<flt>/<date>/<time> <orig>" and "FIL<flt>/<date>/<orig>/APAX"
-    — so pages are found by text search rather than a fixed page number,
-    since how many pages precede them (OFP body, weather, NOTAMs) varies
-    leg to leg. Returns {"fi": bytes|None, "fil": bytes|None}; a miss just
-    means that page wasn't found, not an error — callers treat it as
-    "not available" rather than failing the whole release.
+      fi / fil       — fos_pages.build_fi_page()/build_fil_page()'s header
+                        lines ("FI<flt>/..." / "FIL<flt>/..."). First match
+                        only — each is always exactly one page.
+      notams         — MASTERLOG._airport_notam_header()'s banner
+                        ('=' * 72 rules around each airport block). All
+                        matching pages are combined into one PDF, in
+                        document order (dep/dest/alternate/enroute).
+      field_report   — MASTERLOG.write_field_reports()'s "* <STA> FIELD
+                        REPORT *" header, one per origin/destination
+                        station. All matches combined the same way.
+
+    Not independently verified against a real generated release from this
+    app (needs a live SimBrief OFP this environment doesn't have) — if a
+    kind turns out empty or wrong, that's a marker-pattern fix here, not a
+    sign the underlying page generation is broken.
+
+    Returns {"fi": bytes|None, "fil": bytes|None, "notams": bytes|None,
+    "field_report": bytes|None}; a miss just means that page wasn't found,
+    not an error — callers treat it as "not available", not fatal.
     """
     import re
     from pypdf import PdfReader, PdfWriter
 
     reader = PdfReader(io.BytesIO(rls_bytes))
-    found = {"fi": None, "fil": None}
+    single = {"fi": None, "fil": None}
+    multi = {"notams": [], "field_report": []}
     for page in reader.pages:
-        text = (page.extract_text() or "")[:300]
-        kind = None
-        if re.search(r'\bFIL\d', text):
-            kind = "fil"
-        elif re.search(r'\bFI\d', text):
-            kind = "fi"
-        if kind and found[kind] is None:
-            writer = PdfWriter()
-            writer.add_page(page)
-            buf = io.BytesIO()
-            writer.write(buf)
-            found[kind] = buf.getvalue()
+        text = (page.extract_text() or "")[:600]
+        if re.search(r'\bFIL\d', text) and single["fil"] is None:
+            single["fil"] = page
+        elif re.search(r'\bFI\d', text) and single["fi"] is None:
+            single["fi"] = page
+        elif re.search(r'={20,}', text):
+            multi["notams"].append(page)
+        elif re.search(r'FIELD REPORT', text):
+            multi["field_report"].append(page)
+
+    def _pdf_bytes(pages):
+        if not pages:
+            return None
+        writer = PdfWriter()
+        for p in pages:
+            writer.add_page(p)
+        buf = io.BytesIO()
+        writer.write(buf)
+        return buf.getvalue()
+
+    found = {kind: (_pdf_bytes([p]) if p is not None else None) for kind, p in single.items()}
+    found.update({kind: _pdf_bytes(pages) for kind, pages in multi.items()})
     return found

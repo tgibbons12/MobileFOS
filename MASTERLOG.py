@@ -2599,7 +2599,7 @@ def get_text(xpath, root, default=""):
         LOG.error(f"Error extracting text from xpath '{xpath}': {e}")
         return default
 
-def parse_simbrief_data_to_howgozit_with_ofp(xml_data, takeoff_time):
+def parse_simbrief_data_to_howgozit_with_ofp(xml_data, takeoff_time, gate="", arr_gate=""):
     """
     Parse a SimBrief XML string and build the full OFP text blob.
 
@@ -4207,8 +4207,8 @@ def parse_simbrief_data_to_howgozit_with_ofp(xml_data, takeoff_time):
 
         try:
             _fos_ctx = _fos_context(root)
-            howgozit += build_nsc_page(root, _fos_ctx, cpt=cptn, fo=fo)
-            howgozit += build_fi_page(root, _fos_ctx, cpt=cptn)
+            howgozit += build_nsc_page(root, _fos_ctx, cpt=cptn, fo=fo, gate=gate, arr_gate=arr_gate)
+            howgozit += build_fi_page(root, _fos_ctx, cpt=cptn, gate=gate, arr_gate=arr_gate)
             howgozit += build_fil_page(root, _fos_ctx)
         except Exception as _fos_e:
             LOG.warning(f"FOS pages (NSC/FI/FIL) skipped: {_fos_e}")
@@ -4219,7 +4219,7 @@ def parse_simbrief_data_to_howgozit_with_ofp(xml_data, takeoff_time):
 
         # === Jet fuel service record (form 10012) ===
         try:
-            howgozit += build_fuel_service_page(root, _fos_ctx)
+            howgozit += build_fuel_service_page(root, _fos_ctx, gate=gate)
         except Exception as _fuel_e:
             LOG.warning(f"Fuel service page skipped: {_fuel_e}")
 
@@ -8358,8 +8358,13 @@ _AI_SUB_RATE       = 0.0015    # anti-ice climb penalty (fraction of TOW per 100
 # ===========================================================================
 
 
-def generate_enhanced_howgozit(user_id, output_path=None):
-    """Fetch SimBrief XML, parse it, generate enhanced HOWGOZIT text with OFP, and save as PDF."""
+def generate_enhanced_howgozit(user_id, output_path=None, gate="", arr_gate=""):
+    """Fetch SimBrief XML, parse it, generate enhanced HOWGOZIT text with OFP, and save as PDF.
+
+    gate/arr_gate override the DECS pages' (NSC/FI/fuel-service) synthesized
+    placeholder gates — a real SimBrief OFP never carries gate data of its
+    own, so this is the only way a real, dispatcher-assigned gate reaches
+    the release rather than a random placeholder."""
     try:
         # --- Fetch and parse XML ---
         xml_data = fetch_simbrief_data(user_id)
@@ -8383,7 +8388,7 @@ def generate_enhanced_howgozit(user_id, output_path=None):
 
         # --- Generate HOWGOZIT data ---
         LOG.debug("About to call parse_simbrief_data_to_howgozit_with_ofp")
-        result = parse_simbrief_data_to_howgozit_with_ofp(xml_data, takeoff_time)
+        result = parse_simbrief_data_to_howgozit_with_ofp(xml_data, takeoff_time, gate=gate, arr_gate=arr_gate)
 
         # Add detailed debugging
         LOG.debug(f"[DBG: Result type: {type(result)}")
@@ -8553,7 +8558,7 @@ def generate_enhanced_howgozit(user_id, output_path=None):
 
         # --- WBD identification page goes at the very front of the release ---
         try:
-            _wbd_page = build_wbd_page(xml_root)
+            _wbd_page = build_wbd_page(xml_root, gate=gate)
             _wbd_page = _wbd_page.lstrip("\n").replace("[PAGEBREAK]\n", "", 1)
             # The [RELEASE_CODE:...] marker must stay on line 1 for the
             # footer watermark, so the WBD page is inserted after it.

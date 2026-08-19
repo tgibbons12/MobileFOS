@@ -15,6 +15,7 @@ call to /generate. See build_leg_from_sources() below for the seam.
 
 import base64
 import csv
+import html
 import io
 import logging
 import os
@@ -169,7 +170,13 @@ def build_leg_from_sources(payload):
         return payload
 
     known = {k: v for k, v in payload.items() if v not in (None, "", [])}
-    return {**ofp_fields, **known}
+    merged = {**ofp_fields, **known}
+    # Loading a real OFP — whether via Import from SimBrief or the
+    # generate-then-send round-trip — means the pilot is actively working
+    # this flight right now; Signed In (no longer a manual tap) should
+    # reflect that instead of starting every SimBrief-sourced leg blank.
+    merged["signed_in"] = True
+    return merged
 
 
 def _find(flight_number, dep_date):
@@ -470,7 +477,8 @@ def generate_release(leg_id):
         return jsonify({"error": "no SimBrief user id — pass \"user_id\" or set SIMBRIEF_USER"}), 400
 
     try:
-        rls_bytes, wb_bytes, filename = release_engine.generate_release_pdfs(user_id)
+        rls_bytes, wb_bytes, filename = release_engine.generate_release_pdfs(
+            user_id, gate=record.get("dep_gate", ""), arr_gate=record.get("arr_gate", ""))
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 502
 
@@ -484,12 +492,12 @@ def generate_release(leg_id):
     try:
         named_pages = release_engine.extract_named_pages(rls_bytes)
     except Exception as e:
-        LOG.warning(f"FI/FIL page extraction failed: {e}")
+        LOG.warning(f"Named-page extraction failed: {e}")
         named_pages = {}
-    if named_pages.get("fi"):
-        payload["fi_pdf_b64"] = base64.b64encode(named_pages["fi"]).decode("ascii")
-    if named_pages.get("fil"):
-        payload["fil_pdf_b64"] = base64.b64encode(named_pages["fil"]).decode("ascii")
+    for kind, field in (("fi", "fi_pdf_b64"), ("fil", "fil_pdf_b64"),
+                         ("notams", "notams_pdf_b64"), ("field_report", "field_report_pdf_b64")):
+        if named_pages.get(kind):
+            payload[field] = base64.b64encode(named_pages[kind]).decode("ascii")
 
     return jsonify(payload)
 
@@ -535,7 +543,19 @@ def render_fos_html(leg):
     ctx = {**DEFAULT_LEG, **leg}
     ctx["customer_load"] = str(ctx.get("customer_load") or "")
     crew = ctx.get("crew")
-    ctx["crew_display"] = ", ".join(crew) if isinstance(crew, list) else str(crew or "")
+    crew_list = crew if isinstance(crew, list) else ([crew] if crew else [])
+    ctx["crew_display"] = ", ".join(crew_list)
+    # Documents' Crew section gets its own row per crew member (role +
+    # name split into columns) instead of Overview's compact comma-joined
+    # summary — names come from SimBrief, so escape before building raw HTML.
+    rows = []
+    for entry in crew_list:
+        role, _, name = entry.partition(" ")
+        rows.append(
+            f'<div class="info-row"><span class="lbl">{html.escape(role)}</span>'
+            f'<span class="val">{html.escape(name)}</span></div>'
+        )
+    ctx["crew_rows"] = "".join(rows) or '<p class="placeholder-note">No named crew on this leg.</p>'
     ctx["leg_id"] = str(leg.get("id", ""))
     ctx["fleet_type_icao"] = _fleet_type_icao(ctx.get("fleet_type", ""))
     # Neither PBS nor a SimBrief OFP ever carries a flight "status" — it's
@@ -882,7 +902,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .flight-summary .col{display:flex;flex-direction:column;line-height:1.5;}
   .flight-summary .col.highlight{color:var(--green);font-weight:600;}
   .duty-badges{display:flex;justify-content:flex-end;gap:22px;padding:10px 14px 8px;background:var(--card);font-size:12px;font-weight:600;}
-  .duty-badges span{display:flex;align-items:center;gap:5px;color:var(--green);cursor:pointer;}
+  .duty-badges span{display:flex;align-items:center;gap:5px;color:var(--green);}
   .duty-badges span.inactive{color:var(--inactive);}
   .duty-badges svg{width:15px;height:15px;}
   .docs-btn{display:block;width:100%;background:var(--blue);color:#fff;border:none;padding:11px;font-size:14px;font-weight:600;cursor:pointer;}
@@ -974,10 +994,10 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         <div class="col highlight"><span>$est_out</span><span>$est_in</span></div>
       </div>
       <div class="duty-badges">
-        <span id="signin-badge" class="$signed_in_class" onclick="toggleStatus('signin','signin-badge')">
+        <span id="signin-badge" class="$signed_in_class">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><path d="M7.5 12.5l3 3 6-6"/></svg> Signed In
         </span>
-        <span id="ffd-badge" class="$ffd_class" onclick="toggleStatus('fit-for-duty','ffd-badge')">
+        <span id="ffd-badge" class="$ffd_class">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><path d="M7.5 12.5l3 3 6-6"/></svg> Fit for Duty
         </span>
       </div>
@@ -1043,12 +1063,18 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         Crew
         <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
       </button>
-      <div class="placeholder-note" id="crew-body" style="display:none;">$crew_display</div>
+      <div class="card" id="crew-body" style="display:none;">$crew_rows</div>
       <button class="section-bar" id="flight-bar" onclick="toggleSection('flight')">
         Flight
         <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
       </button>
       <div class="doc-list" id="flight-body">
+        <div class="doc-row">
+          <div><div class="code">FFD</div><div class="desc">Fit for Duty Declaration</div></div>
+          <div class="actions">
+            <svg id="ffd-doc-check" class="check $ffd_class" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" onclick="toggleStatus('fit-for-duty','ffd-doc-check')"><path d="M20 6L9 17l-5-5"/></svg>
+          </div>
+        </div>
         <div class="doc-row">
           <div><div class="code">EFLIGHT PLAN</div><div class="desc">eFlight Plan</div></div>
           <div class="actions">
@@ -1068,16 +1094,33 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           <div><div class="code">WBD</div><div class="desc">Weight &amp; Balance Data (TPS)</div></div>
           <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('wb','Weight &amp; Balance Data')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
         </div>
+        <div class="doc-row">
+          <div><div class="code">AL*</div><div class="desc">Field Condition Report &amp; NOTAMs</div></div>
+          <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('notams','NOTAMs')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
+        </div>
+        <div class="doc-row">
+          <div><div class="code">FR</div><div class="desc">Field Reports</div></div>
+          <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('field_report','Field Reports')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
+        </div>
+        <div class="doc-row">
+          <div><div class="code">WX*</div><div class="desc">Winds &amp; Weather</div></div>
+          <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="showView('weather')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
+        </div>
         <div class="doc-row" style="border-bottom:none;">
           <div><div class="code">G*L/SS</div><div class="desc">Customers Requiring Special Services</div></div>
           <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="showToast('Not available \u2014 no data source for this document yet')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
         </div>
       </div>
-      <button class="section-bar collapsed" id="weather-bar" onclick="toggleWeatherSection()">
-        Weather
-        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
-      </button>
-      <div id="weather-body" style="display:none;"><p class="placeholder-note">Tap to load current METAR/TAF (uses the SimBrief username from Release/Load-from-SimBrief)</p></div>
+    </section>
+    <section id="weather-view" class="view">
+      <div class="topbar">
+        <button class="back-link" onclick="showView('documents')">Back</button>
+        <div class="topbar-title">
+          <h1>Winds &amp; Weather</h1>
+          <p>WX*$origin / WX*$destination</p>
+        </div>
+      </div>
+      <div id="weather-body"><p class="placeholder-note">Loading\u2026</p></div>
     </section>
 
     <section id="pdf-view" class="view">
@@ -1261,6 +1304,7 @@ function showView(view){
   document.getElementById('pdf-view').classList.toggle('active', view==='pdf');
   document.getElementById('sign-view').classList.toggle('active', view==='sign');
   document.getElementById('pairing-view').classList.toggle('active', view==='pairing');
+  document.getElementById('weather-view').classList.toggle('active', view==='weather');
   document.getElementById('nav-home').classList.toggle('active', view==='overview');
   document.getElementById('nav-docs').classList.toggle('active', view==='documents');
   document.getElementById('nav-release').classList.toggle('active', view==='release' || view==='confirm');
@@ -1270,6 +1314,7 @@ function showView(view){
   if(view === 'confirm') initConfirmView();
   if(view === 'sign') initSignPad();
   if(view === 'pairing') initPairingView();
+  if(view === 'weather' && !_weatherLoaded) loadWeather();
 }
 function initReleaseView(){
   const input = document.getElementById('release-user');
@@ -1428,7 +1473,14 @@ function toggleStatus(kind, elId){
     .then(r=>r.json())
     .then(data=>{
       const key = kind === 'signin' ? 'signed_in' : 'fit_for_duty';
-      document.getElementById(elId).classList.toggle('inactive', !data[key]);
+      const badgeId = kind === 'signin' ? 'signin-badge' : 'ffd-badge';
+      // Two elements can show this same status (the Overview badge, now
+      // read-only, and wherever it's actually toggled from) — keep both
+      // in sync rather than just the one that was tapped.
+      [elId, badgeId].forEach(id => {
+        const el = document.getElementById(id);
+        if(el) el.classList.toggle('inactive', !data[key]);
+      });
     })
     .catch(()=>showToast('Update failed'));
 }
@@ -1494,7 +1546,7 @@ async function renderPdfInline(bytes){
 async function viewDoc(kind, label){
   const data = await ensureRelease();
   if(!data) return;
-  const field = {rls:'rls_pdf_b64', fi:'fi_pdf_b64', fil:'fil_pdf_b64', wb:'wb_pdf_b64'}[kind];
+  const field = {rls:'rls_pdf_b64', fi:'fi_pdf_b64', fil:'fil_pdf_b64', wb:'wb_pdf_b64', notams:'notams_pdf_b64', field_report:'field_report_pdf_b64'}[kind];
   const b64 = data[field];
   if(!b64){ showToast(label + ' not available in this release'); return; }
   document.getElementById('pdf-view-title').textContent = label;
@@ -1847,18 +1899,11 @@ async function pollSimbriefReady(user, beforeTs, el, btn, attempt){
 }
 
 let _weatherLoaded = false;
-function toggleWeatherSection(){
-  const bar = document.getElementById('weather-bar');
-  const body = document.getElementById('weather-body');
-  const collapsed = bar.classList.toggle('collapsed');
-  body.style.display = collapsed ? 'none' : 'block';
-  if(!collapsed && !_weatherLoaded) loadWeather();
-}
 async function loadWeather(){
   const body = document.getElementById('weather-body');
   const userId = localStorage.getItem('fos_simbrief_user');
   if(!userId){
-    body.innerHTML = '<p class="placeholder-note">Set a SimBrief username on the Release tab first.</p>';
+    body.innerHTML = '<p class="placeholder-note">Send this flight to SimBrief first to get a username on file.</p>';
     return;
   }
   body.innerHTML = '<p class="placeholder-note">Loading…</p>';

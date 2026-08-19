@@ -302,14 +302,14 @@ def _flight_attendant(rng):
 # ---------------------------------------------------------------------------
 # FI — flight information
 # ---------------------------------------------------------------------------
-def build_fi_page(root, ctx=None, cpt="", gate=""):
+def build_fi_page(root, ctx=None, cpt="", gate="", arr_gate=""):
     ctx = ctx or build_context(root)
     c   = ctx
     rng = c['rng']
     cmd = f"FI{c['flt_disp']}/{c['ddMmm']}/{c['dep_hhmm']} {c['orig']}"
 
     gate     = gate or (_txt(root, 'origin/gate') or "A2")
-    arr_gate = _txt(root, 'destination/gate') or f"L{rng.randint(2, 30)}"
+    arr_gate = arr_gate or (_txt(root, 'destination/gate') or f"L{rng.randint(2, 30)}")
     payload  = int(round(_num(root, 'weights/payload')))
     tow      = int(round(_num(root, 'weights/est_tow')))
     fuel_ob  = int(round(_num(root, 'fuel/plan_ramp')))
