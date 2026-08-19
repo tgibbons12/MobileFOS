@@ -33,8 +33,10 @@ AA_ICAO = "AAL"
 _CACHE_TTL = 30 * 60
 _cache = {}
 
-# AeroAPI's airport-flights endpoints cap "start" at 10 days in the past.
-_LOOKBACK_DAYS = 10
+# AeroAPI's airport-flights endpoints cap "start" at 10 days in the past —
+# stay a day inside that so request latency between us computing "now" and
+# AeroAPI evaluating it server-side can't tip the value over the limit.
+_LOOKBACK_DAYS = 9
 
 
 class AeroApiError(Exception):
@@ -96,12 +98,24 @@ def get_suggestions(api_key, orig, dest):
     if cached and time.time() - cached[0] < _CACHE_TTL:
         return cached[1]
 
-    departures = _aa_airport_flights(api_key, orig, "departures")
-    arrivals = _aa_airport_flights(api_key, dest, "arrivals")
-    route_flights = _aa_route_between(api_key, orig, dest)
+    # Three independent calls — one hitting a transient/edge-case error
+    # (rate limit, a validation quirk on one specific airport) shouldn't
+    # sink suggestions the other two could still answer.
+    errors = []
+
+    def safe(fn, *args):
+        try:
+            return fn(*args)
+        except AeroApiError as e:
+            errors.append(str(e))
+            return []
+
+    departures = safe(_aa_airport_flights, api_key, orig, "departures")
+    arrivals = safe(_aa_airport_flights, api_key, dest, "arrivals")
+    route_flights = safe(_aa_route_between, api_key, orig, dest)
 
     if not departures and not arrivals and not route_flights:
-        raise AeroApiError(f"no AA flight data on file for {orig}/{dest}")
+        raise AeroApiError("; ".join(dict.fromkeys(errors)) or f"no AA flight data on file for {orig}/{dest}")
 
     # route_flights may mix completed and still-scheduled entries (the
     # to/{dest_id} endpoint doesn't guarantee only-completed the way the
