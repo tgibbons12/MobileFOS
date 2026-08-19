@@ -101,12 +101,14 @@ def _airport_icao(code):
 
 # PBS's A320-family equipment codes are keyed by sub-fleet prefix, not the
 # aircraft's own type number — confirmed convention, not a guess: 31x is
-# the A319 sub-fleet, 21x is the A321 sub-fleet. Extend as more prefixes
-# get confirmed; anything unmapped (including already-ICAO codes like
-# "B738" from a SimBrief-loaded leg) passes through unchanged.
+# the A319 sub-fleet, 21x is the A321 sub-fleet, 32x is the A320 sub-fleet.
+# Extend as more prefixes get confirmed; anything unmapped (including
+# already-ICAO codes like "B738" from a SimBrief-loaded leg) passes
+# through unchanged.
 _FLEET_TYPE_ICAO_PREFIX = {
     "31": "A319",
     "21": "A321",
+    "32": "A320",
 }
 
 
@@ -558,6 +560,12 @@ def render_fos_html(leg):
     ctx["crew_rows"] = "".join(rows) or '<p class="placeholder-note">No named crew on this leg.</p>'
     ctx["leg_id"] = str(leg.get("id", ""))
     ctx["fleet_type_icao"] = _fleet_type_icao(ctx.get("fleet_type", ""))
+    # Overview shows two parallel readings of the same aircraft: Fleet Type
+    # stays the raw PBS sub-fleet code (e.g. "32A"), Equipment Type is the
+    # decoded ICAO type (e.g. "A320") — previously equipment_type held the
+    # bid pack's own coarse "OPERATOR / FLEET" family string instead, which
+    # is what was showing the internal code here rather than a real type.
+    ctx["equipment_type"] = ctx["fleet_type_icao"] or ctx.get("equipment_type", "")
     # Neither PBS nor a SimBrief OFP ever carries a flight "status" — it's
     # not data either source has. Derive one locally from what this app
     # actually tracks rather than leaving it permanently blank.
