@@ -97,6 +97,22 @@ def _airport_icao(code):
         return code
     return _load_iata_to_icao_airports().get(code, code)
 
+
+# PBS's A320-family equipment codes are keyed by sub-fleet prefix, not the
+# aircraft's own type number — confirmed convention, not a guess: 31x is
+# the A319 sub-fleet, 21x is the A321 sub-fleet. Extend as more prefixes
+# get confirmed; anything unmapped (including already-ICAO codes like
+# "B738" from a SimBrief-loaded leg) passes through unchanged.
+_FLEET_TYPE_ICAO_PREFIX = {
+    "31": "A319",
+    "21": "A321",
+}
+
+
+def _fleet_type_icao(code):
+    code = (code or "").strip().upper()
+    return _FLEET_TYPE_ICAO_PREFIX.get(code[:2], code)
+
 app = Flask(__name__)
 LOG = logging.getLogger(__name__)
 
@@ -503,6 +519,7 @@ def render_fos_html(leg):
     crew = ctx.get("crew")
     ctx["crew_display"] = ", ".join(crew) if isinstance(crew, list) else str(crew or "")
     ctx["leg_id"] = str(leg.get("id", ""))
+    ctx["fleet_type_icao"] = _fleet_type_icao(ctx.get("fleet_type", ""))
     ctx["signed_in_class"] = "" if ctx.get("signed_in") else "inactive"
     ctx["ffd_class"] = "" if ctx.get("fit_for_duty") else "inactive"
     ctx["signed_class"] = "signed" if ctx.get("signature") else ""
@@ -1197,6 +1214,7 @@ const LEG_DESTINATION = "$destination";
 const LEG_TAIL_NUMBER = "$tail_number";
 const LEG_SCHED_OUT = "$sched_out";
 const LEG_FLEET_TYPE = "$fleet_type";
+const LEG_FLEET_TYPE_ICAO = "$fleet_type_icao";
 const LEG_EQUIPMENT_TYPE = "$equipment_type";
 function showView(view){
   document.getElementById('overview-view').classList.toggle('active', view==='overview');
@@ -1235,10 +1253,11 @@ async function prefillSimbriefGen(){
   document.getElementById('aero-key').value = localStorage.getItem('fos_aeroapi_key') || '';
   // Leg-specific aircraft data wins over the last-remembered one: a
   // SimBrief-loaded leg's fleet_type is already a real ICAO type code
-  // (aircraft/icaocode); a PBS-pairing leg's is the bid pack's raw
-  // equipment token, which may need hand-correcting if this fleet's PBS
-  // codes aren't already ICAO-formatted.
-  document.getElementById('sbgen-type').value = LEG_FLEET_TYPE || LEG_EQUIPMENT_TYPE || localStorage.getItem('fos_simbrief_airframe') || '';
+  // (aircraft/icaocode); a PBS-pairing leg's raw equipment token gets
+  // normalized server-side (_fleet_type_icao) for the sub-fleet prefixes
+  // that are confirmed (31x->A319, 21x->A321 today) and passed through
+  // unchanged otherwise.
+  document.getElementById('sbgen-type').value = LEG_FLEET_TYPE_ICAO || LEG_EQUIPMENT_TYPE || localStorage.getItem('fos_simbrief_airframe') || '';
   document.getElementById('sbgen-fltnum').value = LEG_FLIGHT_NUMBER || '';
   document.getElementById('sbgen-date').value = todayZuluDDMMMYY();
   document.getElementById('sbgen-time').value = (LEG_SCHED_OUT || '').replace(':', '');
