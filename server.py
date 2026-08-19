@@ -22,7 +22,7 @@ import time
 from datetime import datetime, timezone
 
 import requests
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify, Response, redirect
 from string import Template
 import aeroapi
 import pbs_parser
@@ -686,6 +686,24 @@ function loadFromSimbrief(){
   const saved = localStorage.getItem('fos_simbrief_user');
   if(saved) document.getElementById('sb-user').value = saved;
 })();
+
+// Relaunching the app (PWA icon, browser reopen) always hits this page —
+// jump straight back to whatever flight was last open instead of dumping
+// the pilot on the import screen every time. Verify against /archive
+// first so a stale id (leg gone after a backend restart) self-heals
+// instead of redirect-looping onto a 404.
+(function(){
+  const lastLeg = localStorage.getItem('fos_last_leg');
+  if(!lastLeg) return;
+  fetch('/archive').then(r => r.json()).then(rows => {
+    if(rows.some(r => String(r.id) === lastLeg)){
+      window.location.replace('/fos/' + lastLeg);
+    } else {
+      localStorage.removeItem('fos_last_leg');
+    }
+  }).catch(() => {});
+})();
+
 loadSequences();
 </script>
 </body></html>"""
@@ -810,7 +828,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   <main class="main">
     <section id="overview-view" class="view active">
       <div class="topbar">
-        <a class="back-link" href="/">Back</a>
+        <a class="back-link" href="/" onclick="localStorage.removeItem('fos_last_leg')">Back</a>
         <div class="topbar-actions">
           <button class="icon-btn" title="Settings" onclick="showToast('Settings')">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.34 1.87l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.7 1.7 0 00-1.87-.34 1.7 1.7 0 00-1 1.55V21a2 2 0 11-4 0v-.09A1.7 1.7 0 009 19.4a1.7 1.7 0 00-1.87.34l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.7 1.7 0 004.6 15a1.7 1.7 0 00-1.55-1H3a2 2 0 110-4h.09A1.7 1.7 0 004.6 9a1.7 1.7 0 00-.34-1.87l-.06-.06a2 2 0 112.83-2.83l.06.06A1.7 1.7 0 009 4.6a1.7 1.7 0 001-1.55V3a2 2 0 114 0v.09a1.7 1.7 0 001 1.55 1.7 1.7 0 001.87-.34l.06-.06a2 2 0 112.83 2.83l-.06.06A1.7 1.7 0 0019.4 9a1.7 1.7 0 001.55 1H21a2 2 0 110 4h-.09a1.7 1.7 0 00-1.55 1z"/></svg>
@@ -1208,6 +1226,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
 <div id="toast"></div>
 <script>
 const LEG_ID = "$leg_id";
+if(LEG_ID) localStorage.setItem('fos_last_leg', LEG_ID);
 const LEG_FLIGHT_NUMBER = "$flight_number";
 const LEG_ORIGIN = "$origin";
 const LEG_DESTINATION = "$destination";
