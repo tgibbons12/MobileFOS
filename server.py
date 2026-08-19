@@ -733,8 +733,8 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .doc-row{display:flex;align-items:center;justify-content:space-between;padding:11px 14px;border-bottom:1px solid var(--border);gap:10px;}
   .doc-row .code{font-weight:700;font-size:13px;}
   .doc-row .desc{font-size:12px;color:var(--label);margin-top:1px;}
-  .doc-row .actions{display:flex;align-items:center;gap:12px;flex:0 0 auto;}
-  .doc-row .actions svg{width:19px;height:19px;color:#5b6472;cursor:pointer;}
+  .doc-row .actions{display:flex;align-items:center;gap:26px;flex:0 0 auto;}
+  .doc-row .actions svg{width:19px;height:19px;color:#5b6472;cursor:pointer;padding:7px;margin:-7px;box-sizing:content-box;}
   .doc-row .check{color:var(--inactive,#9aa1ab);cursor:pointer;}
   .doc-row .check.signed{color:var(--green);}
   #sign-pad{touch-action:none;background:#fff;border:1px solid var(--border);border-radius:6px;width:100%;height:220px;}
