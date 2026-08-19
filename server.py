@@ -349,18 +349,20 @@ def set_gates(leg_id):
 
 @app.route("/aeroapi/suggest", methods=["POST"])
 def aeroapi_suggest():
-    """Route/gate suggestion for a flight ident, using the caller's own
-    AeroAPI key — we never store it, just relay it to FlightAware for this
-    one request (see aeroapi.py for the per-ident response cache)."""
+    """Gate/route suggestion for an origin/destination city pair, using the
+    caller's own AeroAPI key — we never store it, just relay it to
+    FlightAware for this one request (see aeroapi.py for the per-city-pair
+    response cache)."""
     body = request.get_json(silent=True) or {}
     api_key = (body.get("api_key") or "").strip()
-    ident = (body.get("ident") or "").strip().upper()
+    orig = (body.get("orig") or "").strip().upper()
+    dest = (body.get("dest") or "").strip().upper()
     if not api_key:
         return jsonify({"error": "FlightAware AeroAPI key required"}), 400
-    if not ident:
-        return jsonify({"error": "flight ident required (airline + flight number)"}), 400
+    if not orig or not dest:
+        return jsonify({"error": "origin and destination (ICAO) required"}), 400
     try:
-        result = aeroapi.get_suggestions(api_key, ident)
+        result = aeroapi.get_suggestions(api_key, orig, dest)
     except aeroapi.AeroApiError as e:
         return jsonify({"error": str(e)}), 502
     return jsonify(result)
@@ -1057,151 +1059,11 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           <div class="search-block"><label for="sbgen-date">Date (DDMMMYY)</label><input id="sbgen-date" type="text" placeholder="18AUG26"></div>
           <div class="search-block"><label for="sbgen-time">Dep Time, local (HHMM)</label><input id="sbgen-time" type="text"></div>
         </div>
-        <div class="search-row">
-          <div class="search-block"><label for="sbgen-reg">Tail Number (optional)</label><input id="sbgen-reg" type="text" placeholder="optional"></div>
-          <div class="search-block"><label for="sbgen-selcal">SELCAL (optional)</label><input id="sbgen-selcal" type="text" placeholder="optional"></div>
-        </div>
         <div class="search-block">
-          <label for="sbgen-steh">Scheduled Time Enroute, HHMM (optional)</label>
-          <input id="sbgen-steh" type="text" placeholder="optional">
+          <label for="sbgen-reg">Tail Number (optional)</label>
+          <input id="sbgen-reg" type="text" placeholder="optional">
         </div>
-
-        <button class="section-bar collapsed" id="sbgen-crew-bar" onclick="toggleSection('sbgen-crew')">
-          Aircraft &amp; Crew
-          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
-        </button>
-        <div id="sbgen-crew-body" style="display:none;">
-          <div class="search-row">
-            <div class="search-block"><label for="sbgen-fin">Fin Number (optional)</label><input id="sbgen-fin" type="text" placeholder="optional"></div>
-            <div class="search-block"><label for="sbgen-callsign">ATC Callsign (optional)</label><input id="sbgen-callsign" type="text" placeholder="optional"></div>
-          </div>
-          <div class="search-row">
-            <div class="search-block"><label for="sbgen-cpt">Captain Name (optional)</label><input id="sbgen-cpt" type="text" placeholder="optional"></div>
-            <div class="search-block"><label for="sbgen-dxname">Dispatcher Name (optional)</label><input id="sbgen-dxname" type="text" placeholder="optional"></div>
-          </div>
-          <div class="search-block">
-            <label for="sbgen-pid">Pilot ID (optional)</label>
-            <input id="sbgen-pid" type="text" placeholder="optional">
-          </div>
-        </div>
-
-        <button class="section-bar collapsed" id="sbgen-fuel-bar" onclick="toggleSection('sbgen-fuel')">
-          Fuel &amp; Weights
-          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
-        </button>
-        <div id="sbgen-fuel-body" style="display:none;">
-          <div class="search-row">
-            <div class="search-block"><label for="sbgen-pax">Passenger Count (optional)</label><input id="sbgen-pax" type="text" placeholder="optional"></div>
-            <div class="search-block"><label for="sbgen-cargo">Cargo Weight (optional)</label><input id="sbgen-cargo" type="text" placeholder="optional"></div>
-          </div>
-          <div class="search-row">
-            <div class="search-block"><label for="sbgen-fuelfactor">Fuel Factor (optional)</label><input id="sbgen-fuelfactor" type="text" placeholder="optional, e.g. 1.0"></div>
-            <div class="search-block"><label for="sbgen-manualzfw">Manual ZFW (optional)</label><input id="sbgen-manualzfw" type="text" placeholder="optional"></div>
-          </div>
-          <div class="search-row">
-            <div class="search-block"><label for="sbgen-addedfuel">Extra Fuel (optional)</label><input id="sbgen-addedfuel" type="text" placeholder="optional"></div>
-            <div class="search-block">
-              <label for="sbgen-addedfuel-units">Extra Fuel Units</label>
-              <select id="sbgen-addedfuel-units"><option value="LBS" selected>LBS</option><option value="KGS">KGS</option><option value="MIN">MIN</option></select>
-            </div>
-          </div>
-          <div class="search-row">
-            <div class="search-block"><label for="sbgen-taxiout">Taxi Out, min (optional)</label><input id="sbgen-taxiout" type="text" placeholder="optional"></div>
-            <div class="search-block"><label for="sbgen-taxiin">Taxi In, min (optional)</label><input id="sbgen-taxiin" type="text" placeholder="optional"></div>
-          </div>
-          <div class="search-row">
-            <div class="search-block"><label for="sbgen-civalue">Cost Index (optional)</label><input id="sbgen-civalue" type="text" placeholder="optional"></div>
-            <div class="search-block"><label for="sbgen-etopsrule">ETOPS Rule, min (optional)</label><input id="sbgen-etopsrule" type="text" placeholder="optional"></div>
-          </div>
-        </div>
-
-        <button class="section-bar collapsed" id="sbgen-profile-bar" onclick="toggleSection('sbgen-profile')">
-          Route &amp; Profile
-          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
-        </button>
-        <div id="sbgen-profile-body" style="display:none;">
-          <div class="search-row">
-            <div class="search-block"><label for="sbgen-origrwy">Departure Runway (optional)</label><input id="sbgen-origrwy" type="text" placeholder="optional"></div>
-            <div class="search-block"><label for="sbgen-destrwy">Arrival Runway (optional)</label><input id="sbgen-destrwy" type="text" placeholder="optional"></div>
-          </div>
-          <div class="search-block">
-            <label for="sbgen-fl">Cruise Altitude / FL (optional)</label>
-            <input id="sbgen-fl" type="text" placeholder="optional, e.g. 350">
-          </div>
-          <div class="search-row">
-            <div class="search-block"><label for="sbgen-climb">Climb Profile (optional)</label><input id="sbgen-climb" type="text" placeholder="optional"></div>
-            <div class="search-block"><label for="sbgen-descent">Descent Profile (optional)</label><input id="sbgen-descent" type="text" placeholder="optional"></div>
-          </div>
-          <div class="search-block">
-            <label for="sbgen-cruise">Cruise Profile (optional)</label>
-            <input id="sbgen-cruise" type="text" placeholder="optional">
-          </div>
-          <div class="check-grid">
-            <label><input id="sbgen-omit-sids" type="checkbox">Omit SIDs</label>
-            <label><input id="sbgen-omit-stars" type="checkbox">Omit STARs</label>
-            <label><input id="sbgen-find-sidstar" type="checkbox" checked>Auto-Select SID/STAR</label>
-          </div>
-        </div>
-
-        <button class="section-bar collapsed" id="sbgen-altn-bar" onclick="toggleSection('sbgen-altn')">
-          Alternates
-          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
-        </button>
-        <div id="sbgen-altn-body" style="display:none;">
-          <div class="search-block">
-            <label for="sbgen-altn">Primary Alternate — ICAO (optional)</label>
-            <input id="sbgen-altn" type="text" placeholder="optional, blank lets SimBrief pick">
-          </div>
-          <div class="search-block">
-            <label for="sbgen-altn-avoid">Avoid as Alternates (optional, comma-separated ICAOs)</label>
-            <input id="sbgen-altn-avoid" type="text" placeholder="optional">
-          </div>
-        </div>
-
-        <div class="search-row">
-          <div class="search-block">
-            <label for="sbgen-units">Units</label>
-            <select id="sbgen-units"><option value="LBS" selected>LBS</option><option value="KGS">KGS</option></select>
-          </div>
-          <div class="search-block">
-            <label for="sbgen-maps">Flight Maps</label>
-            <select id="sbgen-maps"><option value="detail" selected>Detailed</option><option value="simple">Simple</option><option value="none">None</option></select>
-          </div>
-        </div>
-        <div class="search-row">
-          <div class="search-block">
-            <label for="sbgen-contpct">Contingency Fuel</label>
-            <select id="sbgen-contpct">
-              <option value="auto" selected>AUTO</option><option value="0">0%</option><option value="0.02">2%</option>
-              <option value="0.03">3%</option><option value="0.05">5%</option><option value="0.1">10%</option>
-              <option value="0.15">15%</option><option value="0.2">20%</option>
-            </select>
-          </div>
-          <div class="search-block">
-            <label for="sbgen-resvrule">Reserve Fuel</label>
-            <select id="sbgen-resvrule">
-              <option value="auto">AUTO</option><option value="0">0 MIN</option><option value="15">15 MIN</option>
-              <option value="30">30 MIN</option><option value="45" selected>45 MIN</option><option value="60">60 MIN</option>
-              <option value="75">75 MIN</option><option value="90">90 MIN</option>
-            </select>
-          </div>
-        </div>
-        <div class="search-row">
-          <div class="search-block"><label for="sbgen-planformat">Plan Format (optional)</label><input id="sbgen-planformat" type="text" placeholder="optional, e.g. lido"></div>
-          <div class="search-block"><label for="sbgen-static-id">Static ID (optional)</label><input id="sbgen-static-id" type="text" placeholder="optional"></div>
-        </div>
-        <div class="search-block">
-          <label for="sbgen-manualrmk">Remarks (optional)</label>
-          <input id="sbgen-manualrmk" type="text" placeholder="optional">
-        </div>
-        <div class="check-grid">
-          <label><input id="sbgen-navlog" type="checkbox" checked>Detailed Navlog</label>
-          <label><input id="sbgen-stepclimbs" type="checkbox" checked>Plan Stepclimbs</label>
-          <label><input id="sbgen-tlr" type="checkbox" checked>Runway Analysis</label>
-          <label><input id="sbgen-notams" type="checkbox" checked>Include NOTAMs</label>
-          <label><input id="sbgen-firnot" type="checkbox">FIR NOTAMs</label>
-          <label><input id="sbgen-etops" type="checkbox">ETOPS Planning</label>
-        </div>
+        <p class="placeholder-note">Everything else — fuel, alternates, crew, output options — is set on SimBrief's own dispatch page after you tap below.</p>
         <div style="padding:14px;background:var(--card);">
           <button id="sbgen-btn" onclick="submitSimbriefGen()" style="margin:0;width:100%;background:var(--blue);color:#fff;border:none;padding:11px;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;">Open in SimBrief Dispatch</button>
           <div id="sbgen-msg" style="margin-top:10px;font-size:13px;color:var(--label);"></div>
@@ -1313,36 +1175,30 @@ async function fetchAeroSuggestions(){
   const msg = document.getElementById('aero-msg');
   const btn = document.getElementById('aero-btn');
   const key = document.getElementById('aero-key').value.trim();
-  const fltnum = document.getElementById('sbgen-fltnum').value.trim();
+  const orig = document.getElementById('sbgen-orig').value.trim().toUpperCase();
+  const dest = document.getElementById('sbgen-dest').value.trim().toUpperCase();
   document.getElementById('aero-results').style.display = 'none';
   if(!key){ msg.textContent = 'Enter your AeroAPI key first.'; msg.style.color = '#c0392b'; return; }
-  if(!fltnum){ msg.textContent = 'Flight Number is required — set that in Generate Flight Plan below first.'; msg.style.color = '#c0392b'; return; }
+  if(!orig || !dest){ msg.textContent = 'Origin and Destination are required — set those in Generate Flight Plan below first.'; msg.style.color = '#c0392b'; return; }
   localStorage.setItem('fos_aeroapi_key', key);
-  // Real-world route/gate history only exists under American's own ident —
-  // regional partners flying an AA-numbered route (Envoy, PSA, Republic,
-  // SkyWest, etc.) still file and fly it as "AAL", not the VA livery code
-  // in the Airline (ICAO) field above, so always look up AAL here even
-  // when that field disagrees.
-  const ident = 'AAL' + fltnum;
 
   btn.disabled = true;
-  msg.textContent = 'Looking up ' + ident + '…';
+  msg.textContent = 'Looking up AA at ' + orig + ' / ' + dest + '…';
   msg.style.color = '';
   try {
     const r = await fetch('/aeroapi/suggest', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({api_key: key, ident}),
+      body: JSON.stringify({api_key: key, orig, dest}),
     });
     const data = await r.json();
     btn.disabled = false;
     if(!r.ok){ msg.textContent = data.error || 'Lookup failed'; msg.style.color = '#c0392b'; return; }
     _aeroSuggestion = data;
-    document.getElementById('aero-route-val').textContent = data.route || '(no filed route on record)';
+    document.getElementById('aero-route-val').textContent = data.route_found ? (data.route || '(no filed route on record)') : `AA doesn't fly ${orig}→${dest} nonstop — no route suggestion`;
     document.getElementById('aero-gate-orig').textContent = data.gate_origin || '—';
     document.getElementById('aero-gate-dest').textContent = data.gate_destination || '—';
-    document.getElementById('aero-basis').textContent = data.never_flown
-      ? `${ident} has no completed-flight history yet — showing scheduled/filed data instead.`
-      : `Based on the last ${data.sample_size} flown flight(s) for ${ident}.`;
+    document.getElementById('aero-basis').textContent =
+      `Gates based on ${data.sample_size_origin} AA departure(s) at ${orig} and ${data.sample_size_destination} AA arrival(s) at ${dest} in the last 10 days.`;
     document.getElementById('aero-results').style.display = 'block';
     msg.textContent = '';
   } catch(e) {
@@ -1746,48 +1602,7 @@ async function submitSimbriefGen(){
   const fltnum = document.getElementById('sbgen-fltnum').value.trim();
   const date = document.getElementById('sbgen-date').value.trim().toUpperCase();
   const time = document.getElementById('sbgen-time').value.trim();
-  const steh = document.getElementById('sbgen-steh').value.trim();
   const reg = document.getElementById('sbgen-reg').value.trim().toUpperCase();
-  const selcal = document.getElementById('sbgen-selcal').value.trim().toUpperCase();
-  const units = document.getElementById('sbgen-units').value;
-  const contpct = document.getElementById('sbgen-contpct').value;
-  const resvrule = document.getElementById('sbgen-resvrule').value;
-  const maps = document.getElementById('sbgen-maps').value;
-  const planformat = document.getElementById('sbgen-planformat').value.trim().toLowerCase();
-  const navlog = document.getElementById('sbgen-navlog').checked;
-  const stepclimbs = document.getElementById('sbgen-stepclimbs').checked;
-  const tlr = document.getElementById('sbgen-tlr').checked;
-  const notams = document.getElementById('sbgen-notams').checked;
-  const firnot = document.getElementById('sbgen-firnot').checked;
-  const etops = document.getElementById('sbgen-etops').checked;
-  const fin = document.getElementById('sbgen-fin').value.trim().toUpperCase();
-  const callsign = document.getElementById('sbgen-callsign').value.trim().toUpperCase();
-  const cpt = document.getElementById('sbgen-cpt').value.trim();
-  const dxname = document.getElementById('sbgen-dxname').value.trim();
-  const pid = document.getElementById('sbgen-pid').value.trim();
-  const pax = document.getElementById('sbgen-pax').value.trim();
-  const cargo = document.getElementById('sbgen-cargo').value.trim();
-  const fuelfactor = document.getElementById('sbgen-fuelfactor').value.trim();
-  const manualzfw = document.getElementById('sbgen-manualzfw').value.trim();
-  const addedfuel = document.getElementById('sbgen-addedfuel').value.trim();
-  const addedfuelUnits = document.getElementById('sbgen-addedfuel-units').value;
-  const taxiout = document.getElementById('sbgen-taxiout').value.trim();
-  const taxiin = document.getElementById('sbgen-taxiin').value.trim();
-  const civalue = document.getElementById('sbgen-civalue').value.trim();
-  const etopsrule = document.getElementById('sbgen-etopsrule').value.trim();
-  const origrwy = document.getElementById('sbgen-origrwy').value.trim().toUpperCase();
-  const destrwy = document.getElementById('sbgen-destrwy').value.trim().toUpperCase();
-  const fl = document.getElementById('sbgen-fl').value.trim();
-  const climb = document.getElementById('sbgen-climb').value.trim();
-  const descent = document.getElementById('sbgen-descent').value.trim();
-  const cruise = document.getElementById('sbgen-cruise').value.trim();
-  const omitSids = document.getElementById('sbgen-omit-sids').checked;
-  const omitStars = document.getElementById('sbgen-omit-stars').checked;
-  const findSidstar = document.getElementById('sbgen-find-sidstar').checked;
-  const altn = document.getElementById('sbgen-altn').value.trim().toUpperCase();
-  const altnAvoid = document.getElementById('sbgen-altn-avoid').value.trim().toUpperCase();
-  const staticId = document.getElementById('sbgen-static-id').value.trim();
-  const manualrmk = document.getElementById('sbgen-manualrmk').value.trim();
 
   if(!user){ el.textContent = 'Enter your SimBrief username first.'; el.style.color = '#c0392b'; return; }
   if(!orig || !dest){ el.textContent = 'Origin and destination are required.'; el.style.color = '#c0392b'; return; }
@@ -1795,30 +1610,15 @@ async function submitSimbriefGen(){
   localStorage.setItem('fos_simbrief_user', user);
   localStorage.setItem('fos_simbrief_airframe', type);
 
+  // Everything not listed here (fuel, alternates, crew, output options...)
+  // is set by the pilot on SimBrief's own dispatch page instead of
+  // reimplemented as a control here — we only pre-fill what we actually
+  // know from the pairing/leg data.
   const params = new URLSearchParams();
   const set = (k, v) => { if(v) params.set(k, v); };
   set('orig', orig); set('dest', dest); set('type', type); set('route', route);
-  set('airline', airline); set('fltnum', fltnum); set('date', date);
+  set('airline', airline); set('fltnum', fltnum); set('date', date); set('reg', reg);
   if(time && time.length === 4){ set('deph', time.slice(0, 2)); set('depm', time.slice(2, 4)); }
-  if(steh && steh.length === 4){ set('steh', steh.slice(0, 2)); set('stem', steh.slice(2, 4)); }
-  set('reg', reg); set('selcal', selcal); set('planformat', planformat);
-  set('units', units); set('contpct', contpct); set('resvrule', resvrule); set('maps', maps);
-  params.set('navlog', navlog ? '1' : '0');
-  params.set('stepclimbs', stepclimbs ? '1' : '0');
-  params.set('tlr', tlr ? '1' : '0');
-  params.set('notams', notams ? '1' : '0');
-  params.set('firnot', firnot ? '1' : '0');
-  params.set('etops', etops ? '1' : '0');
-  set('fin', fin); set('callsign', callsign); set('cpt', cpt); set('dxname', dxname); set('pid', pid);
-  set('pax', pax); set('cargo', cargo); set('fuelfactor', fuelfactor); set('manualzfw', manualzfw);
-  if(addedfuel){ set('addedfuel', addedfuel); set('addedfuel_units', addedfuelUnits); }
-  set('taxiout', taxiout); set('taxiin', taxiin); set('civalue', civalue); set('etopsrule', etopsrule);
-  set('origrwy', origrwy); set('destrwy', destrwy); set('fl', fl);
-  set('climb', climb); set('descent', descent); set('cruise', cruise);
-  params.set('omit_sids', omitSids ? '1' : '0');
-  params.set('omit_stars', omitStars ? '1' : '0');
-  params.set('find_sidstar', findSidstar ? '1' : '0');
-  set('altn', altn); set('altn_avoid', altnAvoid); set('static_id', staticId); set('manualrmk', manualrmk);
   const url = 'https://dispatch.simbrief.com/options/custom?' + params.toString();
 
   // Popup must open synchronously, before any await — Safari (and others)
