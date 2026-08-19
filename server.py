@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 import requests
 from flask import Flask, request, jsonify, Response
 from string import Template
+import aeroapi
 import pbs_parser
 import release_engine
 from fos_pages import AIRLINE_IATA
@@ -317,6 +318,38 @@ def toggle_ffd(leg_id):
         return jsonify({"error": "not found"}), 404
     record["fit_for_duty"] = not record.get("fit_for_duty", False)
     return jsonify({"fit_for_duty": record["fit_for_duty"]})
+
+
+@app.route("/fos/<int:leg_id>/gates", methods=["POST"])
+def set_gates(leg_id):
+    record = next((r for r in _store["archive"] if r["id"] == leg_id), None)
+    if not record:
+        return jsonify({"error": "not found"}), 404
+    body = request.get_json(silent=True) or {}
+    if "dep_gate" in body:
+        record["dep_gate"] = body["dep_gate"]
+    if "arr_gate" in body:
+        record["arr_gate"] = body["arr_gate"]
+    return jsonify({"dep_gate": record.get("dep_gate", ""), "arr_gate": record.get("arr_gate", "")})
+
+
+@app.route("/aeroapi/suggest", methods=["POST"])
+def aeroapi_suggest():
+    """Route/gate suggestion for a flight ident, using the caller's own
+    AeroAPI key — we never store it, just relay it to FlightAware for this
+    one request (see aeroapi.py for the per-ident response cache)."""
+    body = request.get_json(silent=True) or {}
+    api_key = (body.get("api_key") or "").strip()
+    ident = (body.get("ident") or "").strip().upper()
+    if not api_key:
+        return jsonify({"error": "FlightAware AeroAPI key required"}), 400
+    if not ident:
+        return jsonify({"error": "flight ident required (airline + flight number)"}), 400
+    try:
+        result = aeroapi.get_suggestions(api_key, ident)
+    except aeroapi.AeroApiError as e:
+        return jsonify({"error": str(e)}), 502
+    return jsonify(result)
 
 
 @app.route("/fos/<int:leg_id>/sign", methods=["POST"])
@@ -816,8 +849,8 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         <div class="content-grid">
           <div class="col-divider">
             <div class="info-row"><span class="lbl">Arrival Date</span><span class="val">$arr_date</span></div>
-            <div class="info-row"><span class="lbl">Departure Gate</span><span class="val">$dep_gate</span></div>
-            <div class="info-row"><span class="lbl">Arrival Gate</span><span class="val">$arr_gate</span></div>
+            <div class="info-row"><span class="lbl">Departure Gate</span><span class="val" id="ov-dep-gate">$dep_gate</span></div>
+            <div class="info-row"><span class="lbl">Arrival Gate</span><span class="val" id="ov-arr-gate">$arr_gate</span></div>
             <div class="info-row"><span class="lbl">Fleet Type</span><span class="val">$fleet_type</span></div>
             <div class="info-row"><span class="lbl">Tail Number</span><span class="val">$tail_number $tail_routing</span></div>
             <div class="info-row"><span class="lbl">Status</span><span class="val">$status</span></div>
@@ -857,7 +890,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         <div class="col"><span>$origin</span><span>$destination</span></div>
         <div class="col"><span>$dep_date</span><span>$arr_date</span></div>
         <div class="col"><span>$sched_out</span><span>$sched_in</span></div>
-        <div class="col"><span>$dep_gate</span><span>$arr_gate</span></div>
+        <div class="col"><span id="doc-dep-gate">$dep_gate</span><span id="doc-arr-gate">$arr_gate</span></div>
       </div>
       <div class="search-block">
         <label for="doc-search">Find a Document</label>
@@ -962,6 +995,29 @@ FOS_TEMPLATE = """<!DOCTYPE html>
       <div class="search-block">
         <label for="release-user">SimBrief Username</label>
         <input id="release-user" type="text" placeholder="Your SimBrief username">
+      </div>
+
+      <button class="section-bar" id="aero-bar" onclick="toggleSection('aero')">
+        Route &amp; Gate Suggestions (FlightAware)
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+      </button>
+      <div id="aero-body">
+        <div class="search-block">
+          <label for="aero-key">FlightAware AeroAPI Key</label>
+          <input id="aero-key" type="password" placeholder="Your AeroAPI key" onchange="localStorage.setItem('fos_aeroapi_key', this.value.trim())">
+        </div>
+        <div style="padding:14px;background:var(--card);">
+          <button id="aero-btn" onclick="fetchAeroSuggestions()" style="margin:0;width:100%;background:var(--blue);color:#fff;border:none;padding:11px;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;">Get Suggestions</button>
+          <div id="aero-msg" style="margin-top:10px;font-size:13px;color:var(--label);"></div>
+          <div id="aero-results" style="display:none;margin-top:10px;">
+            <div class="info-row"><span class="lbl">Suggested Route</span><span class="val" id="aero-route-val">—</span></div>
+            <button onclick="applyAeroRoute()" style="margin:8px 0 0;width:100%;background:var(--green);color:#fff;border:none;padding:9px;border-radius:5px;font-size:13px;font-weight:600;cursor:pointer;">Use This Route</button>
+            <div class="info-row" style="margin-top:10px;"><span class="lbl">Suggested Gate — Origin</span><span class="val" id="aero-gate-orig">—</span></div>
+            <div class="info-row"><span class="lbl">Suggested Gate — Destination</span><span class="val" id="aero-gate-dest">—</span></div>
+            <button onclick="applyAeroGates()" style="margin:8px 0 0;width:100%;background:var(--green);color:#fff;border:none;padding:9px;border-radius:5px;font-size:13px;font-weight:600;cursor:pointer;">Apply Gates to This Flight</button>
+            <p class="placeholder-note" id="aero-basis" style="margin-top:8px;"></p>
+          </div>
+        </div>
       </div>
 
       <button class="section-bar" id="sbgen-bar" onclick="toggleSection('sbgen')">
@@ -1100,6 +1156,7 @@ function initReleaseView(){
   prefillSimbriefGen();
 }
 async function prefillSimbriefGen(){
+  document.getElementById('aero-key').value = localStorage.getItem('fos_aeroapi_key') || '';
   document.getElementById('sbgen-type').value = localStorage.getItem('fos_simbrief_airframe') || '';
   document.getElementById('sbgen-fltnum').value = LEG_FLIGHT_NUMBER || '';
   document.getElementById('sbgen-date').value = todayZuluDDMMMYY();
@@ -1130,6 +1187,61 @@ async function prefillSimbriefGen(){
   document.getElementById('sbgen-orig').value = orig || '';
   document.getElementById('sbgen-dest').value = dest || '';
   document.getElementById('sbgen-airline').value = airline || '';
+}
+
+let _aeroSuggestion = null;
+async function fetchAeroSuggestions(){
+  const msg = document.getElementById('aero-msg');
+  const btn = document.getElementById('aero-btn');
+  const key = document.getElementById('aero-key').value.trim();
+  const airline = document.getElementById('sbgen-airline').value.trim().toUpperCase();
+  const fltnum = document.getElementById('sbgen-fltnum').value.trim();
+  document.getElementById('aero-results').style.display = 'none';
+  if(!key){ msg.textContent = 'Enter your AeroAPI key first.'; msg.style.color = '#c0392b'; return; }
+  if(!airline || !fltnum){ msg.textContent = 'Airline (ICAO) and Flight Number are required — set those in Generate Flight Plan below first.'; msg.style.color = '#c0392b'; return; }
+  localStorage.setItem('fos_aeroapi_key', key);
+  const ident = airline + fltnum;
+
+  btn.disabled = true;
+  msg.textContent = 'Looking up ' + ident + '…';
+  msg.style.color = '';
+  try {
+    const r = await fetch('/aeroapi/suggest', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({api_key: key, ident}),
+    });
+    const data = await r.json();
+    btn.disabled = false;
+    if(!r.ok){ msg.textContent = data.error || 'Lookup failed'; msg.style.color = '#c0392b'; return; }
+    _aeroSuggestion = data;
+    document.getElementById('aero-route-val').textContent = data.route || '(no filed route on record)';
+    document.getElementById('aero-gate-orig').textContent = data.gate_origin || '—';
+    document.getElementById('aero-gate-dest').textContent = data.gate_destination || '—';
+    document.getElementById('aero-basis').textContent = `Based on ${data.sample_size} recent flight(s) for ${ident}.`;
+    document.getElementById('aero-results').style.display = 'block';
+    msg.textContent = '';
+  } catch(e) {
+    btn.disabled = false;
+    msg.textContent = 'Request failed: ' + e;
+    msg.style.color = '#c0392b';
+  }
+}
+function applyAeroRoute(){
+  if(_aeroSuggestion && _aeroSuggestion.route) document.getElementById('sbgen-route').value = _aeroSuggestion.route;
+}
+async function applyAeroGates(){
+  if(!_aeroSuggestion) return;
+  try {
+    const r = await fetch('/fos/' + LEG_ID + '/gates', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({dep_gate: _aeroSuggestion.gate_origin || '', arr_gate: _aeroSuggestion.gate_destination || ''}),
+    });
+    const data = await r.json();
+    if(!r.ok){ showToast(data.error || 'Could not apply gates'); return; }
+    for(const id of ['ov-dep-gate', 'doc-dep-gate']) { const el = document.getElementById(id); if(el) el.textContent = data.dep_gate || ''; }
+    for(const id of ['ov-arr-gate', 'doc-arr-gate']) { const el = document.getElementById(id); if(el) el.textContent = data.arr_gate || ''; }
+    showToast('Gates applied');
+  } catch(e) { showToast('Request failed: ' + e); }
 }
 function generateRelease(){
   const btn = document.getElementById('release-gen-btn');
