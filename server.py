@@ -14,17 +14,89 @@ call to /generate. See build_leg_from_sources() below for the seam.
 """
 
 import base64
+import csv
+import io
 import logging
 import os
 import time
 from datetime import datetime, timezone
 
+import requests
 from flask import Flask, request, jsonify, Response
 from string import Template
 import pbs_parser
 import release_engine
+from fos_pages import AIRLINE_IATA
 import simbrief_ofp
 import simbrief_apiv1
+
+# PBS's "OPERATOR / FLEET" line carries the two-letter IATA code; SimBrief's
+# generate-flight-plan form wants the three-letter ICAO code instead. Reuse
+# fos_pages' ICAO->IATA map (the release pages' source of truth) rather than
+# keeping a second, driftable copy here.
+_IATA_TO_ICAO = {iata: icao for icao, iata in AIRLINE_IATA.items()}
+
+# PBS station codes are 3-letter IATA (e.g. LAX); SimBrief's orig/dest params
+# — and the api_code signature/ofp_id hash derived from them — need the
+# 4-letter ICAO identifier instead. Lazily built from OurAirports' public
+# airports.csv (CC0) and disk-cached for a week; falls back to {} on any
+# network hiccup so a stale/missing cache just means no conversion happens.
+_AIRPORTS_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ourairports_airports.csv")
+_AIRPORTS_CACHE_MAX_AGE = 7 * 24 * 3600
+_iata_to_icao_airport = None
+
+
+def _load_iata_to_icao_airports():
+    global _iata_to_icao_airport
+    if _iata_to_icao_airport is not None:
+        return _iata_to_icao_airport
+
+    raw = None
+    if os.path.exists(_AIRPORTS_CACHE_PATH):
+        try:
+            if time.time() - os.path.getmtime(_AIRPORTS_CACHE_PATH) < _AIRPORTS_CACHE_MAX_AGE:
+                with open(_AIRPORTS_CACHE_PATH, "r", encoding="utf-8") as f:
+                    raw = f.read()
+        except OSError:
+            raw = None
+
+    if raw is None:
+        try:
+            resp = requests.get("https://davidmegginson.github.io/ourairports-data/airports.csv", timeout=12)
+            resp.raise_for_status()
+            raw = resp.text
+            try:
+                with open(_AIRPORTS_CACHE_PATH, "w", encoding="utf-8") as f:
+                    f.write(raw)
+            except OSError:
+                pass
+        except requests.RequestException as e:
+            LOG.debug(f"[OurAirports] airports.csv download failed: {e}")
+            _iata_to_icao_airport = {}
+            return _iata_to_icao_airport
+
+    db = {}
+    try:
+        for row in csv.DictReader(io.StringIO(raw)):
+            iata = (row.get("iata_code") or "").strip().upper()
+            ident = (row.get("ident") or "").strip().upper()
+            if iata and ident and iata not in db:
+                db[iata] = ident
+    except csv.Error as e:
+        LOG.warning(f"[OurAirports] airports.csv parse error: {e}")
+        db = {}
+    _iata_to_icao_airport = db
+    return _iata_to_icao_airport
+
+
+def _airport_icao(code):
+    """Best-effort IATA->ICAO for a station code; passes through anything
+    already 4 letters or not found in the map (some PBS stations are
+    already ICAO, e.g. Canadian CYxx fields)."""
+    code = (code or "").strip().upper()
+    if not code or len(code) == 4:
+        return code
+    return _load_iata_to_icao_airports().get(code, code)
 
 app = Flask(__name__)
 LOG = logging.getLogger(__name__)
@@ -180,7 +252,17 @@ def get_pbs_sequence(seq_number):
     seq = next((s for s in _pbs_store["sequences"] if s["seq"] == seq_number), None)
     if not seq:
         return jsonify({"error": "not found"}), 404
-    return jsonify(seq)
+    out = dict(seq)
+    operator_iata = _pbs_store["meta"].get("operator", "").upper()
+    out["operator"] = _IATA_TO_ICAO.get(operator_iata, operator_iata)
+    out["duty_days"] = [
+        {**day, "legs": [
+            {**leg, "origin_icao": _airport_icao(leg["origin"]), "destination_icao": _airport_icao(leg["destination"])}
+            for leg in day["legs"]
+        ]}
+        for day in seq["duty_days"]
+    ]
+    return jsonify(out)
 
 
 @app.route("/pbs/sequences/<seq_number>/generate", methods=["POST"])
@@ -1264,7 +1346,7 @@ function renderPairing(seqData){
       sbIcon.setAttribute('stroke-linejoin', 'round');
       sbIcon.setAttribute('title', 'Generate via SimBrief');
       sbIcon.innerHTML = '<path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/>';
-      sbIcon.onclick = (e) => { e.stopPropagation(); openSimbriefGen(leg, day.duty_day, i); };
+      sbIcon.onclick = (e) => { e.stopPropagation(); openSimbriefGen(leg, day.duty_day, i, seqData.operator); };
       actions.appendChild(sbIcon);
       actions.insertAdjacentHTML('beforeend', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>');
       row.appendChild(left);
@@ -1325,13 +1407,18 @@ async function cacheAllPairingLegs(seqData, position, msgEl){
 }
 
 let _sbGenLeg = null;
-function openSimbriefGen(leg, dutyDay, legIndex){
+function todayZuluDDMMMYY(){
+  const months = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+  const d = new Date();
+  return String(d.getUTCDate()).padStart(2, '0') + months[d.getUTCMonth()] + String(d.getUTCFullYear()).slice(-2);
+}
+function openSimbriefGen(leg, dutyDay, legIndex, operator){
   _sbGenLeg = leg;
-  document.getElementById('sb-gen-route').textContent = leg.origin + ' → ' + leg.destination;
+  document.getElementById('sb-gen-route').textContent = (leg.origin_icao || leg.origin) + ' → ' + (leg.destination_icao || leg.destination);
   document.getElementById('sb-gen-type').value = localStorage.getItem('fos_simbrief_airframe') || '';
-  document.getElementById('sb-gen-airline').value = '';
+  document.getElementById('sb-gen-airline').value = operator || '';
   document.getElementById('sb-gen-fltnum').value = leg.flight_number || '';
-  document.getElementById('sb-gen-date').value = '';
+  document.getElementById('sb-gen-date').value = todayZuluDDMMMYY();
   document.getElementById('sb-gen-time').value = leg.dep_local || '';
   document.getElementById('sb-gen-reg').value = '';
   const savedUser = localStorage.getItem('fos_simbrief_user');
@@ -1352,7 +1439,7 @@ async function submitSimbriefGen(){
   const date = document.getElementById('sb-gen-date').value.trim().toUpperCase();
   const time = document.getElementById('sb-gen-time').value.trim();
   const reg = document.getElementById('sb-gen-reg').value.trim().toUpperCase();
-  const orig = _sbGenLeg.origin, dest = _sbGenLeg.destination;
+  const orig = _sbGenLeg.origin_icao || _sbGenLeg.origin, dest = _sbGenLeg.destination_icao || _sbGenLeg.destination;
 
   if(!user){ el.textContent = 'Enter your SimBrief username first.'; el.style.color = '#c0392b'; return; }
   if(!type){ el.textContent = 'Enter the SimBrief aircraft type code first.'; el.style.color = '#c0392b'; return; }
