@@ -554,7 +554,7 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
   <div class="panel">
     <div style="font-size:13px;color:#6b7380;margin-bottom:4px;">Loads whatever OFP is currently on this SimBrief account right now — for dispatching the flight you're on today, not for browsing a schedule.</div>
     <label for="sb-user">SimBrief Username</label>
-    <input id="sb-user" type="text" placeholder="e.g. tgibbons">
+    <input id="sb-user" type="text" placeholder="Your SimBrief username">
     <br><button onclick="loadFromSimbrief()">Load Current Flight</button>
     <div id="sb-msg" class="msg"></div>
   </div>
@@ -724,7 +724,12 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .info-row .val{color:var(--value);font-weight:500;text-align:right;word-break:break-word;}
   .search-block{background:var(--card);padding:12px 14px;border-bottom:1px solid var(--border);}
   .search-block label{display:block;font-size:13px;font-weight:600;margin-bottom:6px;}
-  .search-block input{width:100%;padding:9px 10px;border:1px solid var(--border);border-radius:5px;font-size:13.5px;background:#fbfbfc;}
+  .search-block input,.search-block select{width:100%;padding:9px 10px;border:1px solid var(--border);border-radius:5px;font-size:13.5px;background:#fbfbfc;}
+  .search-row{display:flex;gap:10px;background:var(--card);padding:12px 14px;border-bottom:1px solid var(--border);}
+  .search-row .search-block{flex:1;border-bottom:none;padding:0;background:none;}
+  .check-grid{display:flex;flex-wrap:wrap;gap:10px 18px;background:var(--card);padding:12px 14px;border-bottom:1px solid var(--border);}
+  .check-grid label{display:flex;align-items:center;gap:7px;font-size:13px;font-weight:600;margin:0;}
+  .check-grid input{width:auto;}
   .section-bar{display:flex;align-items:center;justify-content:space-between;background:var(--blue);color:#fff;padding:10px 14px;font-size:14px;font-weight:600;cursor:pointer;border:none;width:100%;text-align:left;}
   .section-bar svg{width:16px;height:16px;transition:transform .15s ease;}
   .section-bar.collapsed svg.chevron{transform:rotate(180deg);}
@@ -945,47 +950,6 @@ FOS_TEMPLATE = """<!DOCTYPE html>
       </div>
       <div id="pairing-body"><p class="placeholder-note">Loading…</p></div>
     </section>
-    <section id="sb-gen-view" class="view">
-      <div class="topbar">
-        <button class="back-link" onclick="showView('pairing')">Back</button>
-        <div class="topbar-title">
-          <h1>Generate via SimBrief</h1>
-          <p id="sb-gen-route"></p>
-        </div>
-      </div>
-      <div class="search-block">
-        <label for="sb-gen-user">SimBrief Username</label>
-        <input id="sb-gen-user" type="text" placeholder="e.g. tgibbons">
-      </div>
-      <div class="search-block">
-        <label for="sb-gen-type">Aircraft Type — code (b738) or your saved airframe's Internal ID (123456_1582090020)</label>
-        <input id="sb-gen-type" type="text" placeholder="b738 or 123456_1582090020">
-      </div>
-      <div class="search-block">
-        <label for="sb-gen-airline">Airline (ICAO)</label>
-        <input id="sb-gen-airline" type="text" placeholder="e.g. EMY">
-      </div>
-      <div class="search-block">
-        <label for="sb-gen-fltnum">Flight Number</label>
-        <input id="sb-gen-fltnum" type="text">
-      </div>
-      <div class="search-block">
-        <label for="sb-gen-date">Date (DDMMMYY, e.g. 18AUG26)</label>
-        <input id="sb-gen-date" type="text">
-      </div>
-      <div class="search-block">
-        <label for="sb-gen-time">Departure Time (local, HHMM)</label>
-        <input id="sb-gen-time" type="text">
-      </div>
-      <div class="search-block">
-        <label for="sb-gen-reg">Tail Number (optional)</label>
-        <input id="sb-gen-reg" type="text" placeholder="optional">
-      </div>
-      <div style="padding:14px;background:var(--card);">
-        <button id="sb-gen-btn" onclick="submitSimbriefGen()" style="margin:0;width:100%;background:var(--blue);color:#fff;border:none;padding:11px;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;">Generate Flight Plan</button>
-        <div id="sb-gen-msg" style="margin-top:10px;font-size:13px;color:var(--label);"></div>
-      </div>
-    </section>
     <section id="release-view" class="view">
       <div class="topbar">
         <button class="back-link" onclick="showView('overview')">Back</button>
@@ -997,9 +961,93 @@ FOS_TEMPLATE = """<!DOCTYPE html>
       <div class="status-bar"><span>SEQ $seq</span><span>$date</span></div>
       <div class="search-block">
         <label for="release-user">SimBrief Username</label>
-        <input id="release-user" type="text" placeholder="e.g. tgibbons">
+        <input id="release-user" type="text" placeholder="Your SimBrief username">
       </div>
-      <div style="padding:14px;background:var(--card);">
+
+      <button class="section-bar" id="sbgen-bar" onclick="toggleSection('sbgen')">
+        Generate Flight Plan (SimBrief)
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+      </button>
+      <div id="sbgen-body">
+        <div class="search-row">
+          <div class="search-block"><label for="sbgen-orig">Origin (ICAO)</label><input id="sbgen-orig" type="text" placeholder="ZZZZ"></div>
+          <div class="search-block"><label for="sbgen-dest">Destination (ICAO)</label><input id="sbgen-dest" type="text" placeholder="ZZZZ"></div>
+        </div>
+        <div class="search-block">
+          <label for="sbgen-type">Aircraft Type — code (b738) or your saved airframe's Internal ID (123456_1582090020)</label>
+          <input id="sbgen-type" type="text" placeholder="b738 or 123456_1582090020">
+        </div>
+        <div class="search-block">
+          <label for="sbgen-route">Route (optional — blank uses SimBrief's last-used route for this city pair)</label>
+          <input id="sbgen-route" type="text" placeholder="optional">
+        </div>
+        <div class="search-row">
+          <div class="search-block"><label for="sbgen-airline">Airline (ICAO)</label><input id="sbgen-airline" type="text"></div>
+          <div class="search-block"><label for="sbgen-fltnum">Flight Number</label><input id="sbgen-fltnum" type="text"></div>
+        </div>
+        <div class="search-row">
+          <div class="search-block"><label for="sbgen-date">Date (DDMMMYY)</label><input id="sbgen-date" type="text" placeholder="18AUG26"></div>
+          <div class="search-block"><label for="sbgen-time">Dep Time, local (HHMM)</label><input id="sbgen-time" type="text"></div>
+        </div>
+        <div class="search-row">
+          <div class="search-block"><label for="sbgen-reg">Tail Number (optional)</label><input id="sbgen-reg" type="text" placeholder="optional"></div>
+          <div class="search-block"><label for="sbgen-selcal">SELCAL (optional)</label><input id="sbgen-selcal" type="text" placeholder="optional"></div>
+        </div>
+        <div class="search-block">
+          <label for="sbgen-steh">Scheduled Time Enroute, HHMM (optional)</label>
+          <input id="sbgen-steh" type="text" placeholder="optional">
+        </div>
+        <div class="search-row">
+          <div class="search-block">
+            <label for="sbgen-units">Units</label>
+            <select id="sbgen-units"><option value="LBS" selected>LBS</option><option value="KGS">KGS</option></select>
+          </div>
+          <div class="search-block">
+            <label for="sbgen-maps">Flight Maps</label>
+            <select id="sbgen-maps"><option value="detail" selected>Detailed</option><option value="simple">Simple</option><option value="none">None</option></select>
+          </div>
+        </div>
+        <div class="search-row">
+          <div class="search-block">
+            <label for="sbgen-contpct">Contingency Fuel</label>
+            <select id="sbgen-contpct">
+              <option value="auto" selected>AUTO</option><option value="0">0%</option><option value="0.02">2%</option>
+              <option value="0.03">3%</option><option value="0.05">5%</option><option value="0.1">10%</option>
+              <option value="0.15">15%</option><option value="0.2">20%</option>
+            </select>
+          </div>
+          <div class="search-block">
+            <label for="sbgen-resvrule">Reserve Fuel</label>
+            <select id="sbgen-resvrule">
+              <option value="auto">AUTO</option><option value="0">0 MIN</option><option value="15">15 MIN</option>
+              <option value="30">30 MIN</option><option value="45" selected>45 MIN</option><option value="60">60 MIN</option>
+              <option value="75">75 MIN</option><option value="90">90 MIN</option>
+            </select>
+          </div>
+        </div>
+        <div class="search-block">
+          <label for="sbgen-planformat">Plan Format (optional)</label>
+          <input id="sbgen-planformat" type="text" placeholder="optional, e.g. lido">
+        </div>
+        <div class="check-grid">
+          <label><input id="sbgen-navlog" type="checkbox" checked>Detailed Navlog</label>
+          <label><input id="sbgen-stepclimbs" type="checkbox" checked>Plan Stepclimbs</label>
+          <label><input id="sbgen-tlr" type="checkbox" checked>Runway Analysis</label>
+          <label><input id="sbgen-notams" type="checkbox" checked>Include NOTAMs</label>
+          <label><input id="sbgen-firnot" type="checkbox">FIR NOTAMs</label>
+          <label><input id="sbgen-etops" type="checkbox">ETOPS Planning</label>
+        </div>
+        <div style="padding:14px;background:var(--card);">
+          <button id="sbgen-btn" onclick="submitSimbriefGen()" style="margin:0;width:100%;background:var(--blue);color:#fff;border:none;padding:11px;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;">Generate Flight Plan</button>
+          <div id="sbgen-msg" style="margin-top:10px;font-size:13px;color:var(--label);"></div>
+        </div>
+      </div>
+
+      <button class="section-bar" id="relgen-bar" style="margin-top:2px;" onclick="toggleSection('relgen')">
+        Generate Release
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+      </button>
+      <div id="relgen-body" style="padding:14px;background:var(--card);">
         <button class="docs-btn" id="release-gen-btn" style="border-radius:5px;" onclick="generateRelease()">Generate Release</button>
         <div id="release-status" style="margin-top:10px;font-size:13px;color:var(--label);"></div>
         <div id="release-downloads" style="display:none;margin-top:10px;gap:10px;flex-wrap:wrap;">
@@ -1013,6 +1061,11 @@ FOS_TEMPLATE = """<!DOCTYPE html>
 <div id="toast"></div>
 <script>
 const LEG_ID = "$leg_id";
+const LEG_FLIGHT_NUMBER = "$flight_number";
+const LEG_ORIGIN = "$origin";
+const LEG_DESTINATION = "$destination";
+const LEG_TAIL_NUMBER = "$tail_number";
+const LEG_SCHED_OUT = "$sched_out";
 function showView(view){
   document.getElementById('overview-view').classList.toggle('active', view==='overview');
   document.getElementById('documents-view').classList.toggle('active', view==='documents');
@@ -1020,7 +1073,6 @@ function showView(view){
   document.getElementById('pdf-view').classList.toggle('active', view==='pdf');
   document.getElementById('sign-view').classList.toggle('active', view==='sign');
   document.getElementById('pairing-view').classList.toggle('active', view==='pairing');
-  document.getElementById('sb-gen-view').classList.toggle('active', view==='sb-gen');
   document.getElementById('nav-home').classList.toggle('active', view==='overview');
   document.getElementById('nav-docs').classList.toggle('active', view==='documents');
   document.getElementById('nav-release').classList.toggle('active', view==='release');
@@ -1045,6 +1097,39 @@ function initReleaseView(){
       document.getElementById('release-gen-btn').disabled = true;
     }
   }).catch(()=>{});
+  prefillSimbriefGen();
+}
+async function prefillSimbriefGen(){
+  document.getElementById('sbgen-type').value = localStorage.getItem('fos_simbrief_airframe') || '';
+  document.getElementById('sbgen-fltnum').value = LEG_FLIGHT_NUMBER || '';
+  document.getElementById('sbgen-date').value = todayZuluDDMMMYY();
+  document.getElementById('sbgen-time').value = (LEG_SCHED_OUT || '').replace(':', '');
+  document.getElementById('sbgen-reg').value = LEG_TAIL_NUMBER || '';
+
+  let orig = LEG_ORIGIN, dest = LEG_DESTINATION, airline = '';
+  if(LEG_SEQ){
+    try {
+      const r = await fetch('/pbs/sequences/' + encodeURIComponent(LEG_SEQ));
+      if(r.ok){
+        const seqData = await r.json();
+        airline = seqData.operator || '';
+        outer:
+        for(const day of (seqData.duty_days || [])){
+          for(const l of (day.legs || [])){
+            if(l.flight_number === LEG_FLIGHT_NUMBER && l.origin === LEG_ORIGIN && l.destination === LEG_DESTINATION){
+              orig = l.origin_icao || l.origin;
+              dest = l.destination_icao || l.destination;
+              if(!document.getElementById('sbgen-time').value) document.getElementById('sbgen-time').value = l.dep_local || '';
+              break outer;
+            }
+          }
+        }
+      }
+    } catch(e) { /* best-effort — leave the leg's own fields in place */ }
+  }
+  document.getElementById('sbgen-orig').value = orig || '';
+  document.getElementById('sbgen-dest').value = dest || '';
+  document.getElementById('sbgen-airline').value = airline || '';
 }
 function generateRelease(){
   const btn = document.getElementById('release-gen-btn');
@@ -1346,7 +1431,7 @@ function renderPairing(seqData){
       sbIcon.setAttribute('stroke-linejoin', 'round');
       sbIcon.setAttribute('title', 'Generate via SimBrief');
       sbIcon.innerHTML = '<path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/>';
-      sbIcon.onclick = (e) => { e.stopPropagation(); openSimbriefGen(leg, day.duty_day, i, seqData.operator); };
+      sbIcon.onclick = (e) => { e.stopPropagation(); generatePairingLeg(seqData.seq, day.duty_day, i, position, 'release'); };
       actions.appendChild(sbIcon);
       actions.insertAdjacentHTML('beforeend', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>');
       row.appendChild(left);
@@ -1373,7 +1458,7 @@ function renderPairing(seqData){
     body.innerHTML = '<p class="placeholder-note">No duty days on this sequence.</p>';
   }
 }
-async function generatePairingLeg(seq, dutyDay, legIndex, position){
+async function generatePairingLeg(seq, dutyDay, legIndex, position, view){
   try {
     const r = await fetch('/pbs/sequences/' + encodeURIComponent(seq) + '/generate', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -1381,7 +1466,7 @@ async function generatePairingLeg(seq, dutyDay, legIndex, position){
     });
     const data = await r.json();
     if(!r.ok){ showToast(data.error || 'Generate failed'); return; }
-    window.location.href = data.fos_url;
+    window.location.href = data.fos_url + (view ? '?view=' + view : '');
   } catch(e) { showToast('Request failed: ' + e); }
 }
 async function cacheAllPairingLegs(seqData, position, msgEl){
@@ -1406,42 +1491,41 @@ async function cacheAllPairingLegs(seqData, position, msgEl){
   msgEl.style.color = fails.length ? '#c0392b' : '#2fa355';
 }
 
-let _sbGenLeg = null;
 function todayZuluDDMMMYY(){
   const months = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
   const d = new Date();
   return String(d.getUTCDate()).padStart(2, '0') + months[d.getUTCMonth()] + String(d.getUTCFullYear()).slice(-2);
 }
-function openSimbriefGen(leg, dutyDay, legIndex, operator){
-  _sbGenLeg = leg;
-  document.getElementById('sb-gen-route').textContent = (leg.origin_icao || leg.origin) + ' → ' + (leg.destination_icao || leg.destination);
-  document.getElementById('sb-gen-type').value = localStorage.getItem('fos_simbrief_airframe') || '';
-  document.getElementById('sb-gen-airline').value = operator || '';
-  document.getElementById('sb-gen-fltnum').value = leg.flight_number || '';
-  document.getElementById('sb-gen-date').value = todayZuluDDMMMYY();
-  document.getElementById('sb-gen-time').value = leg.dep_local || '';
-  document.getElementById('sb-gen-reg').value = '';
-  const savedUser = localStorage.getItem('fos_simbrief_user');
-  if(savedUser) document.getElementById('sb-gen-user').value = savedUser;
-  const btn = document.getElementById('sb-gen-btn');
-  btn.disabled = false;
-  document.getElementById('sb-gen-msg').textContent = '';
-  showView('sb-gen');
-}
 
 async function submitSimbriefGen(){
-  const el = document.getElementById('sb-gen-msg');
-  const btn = document.getElementById('sb-gen-btn');
-  const user = document.getElementById('sb-gen-user').value.trim();
-  const type = document.getElementById('sb-gen-type').value.trim().toLowerCase();
-  const airline = document.getElementById('sb-gen-airline').value.trim().toUpperCase();
-  const fltnum = document.getElementById('sb-gen-fltnum').value.trim();
-  const date = document.getElementById('sb-gen-date').value.trim().toUpperCase();
-  const time = document.getElementById('sb-gen-time').value.trim();
-  const reg = document.getElementById('sb-gen-reg').value.trim().toUpperCase();
-  const orig = _sbGenLeg.origin_icao || _sbGenLeg.origin, dest = _sbGenLeg.destination_icao || _sbGenLeg.destination;
+  const el = document.getElementById('sbgen-msg');
+  const btn = document.getElementById('sbgen-btn');
+  const user = document.getElementById('release-user').value.trim();
+  const type = document.getElementById('sbgen-type').value.trim().toLowerCase();
+  const orig = document.getElementById('sbgen-orig').value.trim().toUpperCase();
+  const dest = document.getElementById('sbgen-dest').value.trim().toUpperCase();
+  const route = document.getElementById('sbgen-route').value.trim();
+  const airline = document.getElementById('sbgen-airline').value.trim().toUpperCase();
+  const fltnum = document.getElementById('sbgen-fltnum').value.trim();
+  const date = document.getElementById('sbgen-date').value.trim().toUpperCase();
+  const time = document.getElementById('sbgen-time').value.trim();
+  const steh = document.getElementById('sbgen-steh').value.trim();
+  const reg = document.getElementById('sbgen-reg').value.trim().toUpperCase();
+  const selcal = document.getElementById('sbgen-selcal').value.trim().toUpperCase();
+  const units = document.getElementById('sbgen-units').value;
+  const contpct = document.getElementById('sbgen-contpct').value;
+  const resvrule = document.getElementById('sbgen-resvrule').value;
+  const maps = document.getElementById('sbgen-maps').value;
+  const planformat = document.getElementById('sbgen-planformat').value.trim().toLowerCase();
+  const navlog = document.getElementById('sbgen-navlog').checked;
+  const stepclimbs = document.getElementById('sbgen-stepclimbs').checked;
+  const tlr = document.getElementById('sbgen-tlr').checked;
+  const notams = document.getElementById('sbgen-notams').checked;
+  const firnot = document.getElementById('sbgen-firnot').checked;
+  const etops = document.getElementById('sbgen-etops').checked;
 
   if(!user){ el.textContent = 'Enter your SimBrief username first.'; el.style.color = '#c0392b'; return; }
+  if(!orig || !dest){ el.textContent = 'Origin and destination are required.'; el.style.color = '#c0392b'; return; }
   if(!type){ el.textContent = 'Enter the SimBrief aircraft type code first.'; el.style.color = '#c0392b'; return; }
   localStorage.setItem('fos_simbrief_user', user);
   localStorage.setItem('fos_simbrief_airframe', type);
@@ -1487,6 +1571,7 @@ async function submitSimbriefGen(){
   addField('orig', orig);
   addField('dest', dest);
   addField('type', type);
+  if(route) addField('route', route);
   if(airline) addField('airline', airline);
   if(fltnum) addField('fltnum', fltnum);
   if(date) addField('date', date);
@@ -1494,7 +1579,23 @@ async function submitSimbriefGen(){
     addField('deph', time.slice(0, 2));
     addField('depm', time.slice(2, 4));
   }
+  if(steh && steh.length === 4){
+    addField('steh', steh.slice(0, 2));
+    addField('stem', steh.slice(2, 4));
+  }
   if(reg) addField('reg', reg);
+  if(selcal) addField('selcal', selcal);
+  if(planformat) addField('planformat', planformat);
+  addField('units', units);
+  addField('contpct', contpct);
+  addField('resvrule', resvrule);
+  addField('maps', maps);
+  addField('navlog', navlog ? '1' : '0');
+  addField('stepclimbs', stepclimbs ? '1' : '0');
+  addField('tlr', tlr ? '1' : '0');
+  addField('notams', notams ? '1' : '0');
+  addField('firnot', firnot ? '1' : '0');
+  addField('etops', etops ? '1' : '0');
   addField('apicode', prep.api_code);
   addField('outputpage', prep.outputpage_calc);
   addField('timestamp', String(prep.timestamp));
@@ -1533,7 +1634,7 @@ async function pollSimbriefReady(ofpId, user, el, btn, attempt){
       const r2 = await fetch('/generate', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({simbrief_user: user})});
       const data2 = await r2.json();
       if(!r2.ok){ el.textContent = data2.error || 'Generated, but could not load it into FOS'; el.style.color = '#c0392b'; btn.disabled = false; return; }
-      window.location.href = data2.fos_url;
+      window.location.href = data2.fos_url + '?view=release';
     } catch(e) {
       el.textContent = 'Generated, but loading it failed: ' + e;
       el.style.color = '#c0392b';
@@ -1631,7 +1732,8 @@ function renderWeather(stations){
 
 (function(){
   const params = new URLSearchParams(window.location.search);
-  if(params.get('view') === 'pairing') showView('pairing');
+  const view = params.get('view');
+  if(view === 'pairing' || view === 'release') showView(view);
 })();
 </script>
 </body>
