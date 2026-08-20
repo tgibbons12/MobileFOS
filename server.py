@@ -357,6 +357,16 @@ def logout():
 DEFAULT_LEG = {
     "seq": "", "date": "", "base": "", "flight_number": "", "origin": "", "destination": "",
     "route": "", "dep_date": "", "arr_date": "", "sched_out": "", "sched_in": "",
+    # pairing_sched_out/in are the PBS pairing's own published times — set
+    # only by pbs_leg_to_fos_leg, never by SimBrief. sched_out/sched_in get
+    # written by both sources, so once a SimBrief generate merges onto a
+    # PBS-sourced leg (see _store_leg/_find), SimBrief's own self-reported
+    # "sched_out" silently wins and the on-time comparison in
+    # _station_time_html ends up checking SimBrief's estimate against
+    # SimBrief's own schedule — never actually catching a real delay
+    # against what was published. Keeping the pairing's time in a separate,
+    # SimBrief-untouched field is what render_fos_html now compares against.
+    "pairing_sched_out": "", "pairing_sched_in": "",
     "est_out": "", "est_in": "", "dep_gate": "", "arr_gate": "",
     "fleet_type": "", "equipment_type": "", "tail_number": "", "tail_routing": "",
     "aircraft_name": "", "fin": "", "engines": "", "selcal": "", "seat_capacity": "",
@@ -413,12 +423,48 @@ def build_leg_from_sources(payload):
     return merged
 
 
-def _find(flight_number, dep_date):
+def _dates_match(a, b):
+    """Same operational day, tolerating the ways this app's two leg sources
+    disagree about "date": a PBS pairing leg has no real calendar date at
+    all (pbs_leg_to_fos_leg leaves dep_date "" — see its own docstring), and
+    a SimBrief-derived date can land a day off a PBS one across a
+    zulu/local midnight rollover. Either side blank, or within a day, counts
+    as the same flight."""
+    a, b = (a or "").strip(), (b or "").strip()
+    if not a or not b:
+        return True
+    try:
+        da = datetime.strptime(a, "%m/%d/%y")
+        db_ = datetime.strptime(b, "%m/%d/%y")
+    except ValueError:
+        return a == b
+    return abs((da - db_).days) <= 1
+
+
+def _find(flight_number, dep_date, origin=None, destination=None):
     """The ORM row (not a plain dict) — only consumer is _store_leg, which
-    needs to mutate/insert it."""
-    return Leg.query.filter_by(
-        user_id=current_user.id, flight_number=flight_number, dep_date=dep_date,
-    ).first()
+    needs to mutate/insert it. Exact flight_number+dep_date is the fast
+    path; when that misses, fall back to flight_number+city pair with a
+    tolerant date match (see _dates_match) so the same real flight imported
+    from PBS (blank date) and then enriched via SimBrief (real date) syncs
+    onto one row instead of leaving two "instances" of it around — the
+    duplicate-flight bug this was built to close."""
+    flight_number = (flight_number or "").strip()
+    if not flight_number:
+        return None
+    query = Leg.query.filter_by(user_id=current_user.id, flight_number=flight_number)
+    exact = query.filter_by(dep_date=dep_date).first()
+    if exact:
+        return exact
+    if not origin or not destination:
+        return None
+    # origin/destination live inside the JSON data blob, not as real
+    # columns (see models.Leg) — filter in Python, not filter_by().
+    for row in query.all():
+        if row.data.get("origin") == origin and row.data.get("destination") == destination \
+                and _dates_match(row.dep_date, dep_date):
+            return row
+    return None
 
 
 def _get_leg_row(leg_id):
@@ -464,7 +510,7 @@ def _store_leg(leg):
     """Shared by /generate and the PBS import path: dedupe-or-insert + archive."""
     leg = {**DEFAULT_LEG, **leg}
     leg.pop("id", None)
-    existing = _find(leg.get("flight_number"), leg.get("dep_date"))
+    existing = _find(leg.get("flight_number"), leg.get("dep_date"), leg.get("origin"), leg.get("destination"))
     if existing:
         # Merge, don't overwrite: neither a PBS re-import nor a SimBrief
         # regenerate carries every field the other source does (PBS has
@@ -548,6 +594,7 @@ def generate():
                 "seq", "position", "base", "duty_time", "ground_time",
                 "hotel_details", "limo_details", "dep_gate", "arr_gate",
                 "bookmarked_docs", "signed_in", "fit_for_duty",
+                "pairing_sched_out", "pairing_sched_in",
             ):
                 if src_row.data.get(key) and not leg.get(key):
                     leg[key] = src_row.data[key]
@@ -1110,8 +1157,12 @@ def render_fos_html(leg):
     ctx["leg_id"] = str(leg.get("id", ""))
     ctx["origin_icao"] = _airport_icao(ctx.get("origin", ""))
     ctx["destination_icao"] = _airport_icao(ctx.get("destination", ""))
-    ctx["dep_time_html"] = _station_time_html(ctx.get("sched_out"), ctx.get("est_out"))
-    ctx["arr_time_html"] = _station_time_html(ctx.get("sched_in"), ctx.get("est_in"))
+    # Prefer the PBS pairing's own published time over the generic sched_out/
+    # sched_in (which SimBrief also writes) — see DEFAULT_LEG's comment.
+    # Falls back to sched_out/sched_in for a SimBrief-only leg with no
+    # pairing behind it at all.
+    ctx["dep_time_html"] = _station_time_html(ctx.get("pairing_sched_out") or ctx.get("sched_out"), ctx.get("est_out"))
+    ctx["arr_time_html"] = _station_time_html(ctx.get("pairing_sched_in") or ctx.get("sched_in"), ctx.get("est_in"))
     ctx["fleet_type_icao"] = _fleet_type_icao(ctx.get("fleet_type", ""))
     # Overview shows two parallel readings of the same aircraft: Fleet Type
     # stays the raw PBS sub-fleet code (e.g. "32A"), Equipment Type is the
@@ -1606,7 +1657,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .leg-pill.selected{background:var(--blue);color:#fff;font-weight:700;}
   .split{display:flex;gap:0;align-items:flex-start;}
   .split-left{flex:0 0 auto;width:340px;display:flex;flex-direction:column;gap:20px;min-width:0;}
-  .split-right{flex:1;max-width:480px;min-width:0;display:flex;flex-direction:column;gap:12px;margin-left:44px;margin-right:16px;}
+  .split-right{flex:1;min-width:0;display:flex;flex-direction:column;gap:12px;margin-left:44px;}
   .panel-card{background:var(--card);border-radius:18px;overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,.05);border:1px solid var(--border);}
   .panel-card-hdr{padding:16px 18px 13px;font-size:19px;font-weight:700;color:var(--value);background:var(--card);border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;}
   .lead-icon{width:19px;height:19px;color:var(--label);flex:0 0 auto;}

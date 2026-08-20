@@ -189,6 +189,11 @@ def pbs_leg_to_fos_leg(meta, seq, day, leg, position):
         "origin": leg["origin"], "destination": leg["destination"],
         "dep_date": "", "arr_date": "",
         "sched_out": _fmt_time(leg["dep_local"]), "sched_in": _fmt_time(leg["arr_local"]),
+        # The pairing's own published times, kept separate from sched_out/
+        # sched_in so a later SimBrief merge (which writes its own
+        # sched_out/sched_in) can never clobber them — see DEFAULT_LEG in
+        # server.py for why this field exists.
+        "pairing_sched_out": _fmt_time(leg["dep_local"]), "pairing_sched_in": _fmt_time(leg["arr_local"]),
         "est_out": _fmt_time(leg["dep_local"]), "est_in": _fmt_time(leg["arr_local"]),
         "dep_gate": "", "arr_gate": "",
         "fleet_type": leg["equipment"], "equipment_type": meta.get("fleet", ""),
