@@ -1494,7 +1494,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   :focus-visible{outline:2px solid var(--blue-dark);outline-offset:2px;}
   @media (prefers-reduced-motion: reduce){ *{transition:none !important;animation:none !important;} }
   .app-shell{display:flex;flex-direction:column;min-height:100vh;min-height:100dvh;width:100%;padding-top:env(safe-area-inset-top);padding-left:env(safe-area-inset-left);padding-right:env(safe-area-inset-right);}
-  .main{flex:1;min-width:0;padding:14px 16px calc(72px + env(safe-area-inset-bottom));}
+  .main{flex:1;min-width:0;width:100%;max-width:760px;margin:0 auto;padding:14px 16px calc(72px + env(safe-area-inset-bottom));}
   .tabbar{position:fixed;left:env(safe-area-inset-left);right:env(safe-area-inset-right);bottom:0;display:flex;background:var(--card);border-top:1px solid var(--border);padding:6px 0 calc(6px + env(safe-area-inset-bottom));z-index:20;}
   .tab-btn{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;background:transparent;border:none;color:var(--label);cursor:pointer;padding:4px 2px;position:relative;}
   .tab-btn svg{width:22px;height:22px;}
@@ -1728,32 +1728,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           </div>
         </div>
       </div>
-      <div class="duty-badges">
-        <span id="signin-badge" class="$signed_in_class">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><path d="M7.5 12.5l3 3 6-6"/></svg> Signed In
-        </span>
-        <span id="ffd-badge" class="$ffd_class">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><path d="M7.5 12.5l3 3 6-6"/></svg> Fit for Duty
-        </span>
-      </div>
-      <button class="docs-btn" id="pairing-btn" style="background:var(--blue-dark);" onclick="showView('pairing')">View Full Pairing</button>
-      <div class="card">
-        <div class="content-grid">
-          <div class="col-divider">
-            <div class="info-row"><span class="lbl">Fleet Type</span><span class="val">$fleet_type</span></div>
-            <div class="info-row"><span class="lbl">Status</span><span class="val">$status</span></div>
-            <div class="info-row"><span class="lbl">Equipment Type</span><span class="val">$equipment_type</span></div>
-            <div class="info-row" style="border-bottom:none;"><span class="lbl">Duty Time</span><span class="val">$duty_time</span></div>
-          </div>
-          <div>
-            <div class="info-row"><span class="lbl">Ground Time</span><span class="val">$ground_time</span></div>
-            <div class="info-row"><span class="lbl">ODL Time</span><span class="val">$odl_time</span></div>
-            <div class="info-row"><span class="lbl">Position</span><span class="val">$position</span></div>
-            <div class="info-row"><span class="lbl">Hotel Details</span><span class="val">$hotel_details</span></div>
-            <div class="info-row" style="border-bottom:none;"><span class="lbl">Limo Details</span><span class="val">$limo_details</span></div>
-          </div>
-        </div>
-      </div>
+      <button class="docs-btn" id="pairing-btn" style="background:var(--blue-dark);margin-top:12px;" onclick="showView('pairing')">View Full Pairing</button>
     </section>
     <section id="documents-view" class="view">
       <div class="topbar">
