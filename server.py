@@ -1501,7 +1501,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .tab-btn span{font-size:10px;font-weight:600;}
   .tab-btn.active{color:var(--blue-dark);}
   .tab-btn .badge{position:absolute;top:0;left:50%;margin-left:6px;width:15px;height:15px;border-radius:50%;background:var(--red);color:#fff;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;}
-  .flight-card{background:var(--card);display:flex;align-items:stretch;padding:14px;border-bottom:1px solid var(--border);gap:10px;}
+  .flight-card{background:var(--card);display:flex;align-items:stretch;padding:14px;border-radius:16px;border:1px solid var(--border);box-shadow:0 1px 2px rgba(0,0,0,.05);gap:10px;margin-bottom:10px;}
   .flight-card .station{flex:1;display:flex;flex-direction:column;gap:2px;min-width:0;}
   .flight-card .station.dest{align-items:flex-end;text-align:right;}
   .flight-card .station-date{font-size:11px;color:var(--label);text-transform:uppercase;letter-spacing:.02em;}
@@ -1613,10 +1613,9 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         </div>
         <div class="topbar-title">
           <h1>Flight $flight_number</h1>
-          <p>Pull to Refresh</p>
+          <p>SEQ $seq</p>
         </div>
       </div>
-      <div class="status-bar"><span>SEQ $seq</span><span>$date</span></div>
       <div class="flight-card">
         <div class="station">
           <div class="station-date">$dep_date</div>
