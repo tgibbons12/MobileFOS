@@ -804,6 +804,24 @@ def generate_from_pbs(seq_number):
     leg = day["legs"][leg_index]
 
     fos_leg = pbs_parser.pbs_leg_to_fos_leg(_pbs_meta(), seq, day, leg, position)
+
+    # If this pairing leg already has its own leg row — e.g. it's already
+    # been dispatched/redispatched via SimBrief — just navigate there.
+    # Re-running the raw bid-pack baseline through _store_leg's merge
+    # would stomp the richer, more current sched_out/sched_in/est_out/
+    # pairing_sched_out SimBrief already supplied with the pairing's stale
+    # original values, since pbs_leg_to_fos_leg always emits those non-
+    # blank. Reported bug: switching to a sibling pill and back silently
+    # reverted a redispatched leg to its original pre-delay schedule.
+    existing = _find(
+        fos_leg.get("flight_number"), fos_leg.get("dep_date"),
+        fos_leg.get("origin"), fos_leg.get("destination"),
+    )
+    if existing:
+        current_user.current_leg_id = existing.id
+        db.session.commit()
+        return jsonify({"fos_url": f"/fos/{existing.id}", "id": existing.id})
+
     if body.get("simbrief_user"):
         fos_leg["simbrief_user"] = body["simbrief_user"]
     fos_leg = build_leg_from_sources(fos_leg)
@@ -1281,7 +1299,8 @@ def render_fos_html(leg):
     # fallback when SimBrief never reported an IATA code (fetch_ofp_leg_
     # fields' comment on why that happens), and a bare flight number is
     # the last resort for a leg with no known operator at all.
-    ctx["flight_designator"] = (ctx.get("airline_iata") or ctx.get("airline_icao") or "") + ctx.get("flight_number", "")
+    _airline_prefix = ctx.get("airline_iata") or ctx.get("airline_icao") or ""
+    ctx["flight_designator"] = f"{_airline_prefix} {ctx.get('flight_number', '')}".strip() if _airline_prefix else ctx.get("flight_number", "")
     ctx["fleet_type_icao"] = _fleet_type_icao(ctx.get("fleet_type", ""))
     # Overview shows two parallel readings of the same aircraft: Fleet Type
     # stays the raw PBS sub-fleet code (e.g. "32A"), Equipment Type is the
@@ -2984,7 +3003,7 @@ function renderPairing(seqData){
       const left = document.createElement('div');
       const code = document.createElement('div');
       code.className = 'code';
-      code.textContent = leg.flight_number ? flightPrefix + leg.flight_number : '—';
+      code.textContent = leg.flight_number ? (flightPrefix ? flightPrefix + ' ' : '') + leg.flight_number : '—';
       const desc = document.createElement('div');
       desc.className = 'desc';
       desc.textContent = leg.origin + '→' + leg.destination + ' ' + leg.dep_local + '/' + leg.arr_local;
@@ -3208,7 +3227,7 @@ async function initOverviewPills(){
       legs.forEach((l, i) => {
         const pill = document.createElement('button');
         pill.className = 'leg-pill' + (i === idx ? ' selected' : '');
-        pill.textContent = (l.flight_number ? flightPrefix + l.flight_number : '—');
+        pill.textContent = (l.flight_number ? (flightPrefix ? flightPrefix + ' ' : '') + l.flight_number : '—');
         if(i !== idx) pill.onclick = () => generatePairingLeg(seqData.seq, day.duty_day, i, position);
         strip.appendChild(pill);
       });
