@@ -1104,11 +1104,9 @@ def render_fos_html(leg):
     ctx["tail_number_html"] = html.escape(ctx.get("tail_number") or "") or "—"
     ctx["engines_html"] = html.escape(ctx.get("engines") or "") or "—"
     ctx["selcal_html"] = html.escape(ctx.get("selcal") or "") or "—"
-    zfw, tow, ldw = ctx.get("max_zfw"), ctx.get("max_tow_struct"), ctx.get("max_ldw")
-    ctx["max_weights_html"] = (
-        f"ZFW {html.escape(zfw)} &middot; TOW {html.escape(tow)} &middot; LDW {html.escape(ldw)}"
-        if zfw and tow and ldw else "—"
-    )
+    ctx["max_zfw_html"] = html.escape(ctx.get("max_zfw") or "") or "—"
+    ctx["max_tow_struct_html"] = html.escape(ctx.get("max_tow_struct") or "") or "—"
+    ctx["max_ldw_html"] = html.escape(ctx.get("max_ldw") or "") or "—"
     raw_seat_capacity = ctx.get("seat_capacity") or ""
     ctx["pax_display"] = (
         f'{ctx["customer_load"]} / {raw_seat_capacity}'
@@ -1567,6 +1565,10 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .stat-detail-row:last-child{border-bottom:none;}
   .stat-detail-row .lbl{color:var(--label);}
   .stat-detail-row .val{font-weight:600;font-variant-numeric:tabular-nums;}
+  .weight-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;}
+  .weight-grid>div{display:flex;flex-direction:column;align-items:center;gap:2px;background:var(--bg);border-radius:8px;padding:7px 4px;}
+  .weight-grid .wg-lbl{font-size:9.5px;color:var(--label);text-transform:uppercase;letter-spacing:.03em;}
+  .weight-grid .wg-val{font-size:12.5px;font-weight:700;color:var(--value);font-variant-numeric:tabular-nums;}
   .topbar{display:flex;flex-wrap:wrap;align-items:center;margin-bottom:10px;position:sticky;top:env(safe-area-inset-top);z-index:10;background:var(--bg);padding-top:6px;margin-top:-6px;margin-left:-16px;margin-right:-16px;padding-left:16px;padding-right:16px;}
   .back-link{order:1;color:var(--blue-dark);font-size:14px;font-weight:500;background:none;border:none;cursor:pointer;padding:4px 2px;}
   .topbar-actions{order:2;margin-left:auto;display:flex;align-items:center;gap:14px;}
@@ -1741,7 +1743,14 @@ FOS_TEMPLATE = """<!DOCTYPE html>
               <div class="stat-detail-row"><span class="lbl">Aircraft</span><span class="val">$aircraft_name_html</span></div>
               <div class="stat-detail-row"><span class="lbl">Engine</span><span class="val">$engines_html</span></div>
               <div class="stat-detail-row"><span class="lbl">SELCAL</span><span class="val">$selcal_html</span></div>
-              <div class="stat-detail-row"><span class="lbl">Max Weights (Structural)</span><span class="val">$max_weights_html</span></div>
+              <div class="stat-detail-row" style="display:block;">
+                <div class="lbl" style="margin-bottom:6px;">Max Weights (Structural)</div>
+                <div class="weight-grid">
+                  <div><span class="wg-lbl">ZFW</span><span class="wg-val">$max_zfw_html</span></div>
+                  <div><span class="wg-lbl">TOW</span><span class="wg-val">$max_tow_struct_html</span></div>
+                  <div><span class="wg-lbl">LDW</span><span class="wg-val">$max_ldw_html</span></div>
+                </div>
+              </div>
             </div>
           </div>
           <div class="stat-row" id="stat-pax">
