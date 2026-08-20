@@ -149,6 +149,21 @@ def _fleet_type_icao(code):
     return _FLEET_TYPE_ICAO.get(code, code)
 
 
+def _station_time_html(sched, est):
+    """Overview's flight card, mobileCCI-style: the current (estimated)
+    time in front, the original scheduled time struck through next to it
+    — but only when they actually differ, rather than always showing two
+    identical numbers."""
+    sched, est = (sched or "").strip(), (est or "").strip()
+    shown = est or sched
+    if not shown:
+        return ""
+    html_out = f'<span class="est-time">{html.escape(shown)}</span>'
+    if sched and est and sched != est:
+        html_out += f'<span class="sched-time">{html.escape(sched)}</span>'
+    return html_out
+
+
 def _js_str(s):
     """Escape for embedding inside a double-quoted JS string literal, for
     the "$var" pattern these templates' <script> blocks use throughout
@@ -987,7 +1002,10 @@ def render_fos_html(leg):
             f'<span class="val">{html.escape(name)}</span></div>'
         )
     ctx["crew_rows"] = "".join(rows) or '<p class="placeholder-note">No named crew on this leg.</p>'
+    ctx["crew_count"] = f"{len(crew_list)} assigned" if crew_list else "—"
     ctx["leg_id"] = str(leg.get("id", ""))
+    ctx["dep_time_html"] = _station_time_html(ctx.get("sched_out"), ctx.get("est_out"))
+    ctx["arr_time_html"] = _station_time_html(ctx.get("sched_in"), ctx.get("est_in"))
     ctx["fleet_type_icao"] = _fleet_type_icao(ctx.get("fleet_type", ""))
     # Overview shows two parallel readings of the same aircraft: Fleet Type
     # stays the raw PBS sub-fleet code (e.g. "32A"), Equipment Type is the
@@ -995,6 +1013,10 @@ def render_fos_html(leg):
     # bid pack's own coarse "OPERATOR / FLEET" family string instead, which
     # is what was showing the internal code here rather than a real type.
     ctx["equipment_type"] = ctx["fleet_type_icao"] or ctx.get("equipment_type", "")
+    # Overview's Aircraft stat row wants one glanceable value — the real
+    # tail number if this leg's actually been dispatched (SimBrief-sourced),
+    # falling back to the decoded type when only a PBS pairing exists yet.
+    ctx["aircraft_display"] = ctx.get("tail_number") or ctx["equipment_type"] or "—"
     # Neither PBS nor a SimBrief OFP ever carries a flight "status" — it's
     # not data either source has. Derive one locally from what this app
     # actually tracks rather than leaving it permanently blank.
@@ -1397,14 +1419,31 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   button{font-family:inherit;}
   :focus-visible{outline:2px solid var(--blue-dark);outline-offset:2px;}
   @media (prefers-reduced-motion: reduce){ *{transition:none !important;animation:none !important;} }
-  .app-shell{display:flex;min-height:100vh;min-height:100dvh;width:100%;padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom);padding-left:env(safe-area-inset-left);padding-right:env(safe-area-inset-right);}
-  .sidebar{width:64px;flex:0 0 64px;background:var(--navy);z-index:20;}
-  .sidebar-nav{display:flex;flex-direction:column;align-items:center;padding:14px 0;gap:6px;position:sticky;top:env(safe-area-inset-top);max-height:100vh;max-height:100dvh;overflow-y:auto;}
-  .side-btn{width:44px;height:44px;display:flex;align-items:center;justify-content:center;background:transparent;border:none;color:#9db3d6;border-radius:8px;cursor:pointer;position:relative;}
-  .side-btn svg{width:22px;height:22px;}
-  .side-btn.active{background:var(--blue-dark);color:#fff;}
-  .side-btn .badge{position:absolute;top:2px;right:2px;width:15px;height:15px;border-radius:50%;background:var(--red);color:#fff;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;}
-  .main{flex:1;min-width:0;padding:14px 16px 44px;}
+  .app-shell{display:flex;flex-direction:column;min-height:100vh;min-height:100dvh;width:100%;padding-top:env(safe-area-inset-top);padding-left:env(safe-area-inset-left);padding-right:env(safe-area-inset-right);}
+  .main{flex:1;min-width:0;padding:14px 16px calc(72px + env(safe-area-inset-bottom));}
+  .tabbar{position:fixed;left:env(safe-area-inset-left);right:env(safe-area-inset-right);bottom:0;display:flex;background:var(--card);border-top:1px solid var(--border);padding:6px 0 calc(6px + env(safe-area-inset-bottom));z-index:20;}
+  .tab-btn{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;background:transparent;border:none;color:var(--label);cursor:pointer;padding:4px 2px;position:relative;}
+  .tab-btn svg{width:22px;height:22px;}
+  .tab-btn span{font-size:10px;font-weight:600;}
+  .tab-btn.active{color:var(--blue-dark);}
+  .tab-btn .badge{position:absolute;top:0;left:50%;margin-left:6px;width:15px;height:15px;border-radius:50%;background:var(--red);color:#fff;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;}
+  .flight-card{background:var(--card);display:flex;align-items:stretch;padding:14px;border-bottom:1px solid var(--border);gap:10px;}
+  .flight-card .station{flex:1;display:flex;flex-direction:column;gap:2px;min-width:0;}
+  .flight-card .station.dest{align-items:flex-end;text-align:right;}
+  .flight-card .station-date{font-size:11px;color:var(--label);text-transform:uppercase;letter-spacing:.02em;}
+  .flight-card .station-code{font-size:22px;font-weight:700;}
+  .flight-card .est-time{font-size:15px;font-weight:700;color:var(--green);}
+  .flight-card .sched-time{font-size:12px;color:var(--label);text-decoration:line-through;margin-left:6px;}
+  .flight-card .station-gate{font-size:12px;color:var(--label);margin-top:2px;}
+  .flight-card .duration{flex:0 0 auto;display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:11px;color:var(--label);gap:4px;padding:0 4px;}
+  .flight-card .duration svg{width:18px;height:18px;color:var(--inactive);}
+  .stat-list{background:var(--card);border-bottom:6px solid var(--bg);}
+  .stat-row{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid var(--border);font-size:14px;font-weight:600;background:none;border-left:none;border-right:none;border-top:none;width:100%;text-align:left;cursor:default;color:var(--value);}
+  .stat-row:last-child{border-bottom:none;}
+  .stat-row .val{color:var(--label);font-weight:500;display:flex;align-items:center;gap:6px;}
+  .stat-row.linked{cursor:pointer;}
+  .stat-row.linked .val{color:var(--blue-dark);}
+  .stat-row .chevron{width:16px;height:16px;color:var(--inactive);}
   .topbar{display:flex;flex-wrap:wrap;align-items:center;margin-bottom:10px;position:sticky;top:env(safe-area-inset-top);z-index:10;background:var(--bg);padding-top:6px;margin-top:-6px;margin-left:-16px;margin-right:-16px;padding-left:16px;padding-right:16px;}
   .back-link{order:1;color:var(--blue-dark);font-size:14px;font-weight:500;background:none;border:none;cursor:pointer;padding:4px 2px;}
   .topbar-actions{order:2;margin-left:auto;display:flex;align-items:center;gap:14px;}
@@ -1454,46 +1493,15 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   #toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(12px);background:#1a1f29;color:#fff;padding:9px 16px;border-radius:20px;font-size:13px;opacity:0;pointer-events:none;transition:opacity .18s ease, transform .18s ease;box-shadow:0 4px 14px rgba(0,0,0,.25);z-index:10;}
   #toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
   @media (max-width:640px){
-    .sidebar{width:52px;flex-basis:52px;}
-    .sidebar-nav{padding:10px 0;}
-    .side-btn{width:38px;height:38px;}
     .content-grid{grid-template-columns:1fr;}
     .col-divider{border-right:none;border-bottom:6px solid var(--bg);}
     .flight-summary{gap:12px;font-size:12px;}
+    .flight-card .station-code{font-size:19px;}
   }
 </style>
 </head>
 <body>
 <div class="app-shell">
-  <nav class="sidebar" aria-label="Primary">
-    <div class="sidebar-nav">
-      <button class="side-btn active" id="nav-home" title="Home" onclick="showView('overview')">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></svg>
-      </button>
-      <button class="side-btn" id="nav-pairing" title="Pairing" onclick="showView('pairing')">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18"/><path d="M8 3v4M16 3v4"/></svg>
-      </button>
-      <button class="side-btn" title="Messages" onclick="showToast('Messages')">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 6l9 7 9-7"/></svg>
-        <span class="badge">1</span>
-      </button>
-      <button class="side-btn" id="nav-docs" title="Documents" onclick="showView('documents')">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5"/><path d="M9.5 13h5M9.5 16h5"/></svg>
-      </button>
-      <button class="side-btn" id="nav-release" title="Release" onclick="showView('release')">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5"/><path d="M12 11v6"/><path d="M9.5 14.5L12 17l2.5-2.5"/></svg>
-      </button>
-      <button class="side-btn" title="Web" onclick="showToast('Web')">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.5 2.6 2.5 15.4 0 18M12 3c-2.5 2.6-2.5 15.4 0 18"/></svg>
-      </button>
-      <button class="side-btn" title="Export to ForeFlight" onclick="exportToForeFlight()">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6-13v13m6 0l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"/></svg>
-      </button>
-      <button class="side-btn" id="nav-settings" title="Settings" onclick="showView('settings')">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.34 1.87l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.7 1.7 0 00-1.87-.34 1.7 1.7 0 00-1 1.55V21a2 2 0 11-4 0v-.09A1.7 1.7 0 009 19.4a1.7 1.7 0 00-1.87.34l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.7 1.7 0 004.6 15a1.7 1.7 0 00-1.55-1H3a2 2 0 110-4h.09A1.7 1.7 0 004.6 9a1.7 1.7 0 00-.34-1.87l-.06-.06a2 2 0 112.83-2.83l.06.06A1.7 1.7 0 009 4.6a1.7 1.7 0 001-1.55V3a2 2 0 114 0v.09a1.7 1.7 0 001 1.55 1.7 1.7 0 001.87-.34l.06-.06a2 2 0 112.83 2.83l-.06.06A1.7 1.7 0 0019.4 9a1.7 1.7 0 001.55 1H21a2 2 0 110 4h-.09a1.7 1.7 0 00-1.55 1z"/></svg>
-      </button>
-    </div>
-  </nav>
   <main class="main">
     <section id="overview-view" class="view active">
       <div class="topbar">
@@ -1509,12 +1517,31 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         </div>
       </div>
       <div class="status-bar"><span>SEQ $seq</span><span>$date</span></div>
-      <div class="flight-summary">
-        <div class="fnum">$flight_number</div>
-        <div class="col"><span>$origin</span><span>$destination</span></div>
-        <div class="col"><span>$dep_date</span><span>$arr_date</span></div>
-        <div class="col"><span>$sched_out</span><span>$sched_in</span></div>
-        <div class="col highlight"><span>$est_out</span><span>$est_in</span></div>
+      <div class="flight-card">
+        <div class="station">
+          <div class="station-date">$dep_date</div>
+          <div class="station-code">$origin</div>
+          <div>$dep_time_html</div>
+          <div class="station-gate">$dep_gate</div>
+        </div>
+        <div class="duration">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6-13v13m6 0l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"/></svg>
+          $flight_time
+        </div>
+        <div class="station dest">
+          <div class="station-date">$arr_date</div>
+          <div class="station-code">$destination</div>
+          <div>$arr_time_html</div>
+          <div class="station-gate">$arr_gate</div>
+        </div>
+      </div>
+      <div class="stat-list">
+        <div class="stat-row"><span>Time difference</span><span class="val">$tz_diff</span></div>
+        <button class="stat-row linked" onclick="showView('documents')">
+          <span>Crew</span><span class="val">$crew_count <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></span>
+        </button>
+        <div class="stat-row"><span>Aircraft</span><span class="val">$aircraft_display</span></div>
+        <div class="stat-row"><span>Passengers</span><span class="val">$customer_load</span></div>
       </div>
       <div class="duty-badges">
         <span id="signin-badge" class="$signed_in_class">
@@ -1533,9 +1560,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
             <div class="info-row"><span class="lbl">Departure Gate</span><span class="val" id="ov-dep-gate">$dep_gate</span></div>
             <div class="info-row"><span class="lbl">Arrival Gate</span><span class="val" id="ov-arr-gate">$arr_gate</span></div>
             <div class="info-row"><span class="lbl">Fleet Type</span><span class="val">$fleet_type</span></div>
-            <div class="info-row"><span class="lbl">Tail Number</span><span class="val">$tail_number $tail_routing</span></div>
             <div class="info-row"><span class="lbl">Status</span><span class="val">$status</span></div>
-            <div class="info-row"><span class="lbl">Customer Load</span><span class="val">$customer_load</span></div>
             <div class="info-row"><span class="lbl">Equipment Type</span><span class="val">$equipment_type</span></div>
             <div class="info-row"><span class="lbl">Duty Time</span><span class="val">$duty_time</span></div>
             <div class="info-row" style="border-bottom:none;"><span class="lbl">Ground Time</span><span class="val">$ground_time</span></div>
@@ -1543,9 +1568,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           <div>
             <div class="info-row"><span class="lbl">Flight Time</span><span class="val">$flight_time</span></div>
             <div class="info-row"><span class="lbl">ODL Time</span><span class="val">$odl_time</span></div>
-            <div class="info-row"><span class="lbl">Time Zone Difference</span><span class="val">$tz_diff</span></div>
             <div class="info-row"><span class="lbl">Position</span><span class="val">$position</span></div>
-            <div class="info-row"><span class="lbl">Crew</span><span class="val">$crew_display</span></div>
             <div class="info-row"><span class="lbl">Hotel Details</span><span class="val">$hotel_details</span></div>
             <div class="info-row" style="border-bottom:none;"><span class="lbl">Limo Details</span><span class="val">$limo_details</span></div>
           </div>
@@ -1576,6 +1599,20 @@ FOS_TEMPLATE = """<!DOCTYPE html>
       <div class="search-block">
         <label for="doc-search">Find a Document</label>
         <input id="doc-search" type="text" placeholder="">
+      </div>
+      <div class="doc-list">
+        <div class="doc-row" style="cursor:pointer;" onclick="showToast('No saved docs yet')">
+          <div><div class="code">Saved Docs</div></div>
+          <div class="val" style="color:var(--label);font-size:13px;">0</div>
+        </div>
+        <div class="doc-row" style="cursor:pointer;" onclick="showToast('Not available yet')">
+          <div><div class="code">All Commands</div></div>
+          <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></div>
+        </div>
+        <div class="doc-row" style="border-bottom:none;cursor:pointer;" onclick="showToast('Not available yet')">
+          <div><div class="code">Favorite Groups</div></div>
+          <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></div>
+        </div>
       </div>
       <button class="section-bar" onclick="showToast('Edit preferences')">
         My Preferences
@@ -1632,6 +1669,24 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         <div class="doc-row" style="border-bottom:none;">
           <div><div class="code">G*L/SS</div><div class="desc">Customers Requiring Special Services</div></div>
           <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="showToast('Not available \u2014 no data source for this document yet')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
+        </div>
+      </div>
+      <button class="section-bar collapsed" id="extapps-bar" onclick="toggleSection('extapps')">
+        External Apps
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+      </button>
+      <div class="doc-list" id="extapps-body" style="display:none;">
+        <div class="doc-row" style="cursor:pointer;" onclick="showToast('Not available \u2014 no integration configured yet')">
+          <div><div class="code">FD Pro</div></div>
+          <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><path d="M15 3h6v6"/><path d="M10 14L21 3"/></svg></div>
+        </div>
+        <div class="doc-row" style="cursor:pointer;" onclick="showToast('Not available \u2014 no integration configured yet')">
+          <div><div class="code">SkyPath</div></div>
+          <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><path d="M15 3h6v6"/><path d="M10 14L21 3"/></svg></div>
+        </div>
+        <div class="doc-row" style="border-bottom:none;cursor:pointer;" onclick="showToast('Not available \u2014 no integration configured yet')">
+          <div><div class="code">WSI Pilotbrief</div></div>
+          <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><path d="M15 3h6v6"/><path d="M10 14L21 3"/></svg></div>
         </div>
       </div>
     </section>
@@ -1817,7 +1872,54 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         <button id="confirm-continue-btn" style="display:none;margin-top:10px;width:100%;background:var(--label);color:#fff;border:none;padding:11px;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;" onclick="showView('overview')">Continue to Flight</button>
       </div>
     </section>
+    <section id="more-view" class="view">
+      <div class="topbar">
+        <button class="back-link" onclick="showView('overview')">Back</button>
+        <div class="topbar-title"><h1>More</h1></div>
+      </div>
+      <div class="doc-list">
+        <div class="doc-row" style="cursor:pointer;" onclick="showView('release')">
+          <div><div class="code">SB</div><div class="desc">Send to SimBrief</div></div>
+          <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></div>
+        </div>
+        <div class="doc-row" style="cursor:pointer;" onclick="exportToForeFlight()">
+          <div><div class="code">FF</div><div class="desc">Export to ForeFlight</div></div>
+          <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></div>
+        </div>
+        <div class="doc-row" style="cursor:pointer;" onclick="showToast('Web')">
+          <div><div class="code">WEB</div><div class="desc">Web</div></div>
+          <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></div>
+        </div>
+        <div class="doc-row" style="cursor:pointer;" onclick="showView('settings')">
+          <div><div class="code">SET</div><div class="desc">Settings</div></div>
+          <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></div>
+        </div>
+      </div>
+    </section>
   </main>
+  <nav class="tabbar" aria-label="Primary">
+    <button class="tab-btn active" id="tab-overview" onclick="showView('overview')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></svg>
+      <span>Overview</span>
+    </button>
+    <button class="tab-btn" id="tab-schedule" onclick="showView('pairing')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18"/><path d="M8 3v4M16 3v4"/></svg>
+      <span>Schedule</span>
+    </button>
+    <button class="tab-btn" id="tab-messages" onclick="showToast('Messages')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 6l9 7 9-7"/></svg>
+      <span class="badge">1</span>
+      <span>Messages</span>
+    </button>
+    <button class="tab-btn" id="tab-docs" onclick="showView('documents')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5"/><path d="M9.5 13h5M9.5 16h5"/></svg>
+      <span>Docs</span>
+    </button>
+    <button class="tab-btn" id="tab-more" onclick="showView('more')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>
+      <span>More</span>
+    </button>
+  </nav>
 </div>
 <div id="toast"></div>
 <script>
@@ -1841,11 +1943,13 @@ function showView(view){
   document.getElementById('pairing-view').classList.toggle('active', view==='pairing');
   document.getElementById('weather-view').classList.toggle('active', view==='weather');
   document.getElementById('settings-view').classList.toggle('active', view==='settings');
-  document.getElementById('nav-home').classList.toggle('active', view==='overview');
-  document.getElementById('nav-docs').classList.toggle('active', view==='documents');
-  document.getElementById('nav-release').classList.toggle('active', view==='release' || view==='confirm');
-  document.getElementById('nav-pairing').classList.toggle('active', view==='pairing');
-  document.getElementById('nav-settings').classList.toggle('active', view==='settings');
+  document.getElementById('more-view').classList.toggle('active', view==='more');
+  document.getElementById('tab-overview').classList.toggle('active', view==='overview');
+  document.getElementById('tab-schedule').classList.toggle('active', view==='pairing');
+  document.getElementById('tab-docs').classList.toggle('active', view==='documents');
+  // Release/Confirm/Settings/More are all reached through the More tab now
+  // (mobileCCI's five-tab bar has no dedicated Release/Settings icon).
+  document.getElementById('tab-more').classList.toggle('active', view==='release' || view==='confirm' || view==='settings' || view==='more');
   window.scrollTo(0,0);
   if(view === 'release') initReleaseView();
   if(view === 'confirm') initConfirmView();
