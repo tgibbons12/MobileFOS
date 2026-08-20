@@ -22,6 +22,7 @@ import os
 import time
 from datetime import datetime, timezone
 
+import airportsdata
 import requests
 from flask import Flask, request, jsonify, Response, redirect, url_for
 from flask_login import LoginManager, current_user, login_user, logout_user
@@ -32,6 +33,12 @@ import release_engine
 from fos_pages import AIRLINE_IATA
 from models import db, User, Leg, PbsImport, SignatureLog, ReleaseCache
 import simbrief_ofp
+
+# ICAO -> IANA timezone name (e.g. "America/Phoenix"), used to convert a PBS
+# leg's bare local departure time to zulu before sending it to SimBrief — a
+# small bundled dataset (~1MB), safe to load eagerly unlike the OurAirports
+# CSV lookup below.
+_AIRPORT_TZ = airportsdata.load("ICAO")
 
 # PBS's "OPERATOR / FLEET" line carries the two-letter IATA code; SimBrief's
 # generate-flight-plan form wants the three-letter ICAO code instead. Reuse
@@ -894,6 +901,18 @@ def set_aeroapi_key():
     current_user.aeroapi_key = (body.get("aeroapi_key") or "").strip() or None
     db.session.commit()
     return jsonify({"ok": True})
+
+
+@app.route("/airport-timezone/<icao>")
+def airport_timezone(icao):
+    """IANA timezone name for an ICAO airport code — lets the browser
+    convert a PBS leg's bare local departure time to zulu (via
+    Intl.DateTimeFormat, client-side) before sending it to SimBrief,
+    without needing a timezone library over there."""
+    airport = _AIRPORT_TZ.get((icao or "").strip().upper())
+    if not airport or not airport.get("tz"):
+        return jsonify({"error": "unknown airport/timezone"}), 404
+    return jsonify({"tz": airport["tz"]})
 
 
 @app.route("/")
@@ -1908,6 +1927,18 @@ async function prefillSimbriefGen(){
   document.getElementById('sbgen-orig').value = orig || '';
   document.getElementById('sbgen-dest').value = dest || '';
   document.getElementById('sbgen-airline').value = airline || '';
+
+  // Fetched now (well before the send button can be clicked) rather than
+  // at submit time — submitSimbriefGen() has to open the SimBrief tab
+  // synchronously with the click or Safari blocks it as not user-
+  // initiated, so there's no room for an awaited fetch there.
+  _origTzName = '';
+  if(orig){
+    try {
+      const tzR = await fetch('/airport-timezone/' + encodeURIComponent(orig));
+      if(tzR.ok) _origTzName = (await tzR.json()).tz || '';
+    } catch(e) { /* best-effort — submit falls back to sending local time as-is */ }
+  }
 }
 
 let _aeroSuggestion = null;
@@ -2377,6 +2408,36 @@ function isoDateToDDMMMYY(iso){
   return day + _DDMMMYY_MONTHS[parseInt(month, 10) - 1] + year.slice(-2);
 }
 
+// Origin airport's IANA timezone name, fetched during prefillSimbriefGen()
+// (see there for why not here — submit has to stay synchronous).
+let _origTzName = '';
+
+// Wall-clock hour/minute in an IANA zone -> zulu {h, m}, DST-aware, using
+// only Intl.DateTimeFormat (every evergreen browser bundles IANA tz data
+// via ICU — no timezone library needed client-side). Standard fixed-point
+// trick: hold the wall-clock we WANT the zone to show as a constant
+// target; guess an instant, check what wall-clock that guess actually
+// shows in the target zone, and nudge the guess by exactly how far off
+// that reading is from the fixed target — not from the previous guess,
+// which is what a naive re-diff-each-iteration version gets wrong (it
+// compounds instead of converging). Twice, to settle any edge case
+// sitting exactly on a DST transition.
+function localToZuluParts(dateISO, hour, minute, tzName){
+  const [year, month, day] = dateISO.split('-').map(Number);
+  const target = Date.UTC(year, month - 1, day, hour, minute);
+  let guess = target;
+  for(let i = 0; i < 2; i++){
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: tzName, hourCycle: 'h23',
+      year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+    }).formatToParts(new Date(guess)).reduce((acc, p) => { acc[p.type] = p.value; return acc; }, {});
+    const shown = Date.UTC(+parts.year, +parts.month - 1, +parts.day, +parts.hour, +parts.minute);
+    guess = guess - (shown - target);
+  }
+  const result = new Date(guess);
+  return {h: String(result.getUTCHours()).padStart(2, '0'), m: String(result.getUTCMinutes()).padStart(2, '0')};
+}
+
 async function submitSimbriefGen(){
   const el = document.getElementById('sbgen-msg');
   const btn = document.getElementById('sbgen-btn');
@@ -2387,10 +2448,25 @@ async function submitSimbriefGen(){
   const route = document.getElementById('sbgen-route').value.trim();
   const airline = document.getElementById('sbgen-airline').value.trim().toUpperCase();
   const fltnum = document.getElementById('sbgen-fltnum').value.trim();
-  const date = isoDateToDDMMMYY(document.getElementById('sbgen-date').value);
-  const time = document.getElementById('sbgen-time').value.trim();
-  const [depH, depM] = time.split(':');
+  const isoDate = document.getElementById('sbgen-date').value;
+  const date = isoDateToDDMMMYY(isoDate);
+  const rawTime = document.getElementById('sbgen-time').value.trim(); // "HH:MM" local wall-clock
   const reg = document.getElementById('sbgen-reg').value.trim().toUpperCase();
+  let depH = '', depM = '';
+  if(rawTime){
+    const [h, m] = rawTime.split(':').map(Number);
+    // tail_number only ever gets set by a real SimBrief OFP fetch, never
+    // by a PBS pairing — its absence is the reliable signal that this
+    // leg's time is still bare local wall-clock, not already zulu (an
+    // OFP-sourced time is computed straight from a UTC epoch and would
+    // get double-shifted if run through this conversion again).
+    if(!LEG_TAIL_NUMBER && _origTzName && isoDate){
+      const z = localToZuluParts(isoDate, h, m, _origTzName);
+      depH = z.h; depM = z.m;
+    } else {
+      depH = String(h).padStart(2, '0'); depM = String(m).padStart(2, '0');
+    }
+  }
 
   if(!user){ el.textContent = 'Set your SimBrief username in Settings first.'; el.style.color = '#c0392b'; return; }
   if(!orig || !dest){ el.textContent = 'Origin and destination are required.'; el.style.color = '#c0392b'; return; }
