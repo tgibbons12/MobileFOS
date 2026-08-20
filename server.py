@@ -3228,6 +3228,12 @@ async function toggleBookmark(doc, el){
     });
     const countEl = document.getElementById('ov-saved-count');
     if(countEl) countEl.textContent = bookmarked.length;
+    // LEG_BOOKMARKED_DOCS is a page-load snapshot initSavedDocs() reads
+    // from — without syncing it here, Saved Docs kept showing "No saved
+    // documents yet" after bookmarking, since the array itself never
+    // changed even though the icon/count on this page did. const only
+    // blocks reassignment, not mutation, so update it in place.
+    LEG_BOOKMARKED_DOCS.splice(0, LEG_BOOKMARKED_DOCS.length, ...bookmarked);
   } catch(e) { showToast('Request failed: ' + e); }
 }
 document.querySelectorAll('.bookmark-icon').forEach(icon => {
