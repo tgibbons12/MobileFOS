@@ -566,6 +566,24 @@ def _pbs_meta():
     return (row.meta if row else None) or {}
 
 
+_ofp_fetch_cache = {}  # simbrief_user -> (fetched_at, ofp_fields)
+_OFP_CACHE_TTL = 15  # seconds — covers one "Generate & Cache All Legs" burst
+# (several requests, same account, milliseconds apart) without re-fetching
+# SimBrief's API once per leg for data that can't have changed between
+# them; short enough that a genuinely fresh redispatch is still picked up
+# well within the time it'd take to notice a stale card.
+
+
+def _cached_ofp_fields(simbrief_user):
+    now = time.monotonic()
+    cached = _ofp_fetch_cache.get(simbrief_user)
+    if cached and now - cached[0] < _OFP_CACHE_TTL:
+        return cached[1]
+    fields = simbrief_ofp.fetch_ofp_leg_fields(simbrief_user)
+    _ofp_fetch_cache[simbrief_user] = (now, fields)
+    return fields
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -805,27 +823,51 @@ def generate_from_pbs(seq_number):
 
     fos_leg = pbs_parser.pbs_leg_to_fos_leg(_pbs_meta(), seq, day, leg, position)
 
-    # If this pairing leg already has its own leg row — e.g. it's already
-    # been dispatched/redispatched via SimBrief — just navigate there.
-    # Re-running the raw bid-pack baseline through _store_leg's merge
-    # would stomp the richer, more current sched_out/sched_in/est_out/
-    # pairing_sched_out SimBrief already supplied with the pairing's stale
-    # original values, since pbs_leg_to_fos_leg always emits those non-
-    # blank. Reported bug: switching to a sibling pill and back silently
-    # reverted a redispatched leg to its original pre-delay schedule.
     existing = _find(
         fos_leg.get("flight_number"), fos_leg.get("dep_date"),
         fos_leg.get("origin"), fos_leg.get("destination"),
     )
-    if existing:
+
+    # Before touching anything, check whether the pilot's CURRENT SimBrief
+    # OFP genuinely *is* this pairing leg (same flight number + city pair
+    # — "part of the sequence", not some unrelated flight sitting on the
+    # account) rather than blindly trusting the raw bid-pack baseline.
+    # This catches a redispatch done straight on SimBrief's own site
+    # (never routed back through this app's own Generate button) even
+    # when clicking in through the pairing/pill strip. _cached_ofp_fields
+    # avoids re-fetching per leg during "Generate & Cache All Legs".
+    simbrief_user = body.get("simbrief_user") or current_user.default_simbrief_user
+    ofp_match = None
+    if simbrief_user:
+        try:
+            ofp_fields = _cached_ofp_fields(simbrief_user)
+        except Exception as e:
+            ofp_fields = None
+            LOG.warning(f"SimBrief OFP check failed for {simbrief_user}: {e}")
+        if (
+            ofp_fields
+            and ofp_fields.get("flight_number") == fos_leg.get("flight_number")
+            and _airport_icao(ofp_fields.get("origin", "")) == _airport_icao(fos_leg.get("origin", ""))
+            and _airport_icao(ofp_fields.get("destination", "")) == _airport_icao(fos_leg.get("destination", ""))
+        ):
+            ofp_match = ofp_fields
+
+    if ofp_match:
+        fos_leg = {**fos_leg, **ofp_match}
+        fos_leg["signed_in"] = True
+    elif existing:
+        # No fresher SimBrief data for this specific leg right now — don't
+        # let the raw pairing baseline (which pbs_leg_to_fos_leg always
+        # emits non-blank) stomp whatever richer data this leg already
+        # has via _store_leg's non-blank-always-wins merge. Reported bug:
+        # switching to a sibling pill and back (or re-running "Generate &
+        # Cache All Legs") silently reverted an already-redispatched leg
+        # to its original pre-delay schedule.
         current_user.current_leg_id = existing.id
         db.session.commit()
         return jsonify({"fos_url": f"/fos/{existing.id}", "id": existing.id})
 
-    if body.get("simbrief_user"):
-        fos_leg["simbrief_user"] = body["simbrief_user"]
-    fos_leg = build_leg_from_sources(fos_leg)
-    fos_leg.pop("_ofp_error", None)  # non-fatal here — real pairing data already exists
+    fos_leg.pop("_ofp_error", None)
     record = _store_leg(fos_leg)
     return jsonify({"fos_url": f"/fos/{record['id']}", "id": record["id"]})
 
@@ -2568,7 +2610,7 @@ async function prefillSimbriefGen(){
   document.getElementById('sbgen-type-hint').textContent =
     (LEG_FLEET_TYPE && LEG_FLEET_TYPE_ICAO && LEG_FLEET_TYPE !== LEG_FLEET_TYPE_ICAO) ? 'PBS code: ' + LEG_FLEET_TYPE : '';
   document.getElementById('sbgen-fltnum').value = LEG_FLIGHT_NUMBER || '';
-  document.getElementById('sbgen-date').value = todayZuluISO();
+  document.getElementById('sbgen-date').value = todayZuluISO();  // placeholder — replaced below once the origin's local timezone is known
   document.getElementById('sbgen-time').value = LEG_SCHED_OUT || '';
   document.getElementById('sbgen-reg').value = LEG_TAIL_NUMBER || '';
 
@@ -2616,6 +2658,9 @@ async function prefillSimbriefGen(){
       if(tzR.ok) _origTzName = (await tzR.json()).tz || '';
     } catch(e) { /* best-effort — submit falls back to sending local time as-is */ }
   }
+  // Now that the origin's real timezone is known, replace the zulu
+  // placeholder date with "today" in that zone.
+  if(_origTzName) document.getElementById('sbgen-date').value = localDateISO(_origTzName);
 }
 
 let _aeroSuggestion = null;
@@ -3083,6 +3128,17 @@ async function cacheAllPairingLegs(seqData, position, msgEl){
 const _DDMMMYY_MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
 function todayZuluISO(){
   return new Date().toISOString().slice(0, 10);
+}
+// "Today" in a specific IANA zone, not bare UTC — a late-evening domestic
+// report time (e.g. 22:40 at PHX, UTC-7) is already the next zulu
+// calendar day, so defaulting the generate form's date to todayZuluISO()
+// silently sent SimBrief a date a day ahead of the pairing's real local
+// day. See prefillSimbriefGen() for where this replaces that default.
+function localDateISO(tzName){
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: tzName, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date()).reduce((acc, p) => { acc[p.type] = p.value; return acc; }, {});
+  return parts.year && parts.month && parts.day ? `${parts.year}-${parts.month}-${parts.day}` : todayZuluISO();
 }
 // The date input hands back "YYYY-MM-DD"; SimBrief's URL param wants
 // "DDMMMYY" (e.g. "18AUG26"). Split on '-' rather than parsing as a Date
