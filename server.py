@@ -1596,7 +1596,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .flight-card .station-code{font-size:27px;font-weight:800;}
   .flight-card .est-time{font-size:18px;font-weight:700;color:var(--green);}
   .flight-card .est-time.late{color:var(--red);}
-  .flight-card .sched-time{font-size:13px;color:var(--label);text-decoration:line-through;margin-left:5px;}
+  .flight-card .sched-time{display:block;font-size:13px;color:var(--label);text-decoration:line-through;}
   .flight-card .station-gate{font-size:17px;font-weight:700;color:var(--blue);margin-top:4px;}
   .flight-card-dur{flex:0 0 auto;align-self:center;display:flex;align-items:center;gap:4px;font-size:15px;font-weight:700;color:var(--label);white-space:nowrap;padding:0 8px;}
   .flight-card-dur .dur-chevron{width:11px;height:11px;color:var(--inactive);flex:0 0 auto;}
