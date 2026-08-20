@@ -349,7 +349,7 @@ DEFAULT_LEG = {
     "est_out": "", "est_in": "", "dep_gate": "", "arr_gate": "",
     "fleet_type": "", "equipment_type": "", "tail_number": "", "tail_routing": "",
     "aircraft_name": "", "fin": "", "engines": "", "selcal": "", "seat_capacity": "",
-    "max_zfw": "", "max_tow_struct": "", "max_ldw": "",
+    "oew": "", "max_zfw": "", "max_tow_struct": "", "max_ldw": "",
     "bookmarked_docs": [],
     "status": "", "customer_load": "", "position": "", "crew": [],
     "flight_time": "", "odl_time": "", "duty_time": "", "ground_time": "",
@@ -513,10 +513,15 @@ def generate():
     # A SimBrief-import generate (simbrief_user set, nothing else) almost
     # always lands on a fresh record — the OFP's real dep_date practically
     # never matches the "" dep_date a PBS/manual leg started with, so
-    # _find() below can't dedupe them into one. Gates applied via AeroAPI
-    # before sending to SimBrief live only on that older record and would
-    # otherwise be silently orphaned; carry them forward explicitly since
-    # a SimBrief OFP never carries gate data of its own to conflict with.
+    # _find() below can't dedupe them into one. Everything the PBS pairing
+    # carries that a SimBrief OFP has no field for at all — seq, position,
+    # base, duty/ground time, hotel/limo, gates applied via AeroAPI, any
+    # signature/attestation already given, bookmarks — would otherwise be
+    # silently orphaned on the old row while current_leg_id moves to this
+    # new one. This was the reported "Import PBS -> pick leg -> SimBrief ->
+    # Generate" bug: Current Flight coming back later missing the pairing
+    # (seq/schedule) because only gates were ever carried forward, not the
+    # rest of the PBS-only context.
     carry_from = payload.pop("carry_gates_from", None)
     leg = build_leg_from_sources(payload)
     ofp_error = leg.pop("_ofp_error", None)
@@ -528,7 +533,11 @@ def generate():
         except (TypeError, ValueError):
             src_row = None
         if src_row:
-            for key in ("dep_gate", "arr_gate"):
+            for key in (
+                "seq", "position", "base", "duty_time", "ground_time",
+                "hotel_details", "limo_details", "dep_gate", "arr_gate",
+                "bookmarked_docs", "signed_in", "fit_for_duty",
+            ):
                 if src_row.data.get(key) and not leg.get(key):
                     leg[key] = src_row.data[key]
     record = _store_leg(leg)
@@ -1104,6 +1113,7 @@ def render_fos_html(leg):
     ctx["tail_number_html"] = html.escape(ctx.get("tail_number") or "") or "—"
     ctx["engines_html"] = html.escape(ctx.get("engines") or "") or "—"
     ctx["selcal_html"] = html.escape(ctx.get("selcal") or "") or "—"
+    ctx["oew_html"] = html.escape(ctx.get("oew") or "") or "—"
     ctx["max_zfw_html"] = html.escape(ctx.get("max_zfw") or "") or "—"
     ctx["max_tow_struct_html"] = html.escape(ctx.get("max_tow_struct") or "") or "—"
     ctx["max_ldw_html"] = html.escape(ctx.get("max_ldw") or "") or "—"
@@ -1522,8 +1532,8 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   @media (prefers-reduced-motion: reduce){ *{transition:none !important;animation:none !important;} }
   .app-shell{display:flex;flex-direction:column;min-height:100vh;min-height:100dvh;width:100%;padding-top:env(safe-area-inset-top);padding-left:env(safe-area-inset-left);padding-right:env(safe-area-inset-right);}
   .main{flex:1;min-width:0;padding:14px 16px calc(72px + env(safe-area-inset-bottom));}
-  .tabbar{position:fixed;left:env(safe-area-inset-left);right:env(safe-area-inset-right);bottom:0;display:flex;background:var(--card);border-top:1px solid var(--border);padding:6px 0 calc(6px + env(safe-area-inset-bottom));z-index:20;}
-  .tab-btn{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;background:transparent;border:none;color:var(--label);cursor:pointer;padding:4px 2px;position:relative;}
+  .tabbar{position:fixed;left:env(safe-area-inset-left);right:env(safe-area-inset-right);bottom:0;display:flex;justify-content:center;background:var(--card);border-top:1px solid var(--border);padding:5px 0 calc(5px + env(safe-area-inset-bottom));z-index:20;}
+  .tab-btn{flex:1;max-width:110px;display:flex;flex-direction:column;align-items:center;gap:3px;background:transparent;border:none;color:var(--label);cursor:pointer;padding:4px 2px;position:relative;}
   .tab-btn svg{width:22px;height:22px;}
   .tab-btn span{font-size:10px;font-weight:600;}
   .tab-btn.active{color:var(--blue-dark);}
@@ -1540,40 +1550,40 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .flight-card-dur{flex:0 0 auto;align-self:center;font-size:11px;color:var(--label);white-space:nowrap;padding:0 6px;}
   .pill-strip{display:flex;gap:8px;overflow-x:auto;padding:8px 0 12px;scrollbar-width:none;}
   .pill-strip::-webkit-scrollbar{display:none;}
-  .leg-pill{flex:0 0 auto;font-family:inherit;font-size:13px;font-weight:600;padding:7px 16px;border-radius:20px;border:none;background:transparent;color:var(--value);cursor:pointer;white-space:nowrap;}
+  .leg-pill{flex:0 0 auto;font-family:inherit;font-size:14px;font-weight:600;padding:8px 17px;border-radius:20px;border:none;background:transparent;color:var(--value);cursor:pointer;white-space:nowrap;}
   .leg-pill.selected{background:var(--blue);color:#fff;font-weight:700;}
   .split{display:flex;gap:0;align-items:flex-start;}
-  .split-left{flex:0 0 auto;width:310px;display:flex;flex-direction:column;gap:12px;min-width:0;}
-  .split-right{flex:1;min-width:0;display:flex;flex-direction:column;gap:10px;margin-left:32px;margin-right:16px;}
-  .panel-card{background:var(--card);border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,.05);border:1px solid var(--border);}
-  .panel-card-hdr{padding:11px 13px 8px;font-size:15px;font-weight:700;color:var(--value);background:var(--card);border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;}
+  .split-left{flex:0 0 auto;width:320px;display:flex;flex-direction:column;gap:14px;min-width:0;}
+  .split-right{flex:1;min-width:0;display:flex;flex-direction:column;gap:12px;margin-left:32px;margin-right:16px;}
+  .panel-card{background:var(--card);border-radius:18px;overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,.05);border:1px solid var(--border);}
+  .panel-card-hdr{padding:12px 14px 9px;font-size:16px;font-weight:700;color:var(--value);background:var(--card);border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;}
   .lead-icon{width:16px;height:16px;color:#5b6472;flex:0 0 auto;}
   .mot-row{padding:11px 13px;display:flex;justify-content:space-between;align-items:center;}
-  .mot-time{font-size:15px;font-weight:700;}
+  .mot-time{font-size:16px;font-weight:700;}
   .mot-scorecard{padding:9px 13px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;color:var(--inactive);}
-  .mot-scorecard .code{font-weight:700;font-size:12.5px;color:var(--inactive);}
-  .mot-scorecard .desc{font-size:10.5px;color:var(--inactive);}
-  .mot-view{font-size:13px;font-weight:600;color:var(--inactive);}
-  .stat-row{background:var(--card);border-radius:16px;border:1px solid var(--border);overflow:hidden;}
-  .stat-hdr{display:flex;justify-content:space-between;align-items:center;padding:13px 14px;cursor:pointer;font-size:15px;font-weight:700;background:none;border:none;width:100%;text-align:left;color:var(--value);}
-  .stat-hdr .val{color:var(--label);font-weight:500;display:flex;align-items:center;gap:6px;font-size:15px;}
+  .mot-scorecard .code{font-weight:700;font-size:13.5px;color:var(--inactive);}
+  .mot-scorecard .desc{font-size:11.5px;color:var(--inactive);}
+  .mot-view{font-size:14px;font-weight:600;color:var(--inactive);}
+  .stat-row{background:var(--card);border-radius:18px;border:1px solid var(--border);overflow:hidden;}
+  .stat-hdr{display:flex;justify-content:space-between;align-items:center;padding:14px 16px;cursor:pointer;font-size:16px;font-weight:700;background:none;border:none;width:100%;text-align:left;color:var(--value);}
+  .stat-hdr .val{color:var(--label);font-weight:500;display:flex;align-items:center;gap:6px;font-size:16px;}
   .stat-hdr svg{width:15px;height:15px;color:var(--inactive);transition:transform .15s ease;}
   .stat-row.open .stat-hdr svg{transform:rotate(180deg);}
   .stat-body{display:none;border-top:1px solid var(--border);}
   .stat-row.open .stat-body{display:block;}
-  .stat-detail-row{display:flex;justify-content:space-between;padding:9px 14px;font-size:12.5px;border-bottom:1px solid var(--border);}
+  .stat-detail-row{display:flex;justify-content:space-between;padding:10px 15px;font-size:13.5px;border-bottom:1px solid var(--border);}
   .stat-detail-row:last-child{border-bottom:none;}
   .stat-detail-row .lbl{color:var(--label);}
   .stat-detail-row .val{font-weight:600;font-variant-numeric:tabular-nums;}
-  .weight-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;}
+  .weight-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;}
   .weight-grid>div{display:flex;flex-direction:column;align-items:center;gap:2px;background:var(--bg);border-radius:8px;padding:7px 4px;}
   .weight-grid .wg-lbl{font-size:9.5px;color:var(--label);text-transform:uppercase;letter-spacing:.03em;}
   .weight-grid .wg-val{font-size:12.5px;font-weight:700;color:var(--value);font-variant-numeric:tabular-nums;}
   .topbar{display:flex;flex-wrap:wrap;align-items:center;margin-bottom:10px;position:sticky;top:env(safe-area-inset-top);z-index:10;background:var(--bg);padding-top:6px;margin-top:-6px;margin-left:-16px;margin-right:-16px;padding-left:16px;padding-right:16px;}
-  .back-link{order:1;color:var(--blue-dark);font-size:14px;font-weight:500;background:none;border:none;cursor:pointer;padding:4px 2px;}
+  .back-link{order:1;color:var(--blue-dark);font-size:15px;font-weight:500;background:none;border:none;cursor:pointer;padding:4px 2px;}
   .topbar-actions{order:2;margin-left:auto;display:flex;align-items:center;gap:14px;}
   .topbar-title{order:3;flex:1 1 100%;text-align:center;margin-top:2px;}
-  .topbar-title h1{font-size:17px;margin:0;font-weight:600;color:var(--blue-dark);}
+  .topbar-title h1{font-size:18px;margin:0;font-weight:600;color:var(--blue-dark);}
   .topbar-title p{font-size:11px;margin:2px 0 0;color:var(--label);}
   .icon-btn{background:none;border:none;color:#5b6472;cursor:pointer;padding:2px;display:flex;}
   .icon-btn svg{width:19px;height:19px;}
@@ -1604,9 +1614,9 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .section-bar.collapsed svg.chevron{transform:rotate(180deg);}
   .no-prefs{padding:10px 14px;color:var(--label);font-size:13px;font-style:italic;background:var(--card);border-bottom:1px solid var(--border);}
   .doc-list{background:var(--card);}
-  .doc-row{display:flex;align-items:center;justify-content:space-between;padding:11px 14px;border-bottom:1px solid var(--border);gap:10px;}
-  .doc-row .code{font-weight:700;font-size:13px;}
-  .doc-row .desc{font-size:12px;color:var(--label);margin-top:1px;}
+  .doc-row{display:flex;align-items:center;justify-content:space-between;padding:12px 15px;border-bottom:1px solid var(--border);gap:10px;}
+  .doc-row .code{font-weight:700;font-size:14px;}
+  .doc-row .desc{font-size:13px;color:var(--label);margin-top:1px;}
   .doc-row .actions{display:flex;align-items:center;gap:26px;flex:0 0 auto;}
   .doc-row .actions svg{width:19px;height:19px;color:#5b6472;cursor:pointer;padding:7px;margin:-7px;box-sizing:content-box;}
   .doc-row .check{color:var(--inactive,#9aa1ab);cursor:pointer;}
@@ -1744,11 +1754,12 @@ FOS_TEMPLATE = """<!DOCTYPE html>
               <div class="stat-detail-row"><span class="lbl">Engine</span><span class="val">$engines_html</span></div>
               <div class="stat-detail-row"><span class="lbl">SELCAL</span><span class="val">$selcal_html</span></div>
               <div class="stat-detail-row" style="display:block;">
-                <div class="lbl" style="margin-bottom:6px;">Max Weights (Structural)</div>
+                <div class="lbl" style="margin-bottom:6px;">Weights (Structural)</div>
                 <div class="weight-grid">
-                  <div><span class="wg-lbl">ZFW</span><span class="wg-val">$max_zfw_html</span></div>
-                  <div><span class="wg-lbl">TOW</span><span class="wg-val">$max_tow_struct_html</span></div>
-                  <div><span class="wg-lbl">LDW</span><span class="wg-val">$max_ldw_html</span></div>
+                  <div><span class="wg-lbl">EOW</span><span class="wg-val">$oew_html</span></div>
+                  <div><span class="wg-lbl">MZFW</span><span class="wg-val">$max_zfw_html</span></div>
+                  <div><span class="wg-lbl">MTOW</span><span class="wg-val">$max_tow_struct_html</span></div>
+                  <div><span class="wg-lbl">MLW</span><span class="wg-val">$max_ldw_html</span></div>
                 </div>
               </div>
             </div>
@@ -1765,60 +1776,12 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         </div>
       </div>
     </section>
-    <section id="documents-view" class="view">
+    <section id="allcommands-view" class="view">
       <div class="topbar">
         <button class="back-link" onclick="showView('overview')">Back</button>
-        <div class="topbar-actions">
-          <button class="icon-btn" title="Settings" onclick="showView('settings')">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.34 1.87l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.7 1.7 0 00-1.87-.34 1.7 1.7 0 00-1 1.55V21a2 2 0 11-4 0v-.09A1.7 1.7 0 009 19.4a1.7 1.7 0 00-1.87.34l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.7 1.7 0 004.6 15a1.7 1.7 0 00-1.55-1H3a2 2 0 110-4h.09A1.7 1.7 0 004.6 9a1.7 1.7 0 00-.34-1.87l-.06-.06a2 2 0 112.83-2.83l.06.06A1.7 1.7 0 009 4.6a1.7 1.7 0 001-1.55V3a2 2 0 114 0v.09a1.7 1.7 0 001 1.55 1.7 1.7 0 001.87-.34l.06-.06a2 2 0 112.83 2.83l-.06.06A1.7 1.7 0 0019.4 9a1.7 1.7 0 001.55 1H21a2 2 0 110 4h-.09a1.7 1.7 0 00-1.55 1z"/></svg>
-          </button>
-        </div>
-        <div class="topbar-title">
-          <h1>Flight $flight_number</h1>
-          <p>Pull to Refresh</p>
-        </div>
+        <div class="topbar-title"><h1>All Commands</h1></div>
       </div>
-      <div class="status-bar"><span>SEQ $seq</span><span>$date</span></div>
-      <div class="flight-summary">
-        <div class="fnum">$flight_number</div>
-        <div class="col"><span>$origin</span><span>$destination</span></div>
-        <div class="col"><span>$dep_date</span><span>$arr_date</span></div>
-        <div class="col"><span>$sched_out</span><span>$sched_in</span></div>
-        <div class="col"><span id="doc-dep-gate">$dep_gate</span><span id="doc-arr-gate">$arr_gate</span></div>
-      </div>
-      <div class="search-block">
-        <label for="doc-search">Find a Document</label>
-        <input id="doc-search" type="text" placeholder="">
-      </div>
-      <div class="doc-list">
-        <div class="doc-row" style="cursor:pointer;" onclick="showView('saveddocs')">
-          <div><div class="code">Saved Docs</div></div>
-          <div class="val" style="color:var(--label);font-size:13px;">0</div>
-        </div>
-        <div class="doc-row" style="cursor:pointer;" onclick="openAllCommands()">
-          <div><div class="code">All Commands</div></div>
-          <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></div>
-        </div>
-        <div class="doc-row" style="border-bottom:none;cursor:pointer;" onclick="showToast('Not available yet')">
-          <div><div class="code">Favorite Groups</div></div>
-          <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></div>
-        </div>
-      </div>
-      <button class="section-bar" onclick="showToast('Edit preferences')">
-        My Preferences
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"/></svg>
-      </button>
-      <div class="no-prefs">No preferences saved</div>
-      <button class="section-bar collapsed" id="crew-bar" onclick="toggleSection('crew')">
-        Crew
-        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
-      </button>
-      <div class="card" id="crew-body" style="display:none;">$crew_rows</div>
-      <button class="section-bar" id="flight-bar" onclick="toggleSection('flight')">
-        Flight
-        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
-      </button>
-      <div class="doc-list" id="flight-body">
+      <div class="panel-card">
         <div class="doc-row">
           <div><div class="code">FFD</div><div class="desc">Fit for Duty Declaration</div></div>
           <div class="actions">
@@ -1858,33 +1821,15 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           <div><div class="code">WX*</div><div class="desc">Winds &amp; Weather</div></div>
           <div class="actions"><svg class="bookmark-icon" data-doc="WX*" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="toggleBookmark('WX*', this)"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('weather','Winds &amp; Weather')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
         </div>
-        <div class="doc-row">
+        <div class="doc-row" style="border-bottom:none;">
           <div><div class="code">G*L/SS</div><div class="desc">Customers Requiring Special Services</div></div>
           <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="showToast('Not available \u2014 no data source for this document yet')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
-        </div>
-        <div class="doc-row" style="border-bottom:none;">
-          <div><div class="code">MOT</div><div class="desc">Mandatory Off Time</div></div>
-          <div class="val" style="color:var(--label);font-size:13px;font-style:italic;">Not available</div>
-        </div>
-      </div>
-      <button class="section-bar collapsed" id="extapps-bar" onclick="toggleSection('extapps')">
-        External Apps
-        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
-      </button>
-      <div class="doc-list" id="extapps-body" style="display:none;">
-        <div class="doc-row" style="cursor:pointer;" onclick="showView('release')">
-          <div><div class="code">SimBrief</div><div class="desc">Send to SimBrief Dispatch</div></div>
-          <div class="actions"><svg class="ext-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><path d="M15 3h6v6"/><path d="M10 14L21 3"/></svg></div>
-        </div>
-        <div class="doc-row" style="border-bottom:none;cursor:pointer;" onclick="exportToForeFlight()">
-          <div><div class="code">ForeFlight</div><div class="desc">Export Route</div></div>
-          <div class="actions"><svg class="ext-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><path d="M15 3h6v6"/><path d="M10 14L21 3"/></svg></div>
         </div>
       </div>
     </section>
     <section id="weather-view" class="view">
       <div class="topbar">
-        <button class="back-link" onclick="showView('documents')">Back</button>
+        <button class="back-link" onclick="showView('allcommands')">Back</button>
         <div class="topbar-title">
           <h1>Winds &amp; Weather</h1>
           <p>WX*$origin / WX*$destination</p>
@@ -1932,7 +1877,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
 
     <section id="sign-view" class="view">
       <div class="topbar">
-        <button class="back-link" onclick="showView('documents')">Back</button>
+        <button class="back-link" onclick="showView('allcommands')">Back</button>
         <div class="topbar-title">
           <h1>Sign eFlight Plan</h1>
           <p id="sign-status-line">Acknowledges receipt of the current release</p>
@@ -2139,7 +2084,7 @@ const LEG_SCHED_IN = "$sched_in";
 const LEG_BOOKMARKED_DOCS = $bookmarked_docs_json;
 function showView(view){
   document.getElementById('overview-view').classList.toggle('active', view==='overview');
-  document.getElementById('documents-view').classList.toggle('active', view==='documents');
+  document.getElementById('allcommands-view').classList.toggle('active', view==='allcommands');
   document.getElementById('release-view').classList.toggle('active', view==='release');
   document.getElementById('confirm-view').classList.toggle('active', view==='confirm');
   document.getElementById('pdf-view').classList.toggle('active', view==='pdf');
@@ -2305,8 +2250,8 @@ async function applyAeroGates(){
     });
     const data = await r.json();
     if(!r.ok){ showToast(data.error || 'Could not apply gates'); return; }
-    for(const id of ['ov-dep-gate', 'doc-dep-gate']) { const el = document.getElementById(id); if(el) el.textContent = data.dep_gate || ''; }
-    for(const id of ['ov-arr-gate', 'doc-arr-gate']) { const el = document.getElementById(id); if(el) el.textContent = data.arr_gate || ''; }
+    const depGateEl = document.getElementById('ov-dep-gate'); if(depGateEl) depGateEl.textContent = data.dep_gate || '';
+    const arrGateEl = document.getElementById('ov-arr-gate'); if(arrGateEl) arrGateEl.textContent = data.arr_gate || '';
     showToast('Gates applied');
   } catch(e) { showToast('Request failed: ' + e); }
 }
@@ -2350,12 +2295,6 @@ function toggleSection(name){
   const body = document.getElementById(name+'-body');
   const collapsed = bar.classList.toggle('collapsed');
   body.style.display = collapsed ? 'none' : 'block';
-}
-function openAllCommands(){
-  showView('documents');
-  document.getElementById('flight-bar').classList.remove('collapsed');
-  document.getElementById('flight-body').style.display = 'block';
-  document.getElementById('flight-bar').scrollIntoView({block: 'start'});
 }
 function toggleStatus(kind, elId){
   fetch('/fos/' + LEG_ID + '/' + kind, {method:'POST'})
@@ -2490,7 +2429,7 @@ function closePdfView(){
   _pdfRenderToken++; // cancel any render still in flight
   document.getElementById('pdf-pages').innerHTML = '';
   if(_pdfObjectUrl){ URL.revokeObjectURL(_pdfObjectUrl); _pdfObjectUrl = null; }
-  showView('documents');
+  showView('allcommands');
 }
 
 function openSignPad(){
@@ -2556,7 +2495,7 @@ async function submitSignature(){
     const check = document.getElementById('sign-check');
     if(check) check.classList.add('signed');
     showToast('Signed');
-    showView('documents');
+    showView('allcommands');
   } catch(e) {
     btn.disabled = false;
     el.textContent = 'Request failed: ' + e;
@@ -2842,10 +2781,7 @@ function initSavedDocs(){
   }).join('') + '</div>';
 }
 function openOvAllCommands(){
-  showView('documents');
-  document.getElementById('flight-bar').classList.remove('collapsed');
-  document.getElementById('flight-body').style.display = 'block';
-  document.getElementById('flight-bar').scrollIntoView({block: 'start'});
+  showView('allcommands');
 }
 let _ovPillsLoaded = false;
 async function initOverviewPills(){

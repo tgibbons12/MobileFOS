@@ -172,6 +172,7 @@ def fetch_ofp_leg_fields(simbrief_user, timeout=15):
         # etc.) — confirmed against the same real OFP XML sample's <weights>
         # block. fuel_lbs() is just generic int-with-commas formatting,
         # reused here for the same reason.
+        "oew": fuel_lbs("weights/oew"),
         "max_zfw": fuel_lbs("weights/max_zfw"),
         "max_tow_struct": fuel_lbs("weights/max_tow_struct"),
         "max_ldw": fuel_lbs("weights/max_ldw"),
