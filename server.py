@@ -152,21 +152,28 @@ def _fleet_type_icao(code):
 
 
 def _minutes_late(sched, est):
-    """Signed minutes from sched to est on a 24h clock, taking the shorter
-    way around midnight rather than a flat HH:MM string/lexical compare
-    (which broke on an overnight delay: "09:40" > "22:40" is False as a
-    string, so an 11-hour-late flight read as early/on-time). Returns the
-    value in (-720, 720] — positive means late, negative means early —
-    since without real calendar dates on both sides, the shorter arc
-    around a 24h clock is the only sane way to disambiguate "11h late"
-    from "13h early" for two bare HH:MM values."""
+    """Signed minutes from sched to est on a 24h clock, without real
+    calendar dates on both sides to fall back on. A flat HH:MM string/
+    lexical compare broke on an overnight delay ("09:40" > "22:40" is
+    False, so an 11h-late flight read as early/on-time); a symmetric
+    +/-12h "shorter arc around the clock" fix broke again right at (and
+    past) exactly 12h late, which wraps to reading as early instead —
+    reported for an ~12h delay that still showed green. Real dispatch
+    delays routinely run many hours; a flight silently running many hours
+    *early* essentially never happens. So this window is deliberately
+    asymmetric rather than +/-12h: up to 3h "early" (arbitrary but
+    generous — a real early push is rarely more than minutes), and up to
+    21h "late" before it wraps. Still a heuristic, not exact, given only
+    time-of-day to work with — but strongly biased toward the shape real
+    delays actually take instead of splitting the difference evenly."""
     try:
         sh, sm = (int(x) for x in sched.split(":"))
         eh, em = (int(x) for x in est.split(":"))
     except ValueError:
         return None
     diff = (eh * 60 + em) - (sh * 60 + sm)
-    return ((diff + 720) % 1440) - 720
+    early_allowance = 180  # 3h
+    return ((diff + early_allowance) % 1440) - early_allowance
 
 
 def _station_time_html(pairing_sched, current_sched, est):
@@ -2868,10 +2875,17 @@ async function renderPdfInline(bytes){
   if(token !== _pdfRenderToken) return; // a newer viewDoc() call superseded this one
   container.innerHTML = '';
   const targetWidth = Math.max(container.clientWidth - 24, 280);
+  // Render the bitmap at the screen's real device pixel ratio, not just
+  // the CSS width — a canvas sized 1:1 to CSS pixels looks soft once the
+  // browser upscales it on a Retina/high-DPI iPad. Same DPR-scaling
+  // pattern the signature pad canvas already uses; canvas.style.width
+  // stays at targetWidth so the displayed size is unchanged, only the
+  // underlying bitmap gets sharper.
+  const dpr = window.devicePixelRatio || 1;
   for(let pageNum = 1; pageNum <= pdf.numPages; pageNum++){
     if(token !== _pdfRenderToken) return;
     const page = await pdf.getPage(pageNum);
-    const scale = targetWidth / page.getViewport({scale:1}).width;
+    const scale = (targetWidth / page.getViewport({scale:1}).width) * dpr;
     const viewport = page.getViewport({scale});
     const canvas = document.createElement('canvas');
     canvas.className = 'pdf-page';
