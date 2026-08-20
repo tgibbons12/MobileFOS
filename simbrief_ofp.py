@@ -112,6 +112,10 @@ def fetch_ofp_leg_fields(simbrief_user, timeout=15):
         "flight_number": text("general/flight_number"),
         "origin": text("origin/icao_code"),
         "destination": text("destination/icao_code"),
+        # Enroute waypoints only (no orig/dest) — same general/route path
+        # MASTERLOG.py already reads successfully for the printed release's
+        # route line, not guessed. Used for the ForeFlight export URL.
+        "route": text("general/route"),
         "tz_diff": tz_diff(),
         "dep_date": epoch_to("%m/%d/%y", "times/sched_out"),
         "arr_date": epoch_to("%m/%d/%y", "times/sched_in"),

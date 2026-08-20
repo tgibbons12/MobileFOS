@@ -157,32 +157,28 @@ def extract_named_pages(rls_bytes):
       fi / fil       — fos_pages.build_fi_page()/build_fil_page()'s header
                         lines ("FI<flt>/..." / "FIL<flt>/..."). First match
                         only — each is always exactly one page.
-      weather        — MASTERLOG's weather section (_apt_header + a
-                        _cat_banner("TAF")/_cat_banner("METAR") per station,
-                        rendered right before NOTAMs "in NOTAM-compatible
-                        token format"). All matching pages combined, in
-                        document order.
-      notams         — MASTERLOG._airport_notam_header()'s banner
-                        ('=' * 72 rules around each airport block). All
-                        matching pages are combined into one PDF, in
-                        document order (dep/dest/alternate/enroute).
+      weather        — station METAR/TAF blocks; identified by the literal
+                        "METAR"/"TAF" category banner text every station
+                        block renders, even when NIL.
+      notams         — real NOTAM records, identified by "CREATED:" (every
+                        individual NOTAM carries a created timestamp) or
+                        "UFN" (until-further-notice, in the effective-date
+                        range). All matching pages combined, in document
+                        order.
       field_report   — MASTERLOG.write_field_reports()'s "* <STA> FIELD
                         REPORT *" header, one per origin/destination
                         station. All matches combined the same way.
 
-    weather and notams share the exact same '=' * 72 airport-block banner
-    by design (_apt_header / _airport_notam_header both "match OFP badge
-    style") — that banner alone can't tell them apart. What does: every
-    weather station block always renders a "TAF"/"METAR" category banner
-    right after its header (_cat_banner), even when the underlying report
-    is NIL, so checking for that text first (before falling through to the
-    bare '=' banner check) is what keeps weather pages out of the notams
-    bucket instead of silently merged into it.
-
-    Not independently verified against a real generated release from this
-    app (needs a live SimBrief OFP this environment doesn't have) — if a
-    kind turns out empty or wrong, that's a marker-pattern fix here, not a
-    sign the underlying page generation is broken.
+    First pass at this (2026-08-19) assumed weather/notams both used
+    _airport_notam_header()'s '=' * 72 banner as literal text, matching
+    MASTERLOG's source. Verified 2026-08-20 against a real generated
+    release: that banner (however MASTERLOG draws it) doesn't actually
+    show up in pypdf's extract_text() output at all — every real NOTAMs
+    page came back completely unmatched. "CREATED:"/"UFN" above are real
+    markers confirmed against that output, not source-inferred. The '='
+    banner check stays as a fallback (harmless — it only ever fires after
+    the notams check above it misses) in case some other release variant
+    does render literal '=' text.
 
     Returns {"fi": bytes|None, "fil": bytes|None, "weather": bytes|None,
     "notams": bytes|None, "field_report": bytes|None}; a miss just means
@@ -202,7 +198,10 @@ def extract_named_pages(rls_bytes):
     # right there in the logs instead of needing another guess.
     page_log = []
     for i, page in enumerate(reader.pages):
-        text = (page.extract_text() or "")[:600]
+        # 1000 chars, not 600 — "CREATED:" (the notams marker below) can
+        # sit past 600 on a page whose NOTAM number/date-range text runs
+        # long before it.
+        text = (page.extract_text() or "")[:1000]
         if re.search(r'\bFIL\d', text) and single["fil"] is None:
             single["fil"] = page
             page_log.append(f"page {i}: fil")
@@ -212,7 +211,7 @@ def extract_named_pages(rls_bytes):
         elif re.search(r'\bMETAR\b|\bTAF\b', text):
             multi["weather"].append(page)
             page_log.append(f"page {i}: weather")
-        elif re.search(r'={20,}', text):
+        elif re.search(r'\bCREATED:|\bUFN\b', text) or re.search(r'={20,}', text):
             multi["notams"].append(page)
             page_log.append(f"page {i}: notams")
         elif re.search(r'FIELD REPORT', text):

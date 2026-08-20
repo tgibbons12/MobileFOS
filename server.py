@@ -314,7 +314,7 @@ def logout():
 
 DEFAULT_LEG = {
     "seq": "", "date": "", "flight_number": "", "origin": "", "destination": "",
-    "dep_date": "", "arr_date": "", "sched_out": "", "sched_in": "",
+    "route": "", "dep_date": "", "arr_date": "", "sched_out": "", "sched_in": "",
     "est_out": "", "est_in": "", "dep_gate": "", "arr_gate": "",
     "fleet_type": "", "equipment_type": "", "tail_number": "", "tail_routing": "",
     "status": "", "customer_load": "", "position": "", "crew": [],
@@ -1447,6 +1447,9 @@ FOS_TEMPLATE = """<!DOCTYPE html>
       <button class="side-btn" title="Web" onclick="showToast('Web')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.5 2.6 2.5 15.4 0 18M12 3c-2.5 2.6-2.5 15.4 0 18"/></svg>
       </button>
+      <button class="side-btn" title="Export to ForeFlight" onclick="exportToForeFlight()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6-13v13m6 0l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"/></svg>
+      </button>
       <button class="side-btn" id="nav-settings" title="Settings" onclick="showView('settings')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.34 1.87l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.7 1.7 0 00-1.87-.34 1.7 1.7 0 00-1 1.55V21a2 2 0 11-4 0v-.09A1.7 1.7 0 009 19.4a1.7 1.7 0 00-1.87.34l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.7 1.7 0 004.6 15a1.7 1.7 0 00-1.55-1H3a2 2 0 110-4h.09A1.7 1.7 0 004.6 9a1.7 1.7 0 00-.34-1.87l-.06-.06a2 2 0 112.83-2.83l.06.06A1.7 1.7 0 009 4.6a1.7 1.7 0 001-1.55V3a2 2 0 114 0v.09a1.7 1.7 0 001 1.55 1.7 1.7 0 001.87-.34l.06-.06a2 2 0 112.83 2.83l-.06.06A1.7 1.7 0 0019.4 9a1.7 1.7 0 001.55 1H21a2 2 0 110 4h-.09a1.7 1.7 0 00-1.55 1z"/></svg>
       </button>
@@ -1782,6 +1785,7 @@ const LEG_ID = "$leg_id";
 const LEG_FLIGHT_NUMBER = "$flight_number";
 const LEG_ORIGIN = "$origin";
 const LEG_DESTINATION = "$destination";
+const LEG_ROUTE = "$route";
 const LEG_TAIL_NUMBER = "$tail_number";
 const LEG_SCHED_OUT = "$sched_out";
 const LEG_FLEET_TYPE = "$fleet_type";
@@ -1989,6 +1993,23 @@ function toggleStatus(kind, elId){
       });
     })
     .catch(()=>showToast('Update failed'));
+}
+function exportToForeFlight(){
+  if(!LEG_ORIGIN || !LEG_DESTINATION){ showToast('No route on this flight yet'); return; }
+  // ForeFlight Mobile's maps/search deep link takes a space-separated
+  // station string (orig, enroute waypoints, dest) — spaces become '+' in
+  // the URL, same convention as https://foreflightmobile://maps/search.
+  // LEG_ROUTE is SimBrief's general/route (enroute waypoints only, no
+  // orig/dest), so just orig + route + dest gets the full routing; a
+  // trailing registration matches an Aircraft Profile if we have one.
+  const parts = [LEG_ORIGIN, LEG_ROUTE, LEG_DESTINATION, LEG_TAIL_NUMBER].filter(Boolean);
+  const url = 'foreflightmobile://maps/search?q=' + encodeURIComponent(parts.join(' ')).replace(/%20/g, '+');
+  const link = document.createElement('a');
+  link.href = url;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  showToast('Opening in ForeFlight…');
 }
 let toastTimer;
 function showToast(msg){
