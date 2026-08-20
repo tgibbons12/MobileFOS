@@ -1102,7 +1102,11 @@ def render_fos_html(leg):
             f'<span class="val">DOM {html.escape(member["dom"])} &middot; EMP {html.escape(member["emp"])}</span></div>'
         )
     ctx["crew_rows"] = "".join(rows)
-    ctx["crew_count"] = f"{len(roster)}/{len(roster)}"
+    # PU (purser) is on the roster/accordion but excluded from this count —
+    # mobileCCI's crew-count tile tracks pilots + flight attendants, not the
+    # lead FA separately.
+    working_crew = [m for m in roster if m["seat"] != "PU"]
+    ctx["crew_count"] = f"{len(working_crew)}/{len(working_crew)}"
     ctx["leg_id"] = str(leg.get("id", ""))
     ctx["origin_icao"] = _airport_icao(ctx.get("origin", ""))
     ctx["destination_icao"] = _airport_icao(ctx.get("destination", ""))
@@ -1529,6 +1533,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<script>(function(){var t=localStorage.getItem('fos_theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);})();</script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#f5f5f7" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
@@ -1584,25 +1589,26 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .tab-btn span{font-size:10px;font-weight:600;}
   .tab-btn.active{color:var(--blue-dark);}
   .tab-btn .badge{position:absolute;top:0;left:50%;margin-left:6px;width:15px;height:15px;border-radius:50%;background:var(--red);color:#fff;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;}
-  .flight-card{display:flex;align-items:stretch;padding:12px 13px 4px;gap:8px;}
-  .flight-card .station{flex:1;display:flex;flex-direction:column;gap:2px;min-width:0;}
+  .flight-card{display:flex;align-items:stretch;padding:22px 20px 18px;gap:12px;}
+  .flight-card .station{flex:1;display:flex;flex-direction:column;gap:4px;min-width:0;}
   .flight-card .station.dest{align-items:flex-end;text-align:right;}
-  .flight-card .station-date{font-size:10.5px;color:var(--label);text-transform:uppercase;letter-spacing:.02em;}
-  .flight-card .station-code{font-size:20px;font-weight:800;}
-  .flight-card .est-time{font-size:14px;font-weight:700;color:var(--green);}
+  .flight-card .station-date{font-size:12px;color:var(--label);text-transform:uppercase;letter-spacing:.02em;}
+  .flight-card .station-code{font-size:27px;font-weight:800;}
+  .flight-card .est-time{font-size:18px;font-weight:700;color:var(--green);}
   .flight-card .est-time.late{color:var(--red);}
-  .flight-card .sched-time{font-size:11px;color:var(--label);text-decoration:line-through;margin-left:5px;}
-  .flight-card .station-gate{font-size:15px;font-weight:700;color:var(--blue);margin-top:2px;}
-  .flight-card-dur{flex:0 0 auto;align-self:center;font-size:11px;color:var(--label);white-space:nowrap;padding:0 6px;}
+  .flight-card .sched-time{font-size:13px;color:var(--label);text-decoration:line-through;margin-left:5px;}
+  .flight-card .station-gate{font-size:17px;font-weight:700;color:var(--blue);margin-top:4px;}
+  .flight-card-dur{flex:0 0 auto;align-self:center;display:flex;align-items:center;gap:4px;font-size:15px;font-weight:700;color:var(--label);white-space:nowrap;padding:0 8px;}
+  .flight-card-dur .dur-chevron{width:11px;height:11px;color:var(--inactive);flex:0 0 auto;}
   .pill-strip{display:flex;gap:8px;overflow-x:auto;padding:8px 0 12px;scrollbar-width:none;}
   .pill-strip::-webkit-scrollbar{display:none;}
   .leg-pill{flex:0 0 auto;font-family:inherit;font-size:14px;font-weight:600;padding:8px 17px;border-radius:20px;border:none;background:transparent;color:var(--value);cursor:pointer;white-space:nowrap;}
   .leg-pill.selected{background:var(--blue);color:#fff;font-weight:700;}
   .split{display:flex;gap:0;align-items:flex-start;}
   .split-left{flex:0 0 auto;width:340px;display:flex;flex-direction:column;gap:20px;min-width:0;}
-  .split-right{flex:1;min-width:0;display:flex;flex-direction:column;gap:12px;margin-left:32px;margin-right:16px;}
+  .split-right{flex:1;max-width:480px;min-width:0;display:flex;flex-direction:column;gap:12px;margin-left:44px;margin-right:16px;}
   .panel-card{background:var(--card);border-radius:18px;overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,.05);border:1px solid var(--border);}
-  .panel-card-hdr{padding:15px 17px 12px;font-size:18px;font-weight:700;color:var(--value);background:var(--card);border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;}
+  .panel-card-hdr{padding:16px 18px 13px;font-size:19px;font-weight:700;color:var(--value);background:var(--card);border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;}
   .lead-icon{width:19px;height:19px;color:var(--label);flex:0 0 auto;}
   .mot-row{padding:14px 17px;display:flex;justify-content:space-between;align-items:center;}
   .mot-time{font-size:18px;font-weight:700;}
@@ -1611,27 +1617,27 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .mot-scorecard .desc{font-size:13px;color:var(--inactive);}
   .mot-view{font-size:15px;font-weight:600;color:var(--inactive);}
   .stat-row{background:var(--card);border-radius:18px;border:1px solid var(--border);overflow:hidden;}
-  .stat-hdr{display:flex;justify-content:space-between;align-items:center;padding:14px 16px;cursor:pointer;font-size:16px;font-weight:700;background:none;border:none;width:100%;text-align:left;color:var(--value);}
-  .stat-hdr .val{color:var(--label);font-weight:500;display:flex;align-items:center;gap:6px;font-size:16px;}
+  .stat-hdr{display:flex;justify-content:space-between;align-items:center;padding:15px 16px;cursor:pointer;font-size:17px;font-weight:700;background:none;border:none;width:100%;text-align:left;color:var(--value);}
+  .stat-hdr .val{color:var(--label);font-weight:500;display:flex;align-items:center;gap:6px;font-size:17px;}
   .stat-hdr svg{width:15px;height:15px;color:var(--inactive);transition:transform .15s ease;}
   .stat-row.open .stat-hdr svg{transform:rotate(180deg);}
   .stat-body{display:none;border-top:1px solid var(--border);}
   .stat-row.open .stat-body{display:block;}
-  .stat-detail-row{position:relative;display:flex;justify-content:space-between;padding:10px 15px;font-size:13.5px;}
+  .stat-detail-row{position:relative;display:flex;justify-content:space-between;padding:11px 15px;font-size:14.5px;}
   .stat-detail-row:not(:last-child)::after{content:'';position:absolute;left:15px;right:15px;bottom:0;height:1px;background:var(--border);}
   .stat-detail-row:last-child{border-bottom:none;}
   .stat-detail-row .lbl{color:var(--label);}
   .stat-detail-row .val{font-weight:600;font-variant-numeric:tabular-nums;}
   .weight-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;}
   .weight-grid>div{display:flex;flex-direction:column;align-items:center;gap:2px;background:var(--bg);border-radius:8px;padding:7px 4px;}
-  .weight-grid .wg-lbl{font-size:9.5px;color:var(--label);text-transform:uppercase;letter-spacing:.03em;}
-  .weight-grid .wg-val{font-size:12.5px;font-weight:700;color:var(--value);font-variant-numeric:tabular-nums;}
+  .weight-grid .wg-lbl{font-size:10.5px;color:var(--label);text-transform:uppercase;letter-spacing:.03em;}
+  .weight-grid .wg-val{font-size:13.5px;font-weight:700;color:var(--value);font-variant-numeric:tabular-nums;}
   .topbar{display:flex;flex-wrap:wrap;align-items:center;margin-bottom:10px;position:sticky;top:0;z-index:10;background:var(--bg);padding-top:calc(env(safe-area-inset-top) + 6px);margin-top:-6px;margin-left:-16px;margin-right:-16px;padding-left:16px;padding-right:16px;}
   .back-link{order:1;display:flex;align-items:center;color:var(--value);background:none;border:none;cursor:pointer;padding:6px 4px;text-decoration:none;}
   .topbar-actions{order:2;margin-left:auto;display:flex;align-items:center;gap:14px;}
   .topbar-title{order:3;flex:1 1 100%;text-align:center;margin-top:2px;}
-  .topbar-title h1{font-size:18px;margin:0;font-weight:600;color:var(--blue-dark);}
-  .topbar-title p{font-size:11px;margin:2px 0 0;color:var(--label);}
+  .topbar-title h1{font-size:19px;margin:0;font-weight:600;color:var(--blue-dark);}
+  .topbar-title p{font-size:12px;margin:2px 0 0;color:var(--label);}
   .icon-btn{background:none;border:none;color:var(--label);cursor:pointer;padding:2px;display:flex;}
   .icon-btn svg{width:19px;height:19px;}
   .status-bar{background:var(--navy);color:#fff;display:flex;align-items:center;justify-content:space-between;padding:8px 14px;border-radius:var(--radius) var(--radius) 0 0;font-size:13px;font-weight:600;}
@@ -1648,7 +1654,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .card{background:var(--card);border-radius:0 0 var(--radius) var(--radius);overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,.04);}
   .content-grid{display:grid;grid-template-columns:1fr 1fr;}
   .col-divider{border-right:1px solid var(--border);}
-  .info-row{display:flex;justify-content:space-between;align-items:center;padding:11px 14px;border-bottom:1px solid var(--border);font-size:13.5px;gap:10px;}
+  .info-row{display:flex;justify-content:space-between;align-items:center;padding:12px 14px;border-bottom:1px solid var(--border);font-size:14.5px;gap:10px;}
   .info-row .lbl{color:var(--label);}
   .info-row .val{color:var(--value);font-weight:500;text-align:right;word-break:break-word;}
   .search-block{background:var(--card);padding:12px 14px;border-bottom:1px solid var(--border);}
@@ -1665,8 +1671,8 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .doc-list{background:var(--card);}
   .doc-row{position:relative;display:flex;align-items:center;justify-content:space-between;padding:15px 17px;gap:12px;}
   .doc-row:not(:last-child)::after{content:'';position:absolute;left:17px;right:17px;bottom:0;height:1px;background:var(--border);}
-  .doc-row .code{font-weight:700;font-size:15.5px;}
-  .doc-row .desc{font-size:14px;color:var(--label);margin-top:2px;}
+  .doc-row .code{font-weight:700;font-size:16.5px;}
+  .doc-row .desc{font-size:15px;color:var(--label);margin-top:2px;}
   .doc-row .actions{display:flex;align-items:center;gap:26px;flex:0 0 auto;}
   .doc-row .actions svg{width:19px;height:19px;color:var(--label);cursor:pointer;padding:7px;margin:-7px;box-sizing:content-box;}
   .doc-row .check{color:var(--inactive,#9aa1ab);cursor:pointer;}
@@ -1683,7 +1689,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
     .content-grid{grid-template-columns:1fr;}
     .col-divider{border-right:none;border-bottom:6px solid var(--bg);}
     .flight-summary{gap:12px;font-size:12px;}
-    .flight-card .station-code{font-size:19px;}
+    .flight-card .station-code{font-size:24px;}
     .split{flex-direction:column;}
     .split-left{width:100%;}
     .split-right{margin-left:0;margin-right:0;margin-top:2px;width:100%;}
@@ -1716,7 +1722,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
                 <div>$dep_time_html</div>
                 <div class="station-gate" id="ov-dep-gate">$dep_gate</div>
               </div>
-              <div class="flight-card-dur">$flight_time</div>
+              <div class="flight-card-dur"><svg class="dur-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg><span>$flight_time</span><svg class="dur-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></div>
               <div class="station dest">
                 <div class="station-date">$arr_date</div>
                 <div class="station-code">$destination</div>
