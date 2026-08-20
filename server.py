@@ -1717,6 +1717,8 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .topbar-title p{font-size:12px;margin:2px 0 0;color:var(--label);}
   .icon-btn{background:none;border:none;color:var(--label);cursor:pointer;padding:2px;display:flex;}
   .icon-btn svg{width:19px;height:19px;}
+  .icon-btn.syncing svg{animation:spin .8s linear infinite;}
+  @keyframes spin{to{transform:rotate(360deg);}}
   .status-bar{background:var(--navy);color:#fff;display:flex;align-items:center;justify-content:space-between;padding:8px 14px;border-radius:var(--radius) var(--radius) 0 0;font-size:13px;font-weight:600;}
   .flight-summary{background:var(--card);display:flex;align-items:center;padding:12px 14px;border-bottom:1px solid var(--border);font-size:13px;gap:18px;flex-wrap:wrap;}
   .flight-summary .fnum{font-size:15px;font-weight:700;}
@@ -1780,6 +1782,9 @@ FOS_TEMPLATE = """<!DOCTYPE html>
       <div class="topbar">
         <a class="back-link" href="/" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></a>
         <div class="topbar-actions">
+          <button class="icon-btn" id="sync-btn" title="Sync from SimBrief" onclick="syncFromSimbrief(false)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          </button>
           <button class="icon-btn" title="Settings" onclick="showView('settings')">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.34 1.87l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.7 1.7 0 00-1.87-.34 1.7 1.7 0 00-1 1.55V21a2 2 0 11-4 0v-.09A1.7 1.7 0 009 19.4a1.7 1.7 0 00-1.87.34l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.7 1.7 0 004.6 15a1.7 1.7 0 00-1.55-1H3a2 2 0 110-4h.09A1.7 1.7 0 004.6 9a1.7 1.7 0 00-.34-1.87l-.06-.06a2 2 0 112.83-2.83l.06.06A1.7 1.7 0 009 4.6a1.7 1.7 0 001-1.55V3a2 2 0 114 0v.09a1.7 1.7 0 001 1.55 1.7 1.7 0 001.87-.34l.06-.06a2 2 0 112.83 2.83l-.06.06A1.7 1.7 0 0019.4 9a1.7 1.7 0 001.55 1H21a2 2 0 110 4h-.09a1.7 1.7 0 00-1.55 1z"/></svg>
           </button>
@@ -2117,6 +2122,14 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         <input id="release-user" type="text" placeholder="Your SimBrief username" value="$default_simbrief_user" onchange="saveSimbriefUser(this.value)">
       </div>
       <div class="search-block">
+        <label>Auto-Sync with SimBrief</label>
+        <div style="display:flex;gap:8px;">
+          <button type="button" class="theme-opt" data-autosync-opt="on" onclick="setAutoSyncPref(true)">On</button>
+          <button type="button" class="theme-opt" data-autosync-opt="off" onclick="setAutoSyncPref(false)">Off</button>
+        </div>
+        <div style="font-size:12px;color:var(--label);margin-top:8px;">Periodically checks your SimBrief account for a newer flight plan and pulls in updated times, gates, and crew for this flight — without opening SimBrief's dispatch page.</div>
+      </div>
+      <div class="search-block">
         <label for="aero-key">FlightAware AeroAPI Key</label>
         <input id="aero-key" type="password" placeholder="Your AeroAPI key" value="$aeroapi_key" onchange="saveAeroApiKey(this.value)">
       </div>
@@ -2250,7 +2263,7 @@ function showView(view){
   if(view === 'release') initReleaseView();
   if(view === 'confirm') initConfirmView();
   if(view === 'sign') initSignPad();
-  if(view === 'settings') updateThemeButtons();
+  if(view === 'settings'){ updateThemeButtons(); updateAutoSyncButtons(); }
   if(view === 'saveddocs') initSavedDocs();
   if(view === 'pairing') initPairingView();
   if(view === 'overview') initOverviewPills();
@@ -2280,9 +2293,81 @@ function setThemePref(pref){
 }
 function updateThemeButtons(){
   const current = localStorage.getItem('fos_theme') || 'auto';
-  document.querySelectorAll('.theme-opt').forEach(btn => {
+  document.querySelectorAll('[data-theme-opt]').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.themeOpt === current);
   });
+}
+
+// Auto-Sync: periodically checks the pilot's SimBrief account for a newer
+// OFP than the one this leg was last built from, and silently pulls it in
+// via the same /generate path "Import from SimBrief" already uses — no
+// popup, no visit to SimBrief's own dispatch page (that's a separate,
+// explicit action under Release). Defaults on; toggle lives in Settings.
+let _autoSyncTimer = null;
+let _lastKnownOfpTs = '';
+function isAutoSyncOn(){
+  return localStorage.getItem('fos_autosync') !== 'off';
+}
+function setAutoSyncPref(on){
+  localStorage.setItem('fos_autosync', on ? 'on' : 'off');
+  updateAutoSyncButtons();
+  if(on) startAutoSync(); else stopAutoSync();
+}
+function updateAutoSyncButtons(){
+  const current = isAutoSyncOn() ? 'on' : 'off';
+  document.querySelectorAll('[data-autosync-opt]').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.autosyncOpt === current);
+  });
+}
+function _simbriefUser(){
+  const el = document.getElementById('release-user');
+  return (localStorage.getItem('fos_simbrief_user') || (el && el.value) || '').trim();
+}
+async function syncFromSimbrief(manual){
+  const user = _simbriefUser();
+  if(!user){ if(manual) showToast('Add a SimBrief username in Settings first'); return; }
+  const btn = document.getElementById('sync-btn');
+  if(btn) btn.classList.add('syncing');
+  try {
+    const r = await fetch('/generate', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({simbrief_user: user, carry_gates_from: LEG_ID})});
+    const data = await r.json();
+    if(!r.ok){ if(manual) showToast(data.error || 'Sync failed'); return; }
+    if(String(data.id) === String(LEG_ID)){
+      showToast('Synced updated SimBrief data');
+      setTimeout(() => window.location.reload(), 700);
+    } else if(manual){
+      // _find() couldn't match this to the same flight — a different
+      // pairing/date is on the account right now, not an update to this one.
+      showToast('Current SimBrief plan is for a different flight — check Current Flight on Home');
+    }
+  } catch(e) {
+    if(manual) showToast('Sync failed: ' + e);
+  } finally {
+    if(btn) btn.classList.remove('syncing');
+  }
+}
+async function checkForSimbriefUpdate(){
+  if(!isAutoSyncOn()) return;
+  const user = _simbriefUser();
+  if(!user) return;
+  try {
+    const r = await fetch('/simbrief-api/generated-at?user=' + encodeURIComponent(user));
+    const ts = (await r.json()).time_generated || '';
+    if(!ts) return;
+    if(_lastKnownOfpTs && ts !== _lastKnownOfpTs){
+      await syncFromSimbrief(false);
+      return;
+    }
+    _lastKnownOfpTs = ts;
+  } catch(e) { /* best-effort — try again next interval */ }
+}
+function startAutoSync(){
+  if(_autoSyncTimer || !isAutoSyncOn()) return;
+  checkForSimbriefUpdate();
+  _autoSyncTimer = setInterval(checkForSimbriefUpdate, 3 * 60 * 1000);
+}
+function stopAutoSync(){
+  if(_autoSyncTimer){ clearInterval(_autoSyncTimer); _autoSyncTimer = null; }
 }
 function initReleaseView(){
   prefillSimbriefGen();
@@ -3215,6 +3300,7 @@ function renderWeather(stations){
   const view = params.get('view');
   if(view === 'pairing' || view === 'release' || view === 'confirm') showView(view);
   else initOverviewPills();
+  startAutoSync();
 })();
 </script>
 </body>
