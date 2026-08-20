@@ -2052,7 +2052,7 @@ async function renderPdfInline(bytes){
 async function viewDoc(kind, label){
   const data = await ensureRelease();
   if(!data) return;
-  const field = {rls:'rls_pdf_b64', fi:'fi_pdf_b64', fil:'fil_pdf_b64', wb:'wb_pdf_b64', notams:'notams_pdf_b64', field_report:'field_report_pdf_b64'}[kind];
+  const field = {rls:'rls_pdf_b64', fi:'fi_pdf_b64', fil:'fil_pdf_b64', wb:'wb_pdf_b64', weather:'weather_pdf_b64', notams:'notams_pdf_b64', field_report:'field_report_pdf_b64'}[kind];
   const b64 = data[field];
   if(!b64){ showToast(label + ' not available in this release'); return; }
   document.getElementById('pdf-view-title').textContent = label;

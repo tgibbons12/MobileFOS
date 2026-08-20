@@ -29,11 +29,14 @@ produced, reads them back as bytes, and cleans up.
 
 import glob
 import io
+import logging
 import os
 import sys
 import tempfile
 import traceback
 import types
+
+LOG = logging.getLogger(__name__)
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
@@ -192,18 +195,32 @@ def extract_named_pages(rls_bytes):
     reader = PdfReader(io.BytesIO(rls_bytes))
     single = {"fi": None, "fil": None}
     multi = {"weather": [], "notams": [], "field_report": []}
-    for page in reader.pages:
+    # Diagnostic only — this classification is inferred from MASTERLOG's
+    # source, not verified against a real generated release (see docstring
+    # above). Logging what every page actually matched (or didn't) means
+    # the next time a kind comes back empty/wrong, the real page text is
+    # right there in the logs instead of needing another guess.
+    page_log = []
+    for i, page in enumerate(reader.pages):
         text = (page.extract_text() or "")[:600]
         if re.search(r'\bFIL\d', text) and single["fil"] is None:
             single["fil"] = page
+            page_log.append(f"page {i}: fil")
         elif re.search(r'\bFI\d', text) and single["fi"] is None:
             single["fi"] = page
+            page_log.append(f"page {i}: fi")
         elif re.search(r'\bMETAR\b|\bTAF\b', text):
             multi["weather"].append(page)
+            page_log.append(f"page {i}: weather")
         elif re.search(r'={20,}', text):
             multi["notams"].append(page)
+            page_log.append(f"page {i}: notams")
         elif re.search(r'FIELD REPORT', text):
             multi["field_report"].append(page)
+            page_log.append(f"page {i}: field_report")
+        else:
+            page_log.append(f"page {i}: UNMATCHED — {text[:120]!r}")
+    LOG.info("extract_named_pages: %d pages — %s", len(reader.pages), "; ".join(page_log))
 
     def _pdf_bytes(pages):
         if not pages:
