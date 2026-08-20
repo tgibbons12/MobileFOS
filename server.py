@@ -2000,9 +2000,16 @@ function exportToForeFlight(){
   // station string (orig, enroute waypoints, dest) — spaces become '+' in
   // the URL, same convention as https://foreflightmobile://maps/search.
   // LEG_ROUTE is SimBrief's general/route (enroute waypoints only, no
-  // orig/dest), so just orig + route + dest gets the full routing; a
-  // trailing registration matches an Aircraft Profile if we have one.
-  const parts = [LEG_ORIGIN, LEG_ROUTE, LEG_DESTINATION, LEG_TAIL_NUMBER].filter(Boolean);
+  // orig/dest), so orig + route + dest gets the full routing.
+  //
+  // Deliberately NOT appending a tail number: ForeFlight's docs only show
+  // one working with a registration when it directly follows speed/
+  // altitude tokens (e.g. "...14000ft+N12345") — those apparently tell
+  // its parser "the route list just ended, aircraft data starts here."
+  // We don't have cruise altitude/speed to supply that context, and a
+  // bare tail number with nothing in front of it broke the whole import
+  // in practice, not just the registration part.
+  const parts = [LEG_ORIGIN, LEG_ROUTE, LEG_DESTINATION].filter(Boolean);
   const url = 'foreflightmobile://maps/search?q=' + encodeURIComponent(parts.join(' ')).replace(/%20/g, '+');
   const link = document.createElement('a');
   link.href = url;
