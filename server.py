@@ -17,9 +17,11 @@ import base64
 import csv
 import html
 import io
+import json
 import logging
 import os
 import time
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 
 import airportsdata
@@ -153,12 +155,19 @@ def _station_time_html(sched, est):
     """Overview's flight card, mobileCCI-style: the current (estimated)
     time in front, the original scheduled time struck through next to it
     — but only when they actually differ, rather than always showing two
-    identical numbers."""
+    identical numbers. Color is a real signal, not decoration: sched_out/
+    sched_in come from the PBS pairing, est_out/est_in from the SimBrief
+    OFP fetch — both "%H:%M" 24h strings already on the leg schema, so a
+    later estimate than scheduled (red) vs on-time/earlier/no-estimate-yet
+    (green) costs nothing to compute, it's just a comparison this app
+    wasn't running before."""
     sched, est = (sched or "").strip(), (est or "").strip()
     shown = est or sched
     if not shown:
         return ""
-    html_out = f'<span class="est-time">{html.escape(shown)}</span>'
+    late = bool(sched and est and est > sched)
+    css_class = "est-time late" if late else "est-time"
+    html_out = f'<span class="{css_class}">{html.escape(shown)}</span>'
     if sched and est and sched != est:
         html_out += f'<span class="sched-time">{html.escape(sched)}</span>'
     return html_out
@@ -339,7 +348,8 @@ DEFAULT_LEG = {
     "route": "", "dep_date": "", "arr_date": "", "sched_out": "", "sched_in": "",
     "est_out": "", "est_in": "", "dep_gate": "", "arr_gate": "",
     "fleet_type": "", "equipment_type": "", "tail_number": "", "tail_routing": "",
-    "aircraft_name": "", "fin": "",
+    "aircraft_name": "", "fin": "", "engines": "", "seat_capacity": "",
+    "bookmarked_docs": [],
     "status": "", "customer_load": "", "position": "", "crew": [],
     "flight_time": "", "odl_time": "", "duty_time": "", "ground_time": "",
     "tz_diff": "", "hotel_details": "", "limo_details": "",
@@ -685,6 +695,47 @@ def set_gates(leg_id):
     return jsonify({"dep_gate": data.get("dep_gate", ""), "arr_gate": data.get("arr_gate", "")})
 
 
+@app.route("/fos/<int:leg_id>/bookmark", methods=["POST"])
+def toggle_bookmark(leg_id):
+    """Preflight Docs' bookmark toggle — persisted per leg in Leg.data
+    (no dedicated table; this app already keeps a leg's whole state in
+    that JSON blob, same as signed_in/fit_for_duty above)."""
+    row = _get_leg_row(leg_id)
+    if not row:
+        return jsonify({"error": "not found"}), 404
+    body = request.get_json(silent=True) or {}
+    doc = (body.get("doc") or "").strip()
+    if not doc:
+        return jsonify({"error": "doc code required"}), 400
+    bookmarked = list(row.data.get("bookmarked_docs") or [])
+    if doc in bookmarked:
+        bookmarked.remove(doc)
+    else:
+        bookmarked.append(doc)
+    data = _save_leg(row, {**row.data, "bookmarked_docs": bookmarked})
+    return jsonify({"bookmarked_docs": data.get("bookmarked_docs", [])})
+
+
+@app.route("/fos/<int:leg_id>/prefile")
+def get_prefile_links(leg_id):
+    """VATSIM/IVAO prefile forms straight from the pilot's current SimBrief
+    OFP (see simbrief_ofp.fetch_prefile_links) — fetched fresh on demand
+    rather than cached on the leg, since a prefile is tied to whatever OFP
+    is live on the account right now, not to whenever this leg was last
+    dispatched."""
+    row = _get_leg_row(leg_id)
+    if not row:
+        return jsonify({"error": "not found"}), 404
+    simbrief_user = current_user.default_simbrief_user
+    if not simbrief_user:
+        return jsonify({"error": "Set your SimBrief username in Settings first"}), 400
+    try:
+        links = simbrief_ofp.fetch_prefile_links(simbrief_user)
+    except (requests.RequestException, ET.ParseError) as e:
+        return jsonify({"error": f"Could not fetch SimBrief OFP: {e}"}), 502
+    return jsonify(links)
+
+
 @app.route("/aeroapi/suggest", methods=["POST"])
 def aeroapi_suggest():
     """Gate/route suggestion for an origin/destination city pair, using the
@@ -992,20 +1043,18 @@ def render_fos_html(leg):
     crew = ctx.get("crew")
     crew_list = crew if isinstance(crew, list) else ([crew] if crew else [])
     ctx["crew_display"] = ", ".join(crew_list)
-    cpt_name = next((e.partition(" ")[2] for e in crew_list if e.startswith("CA ")), "")
-    fo_name = next((e.partition(" ")[2] for e in crew_list if e.startswith("FO ")), "")
     roster = synthesize_crew(
         ctx.get("flight_number", ""), ctx.get("dep_date", ""),
-        ctx.get("destination", ""), cpt=cpt_name, fo=fo_name,
+        ctx.get("destination", ""), crew_list,
     )
-    # Documents' Crew section shows the full roster (CA/FO — real SimBrief
-    # names when this leg's been dispatched — plus flight attendants, which
-    # SimBrief's OFP never carries at all) with DOM (crew domicile/base) and
-    # employee number columns, same shape as the printed NSC crew-list page.
+    # Overview's Crew accordion shows the full roster (CA/FO/PU/FA — real
+    # SimBrief names when this leg's been dispatched) with DOM (crew
+    # domicile/base) and employee number columns, same shape as the
+    # printed NSC crew-list page.
     rows = []
     for member in roster:
         rows.append(
-            f'<div class="info-row"><span class="lbl">{html.escape(member["seat"])} '
+            f'<div class="stat-detail-row"><span class="lbl">{html.escape(member["seat"])} '
             f'{html.escape(member["name"])}</span>'
             f'<span class="val">DOM {html.escape(member["dom"])} &middot; EMP {html.escape(member["emp"])}</span></div>'
         )
@@ -1030,6 +1079,18 @@ def render_fos_html(leg):
     ctx["aircraft_name_html"] = html.escape(ctx.get("aircraft_name") or "") or "—"
     ctx["fin_html"] = html.escape(ctx.get("fin") or "") or "—"
     ctx["tail_number_html"] = html.escape(ctx.get("tail_number") or "") or "—"
+    ctx["engines_html"] = html.escape(ctx.get("engines") or "") or "—"
+    raw_seat_capacity = ctx.get("seat_capacity") or ""
+    ctx["pax_display"] = (
+        f'{ctx["customer_load"]} / {raw_seat_capacity}'
+        if ctx["customer_load"] and raw_seat_capacity
+        else (ctx["customer_load"] or "—")
+    )
+    ctx["seat_capacity"] = raw_seat_capacity or "—"
+    bookmarked = ctx.get("bookmarked_docs") or []
+    bookmarked = bookmarked if isinstance(bookmarked, list) else []
+    ctx["saved_docs_count"] = str(len(bookmarked))
+    ctx["bookmarked_docs_json"] = json.dumps(bookmarked)
     # Neither PBS nor a SimBrief OFP ever carries a flight "status" — it's
     # not data either source has. Derive one locally from what this app
     # actually tracks rather than leaving it permanently blank.
@@ -1424,7 +1485,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   :root{
     --navy:#1d1d1f; --blue:#0071e3; --blue-dark:#0058a8;
     --bg:#f5f5f7; --card:#fff; --border:#d2d2d7; --label:#6e6e73; --value:#1d1d1f;
-    --red:#ff3b30; --inactive:#9aa1ab; --radius:10px;
+    --red:#ff3b30; --green:#34c759; --inactive:#9aa1ab; --radius:10px;
   }
   *{box-sizing:border-box;}
   html,body{margin:0;padding:0;height:100%;overscroll-behavior:none;background:var(--bg);}
@@ -1445,18 +1506,39 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .flight-card .station.dest{align-items:flex-end;text-align:right;}
   .flight-card .station-date{font-size:11px;color:var(--label);text-transform:uppercase;letter-spacing:.02em;}
   .flight-card .station-code{font-size:22px;font-weight:700;}
-  .flight-card .est-time{font-size:15px;font-weight:700;color:var(--blue-dark);}
+  .flight-card .est-time{font-size:15px;font-weight:700;color:var(--green);}
+  .flight-card .est-time.late{color:var(--red);}
   .flight-card .sched-time{font-size:12px;color:var(--label);text-decoration:line-through;margin-left:6px;}
-  .flight-card .station-gate{font-size:12px;color:var(--label);margin-top:2px;}
+  .flight-card .station-gate{font-size:16px;font-weight:700;color:var(--blue);margin-top:3px;}
   .flight-card .duration{flex:0 0 auto;display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:11px;color:var(--label);gap:4px;padding:0 4px;}
   .flight-card .duration svg{width:18px;height:18px;color:var(--inactive);}
-  .stat-list{background:var(--card);border-bottom:6px solid var(--bg);}
-  .stat-row{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid var(--border);font-size:14px;font-weight:600;background:none;border-left:none;border-right:none;border-top:none;width:100%;text-align:left;cursor:default;color:var(--value);}
-  .stat-row:last-child{border-bottom:none;}
-  .stat-row .val{color:var(--label);font-weight:500;display:flex;align-items:center;gap:6px;}
-  .stat-row.linked{cursor:pointer;}
-  .stat-row.linked .val{color:var(--blue-dark);}
-  .stat-row .chevron{width:16px;height:16px;color:var(--inactive);}
+  .pill-strip{display:flex;gap:8px;overflow-x:auto;padding:8px 0 12px;scrollbar-width:none;}
+  .pill-strip::-webkit-scrollbar{display:none;}
+  .leg-pill{flex:0 0 auto;font-family:inherit;font-size:13px;font-weight:600;padding:7px 16px;border-radius:20px;border:none;background:transparent;color:var(--value);cursor:pointer;white-space:nowrap;}
+  .leg-pill.selected{background:var(--blue);color:#fff;font-weight:700;}
+  .split{display:flex;gap:0;align-items:flex-start;}
+  .split-left{flex:0 0 auto;width:260px;display:flex;flex-direction:column;gap:12px;min-width:0;}
+  .split-right{flex:1;min-width:0;display:flex;flex-direction:column;gap:10px;margin-left:12px;}
+  .panel-card{background:var(--card);border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,.05);border:1px solid var(--border);}
+  .panel-card-hdr{padding:11px 13px 8px;font-size:15px;font-weight:700;color:var(--value);background:var(--card);border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;}
+  .lead-icon{width:16px;height:16px;color:#5b6472;flex:0 0 auto;}
+  .mot-row{padding:11px 13px;display:flex;justify-content:space-between;align-items:center;}
+  .mot-time{font-size:15px;font-weight:700;}
+  .mot-scorecard{padding:9px 13px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;color:var(--inactive);}
+  .mot-scorecard .code{font-weight:700;font-size:12.5px;color:var(--inactive);}
+  .mot-scorecard .desc{font-size:10.5px;color:var(--inactive);}
+  .mot-view{font-size:13px;font-weight:600;color:var(--inactive);}
+  .stat-row{background:var(--card);border-radius:16px;border:1px solid var(--border);overflow:hidden;}
+  .stat-hdr{display:flex;justify-content:space-between;align-items:center;padding:13px 14px;cursor:pointer;font-size:15px;font-weight:700;background:none;border:none;width:100%;text-align:left;color:var(--value);}
+  .stat-hdr .val{color:var(--label);font-weight:500;display:flex;align-items:center;gap:6px;font-size:15px;}
+  .stat-hdr svg{width:15px;height:15px;color:var(--inactive);transition:transform .15s ease;}
+  .stat-row.open .stat-hdr svg{transform:rotate(180deg);}
+  .stat-body{display:none;border-top:1px solid var(--border);}
+  .stat-row.open .stat-body{display:block;}
+  .stat-detail-row{display:flex;justify-content:space-between;padding:9px 14px;font-size:12.5px;border-bottom:1px solid var(--border);}
+  .stat-detail-row:last-child{border-bottom:none;}
+  .stat-detail-row .lbl{color:var(--label);}
+  .stat-detail-row .val{font-weight:600;font-variant-numeric:tabular-nums;}
   .topbar{display:flex;flex-wrap:wrap;align-items:center;margin-bottom:10px;position:sticky;top:env(safe-area-inset-top);z-index:10;background:var(--bg);padding-top:6px;margin-top:-6px;margin-left:-16px;margin-right:-16px;padding-left:16px;padding-right:16px;}
   .back-link{order:1;color:var(--blue-dark);font-size:14px;font-weight:500;background:none;border:none;cursor:pointer;padding:4px 2px;}
   .topbar-actions{order:2;margin-left:auto;display:flex;align-items:center;gap:14px;}
@@ -1499,6 +1581,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .doc-row .actions svg{width:19px;height:19px;color:#5b6472;cursor:pointer;padding:7px;margin:-7px;box-sizing:content-box;}
   .doc-row .check{color:var(--inactive,#9aa1ab);cursor:pointer;}
   .doc-row .check.signed{color:var(--blue-dark);}
+  .doc-row .actions svg.bookmark-icon.bookmarked{color:var(--blue);}
   #sign-pad{touch-action:none;background:#fff;border:1px solid var(--border);border-radius:6px;width:100%;height:220px;}
   .placeholder-note{padding:12px 14px;color:var(--label);font-style:italic;font-size:13px;background:var(--card);}
   .view{display:none;}
@@ -1510,6 +1593,9 @@ FOS_TEMPLATE = """<!DOCTYPE html>
     .col-divider{border-right:none;border-bottom:6px solid var(--bg);}
     .flight-summary{gap:12px;font-size:12px;}
     .flight-card .station-code{font-size:19px;}
+    .split{flex-direction:column;}
+    .split-left{width:100%;}
+    .split-right{margin-left:0;margin-top:2px;}
   }
 </style>
 </head>
@@ -1535,7 +1621,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           <div class="station-date">$dep_date</div>
           <div class="station-code">$origin</div>
           <div>$dep_time_html</div>
-          <div class="station-gate">$dep_gate</div>
+          <div class="station-gate" id="ov-dep-gate">$dep_gate</div>
         </div>
         <div class="duration">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6-13v13m6 0l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"/></svg>
@@ -1545,20 +1631,101 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           <div class="station-date">$arr_date</div>
           <div class="station-code">$destination</div>
           <div>$arr_time_html</div>
-          <div class="station-gate">$arr_gate</div>
+          <div class="station-gate" id="ov-arr-gate">$arr_gate</div>
         </div>
       </div>
-      <div class="stat-list">
-        <button class="stat-row linked" onclick="showView('time')">
-          <span>Time difference</span><span class="val">$tz_diff <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></span>
-        </button>
-        <button class="stat-row linked" onclick="openCrewDetail()">
-          <span>Crew</span><span class="val">$crew_count <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></span>
-        </button>
-        <button class="stat-row linked" onclick="showView('aircraft')">
-          <span>Aircraft</span><span class="val">$aircraft_display <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></span>
-        </button>
-        <div class="stat-row"><span>Passengers</span><span class="val">$customer_load</span></div>
+      <div class="pill-strip" id="ov-pill-strip"></div>
+      <div class="split">
+        <div class="split-left">
+          <div class="panel-card" id="ov-docs-card">
+            <div class="panel-card-hdr">Preflight Docs</div>
+            <div class="doc-row" style="cursor:pointer;" onclick="showToast('No saved docs yet')">
+              <div style="display:flex;align-items:center;gap:10px;">
+                <svg class="lead-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/><path d="M12 11v6"/><path d="M9 14l3 3 3-3"/></svg>
+                <div class="code">Saved Docs</div>
+              </div>
+              <div class="val" id="ov-saved-count" style="color:var(--label);font-size:12px;">$saved_docs_count</div>
+            </div>
+            <div class="doc-row" style="cursor:pointer;" onclick="openOvAllCommands()">
+              <div style="display:flex;align-items:center;gap:10px;">
+                <svg class="lead-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/><circle cx="10.5" cy="14.5" r="2.5"/><path d="M12.3 16.3L14 18"/></svg>
+                <div class="code">All Commands</div>
+              </div>
+              <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></div>
+            </div>
+            <div class="doc-row" style="border-bottom:none;cursor:pointer;" onclick="showToast('Not available yet')">
+              <div><div class="code">Favorite Groups</div></div>
+              <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></div>
+            </div>
+          </div>
+          <div class="panel-card">
+            <div class="panel-card-hdr">Mandatory Off Time</div>
+            <div class="mot-row"><span class="mot-time">XX:XX (L)</span></div>
+            <div class="mot-scorecard">
+              <div><div class="code">HI117</div><div class="desc">FAR 117 scorecard</div></div>
+              <span class="mot-view">View</span>
+            </div>
+          </div>
+          <div class="panel-card">
+            <div class="panel-card-hdr">External Apps</div>
+            <div class="doc-row" style="cursor:pointer;" onclick="showView('release')">
+              <div><div class="code">SimBrief</div><div class="desc">Send to Dispatch</div></div>
+              <div class="doc-actions"><svg class="ext-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><path d="M15 3h6v6"/><path d="M10 14L21 3"/></svg></div>
+            </div>
+            <div class="doc-row" style="cursor:pointer;" onclick="exportToForeFlight()">
+              <div><div class="code">ForeFlight</div><div class="desc">Export Route</div></div>
+              <div class="doc-actions"><svg class="ext-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><path d="M15 3h6v6"/><path d="M10 14L21 3"/></svg></div>
+            </div>
+            <div class="doc-row" style="cursor:pointer;" onclick="prefileVatsim()">
+              <div><div class="code">VATSIM</div><div class="desc">Pre-file Flight Plan</div></div>
+              <div class="doc-actions"><svg class="ext-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><path d="M15 3h6v6"/><path d="M10 14L21 3"/></svg></div>
+            </div>
+            <div class="doc-row" style="border-bottom:none;cursor:pointer;" onclick="prefileIvao()">
+              <div><div class="code">IVAO</div><div class="desc">Pre-file Flight Plan</div></div>
+              <div class="doc-actions"><svg class="ext-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><path d="M15 3h6v6"/><path d="M10 14L21 3"/></svg></div>
+            </div>
+          </div>
+        </div>
+        <div class="split-right">
+          <div class="stat-row" id="stat-timediff">
+            <button class="stat-hdr" onclick="toggleStatRow('timediff')">
+              <span>Time Difference</span><span class="val">$tz_diff <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></span>
+            </button>
+            <div class="stat-body">
+              <div class="stat-detail-row"><span class="lbl">$origin Local &middot; Departure</span><span class="val" id="td-orig-local">$sched_out</span></div>
+              <div class="stat-detail-row"><span class="lbl">$origin Zulu &middot; Departure</span><span class="val" id="td-orig-zulu">&mdash;</span></div>
+              <div class="stat-detail-row"><span class="lbl">$destination Local &middot; Arrival</span><span class="val" id="td-dest-local">$sched_in</span></div>
+              <div class="stat-detail-row"><span class="lbl">$destination Zulu &middot; Arrival</span><span class="val" id="td-dest-zulu">&mdash;</span></div>
+            </div>
+          </div>
+          <div class="stat-row" id="stat-crew">
+            <button class="stat-hdr" onclick="toggleStatRow('crew')">
+              <span>Crew</span><span class="val">$crew_count <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></span>
+            </button>
+            <div class="stat-body">$crew_rows</div>
+          </div>
+          <div class="stat-row" id="stat-aircraft">
+            <button class="stat-hdr" onclick="toggleStatRow('aircraft')">
+              <span>Aircraft</span><span class="val">$aircraft_display <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></span>
+            </button>
+            <div class="stat-body">
+              <div class="stat-detail-row"><span class="lbl">Tail Number</span><span class="val">$tail_number_html</span></div>
+              <div class="stat-detail-row"><span class="lbl">Fleet Number</span><span class="val">$fin_html</span></div>
+              <div class="stat-detail-row"><span class="lbl">ICAO Type</span><span class="val">$fleet_type_icao</span></div>
+              <div class="stat-detail-row"><span class="lbl">Aircraft</span><span class="val">$aircraft_name_html</span></div>
+              <div class="stat-detail-row"><span class="lbl">Engine</span><span class="val">$engines_html</span></div>
+            </div>
+          </div>
+          <div class="stat-row" id="stat-pax">
+            <button class="stat-hdr" onclick="toggleStatRow('pax')">
+              <span>Passengers</span><span class="val">$pax_display <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></span>
+            </button>
+            <div class="stat-body">
+              <div class="stat-detail-row"><span class="lbl">Booked</span><span class="val">$customer_load</span></div>
+              <div class="stat-detail-row"><span class="lbl">Capacity</span><span class="val">$seat_capacity</span></div>
+            </div>
+          </div>
+        </div>
       </div>
       <div class="duty-badges">
         <span id="signin-badge" class="$signed_in_class">
@@ -1568,22 +1735,17 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><path d="M7.5 12.5l3 3 6-6"/></svg> Fit for Duty
         </span>
       </div>
-      <button class="docs-btn" onclick="showView('documents')">Pre-Flight Documents</button>
-      <button class="docs-btn" id="pairing-btn" style="background:var(--blue-dark);border-top:1px solid rgba(255,255,255,.2);" onclick="showView('pairing')">View Full Pairing</button>
+      <button class="docs-btn" id="pairing-btn" style="background:var(--blue-dark);" onclick="showView('pairing')">View Full Pairing</button>
       <div class="card">
         <div class="content-grid">
           <div class="col-divider">
-            <div class="info-row"><span class="lbl">Arrival Date</span><span class="val">$arr_date</span></div>
-            <div class="info-row"><span class="lbl">Departure Gate</span><span class="val" id="ov-dep-gate">$dep_gate</span></div>
-            <div class="info-row"><span class="lbl">Arrival Gate</span><span class="val" id="ov-arr-gate">$arr_gate</span></div>
             <div class="info-row"><span class="lbl">Fleet Type</span><span class="val">$fleet_type</span></div>
             <div class="info-row"><span class="lbl">Status</span><span class="val">$status</span></div>
             <div class="info-row"><span class="lbl">Equipment Type</span><span class="val">$equipment_type</span></div>
-            <div class="info-row"><span class="lbl">Duty Time</span><span class="val">$duty_time</span></div>
-            <div class="info-row" style="border-bottom:none;"><span class="lbl">Ground Time</span><span class="val">$ground_time</span></div>
+            <div class="info-row" style="border-bottom:none;"><span class="lbl">Duty Time</span><span class="val">$duty_time</span></div>
           </div>
           <div>
-            <div class="info-row"><span class="lbl">Flight Time</span><span class="val">$flight_time</span></div>
+            <div class="info-row"><span class="lbl">Ground Time</span><span class="val">$ground_time</span></div>
             <div class="info-row"><span class="lbl">ODL Time</span><span class="val">$odl_time</span></div>
             <div class="info-row"><span class="lbl">Position</span><span class="val">$position</span></div>
             <div class="info-row"><span class="lbl">Hotel Details</span><span class="val">$hotel_details</span></div>
@@ -1649,39 +1811,41 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         <div class="doc-row">
           <div><div class="code">FFD</div><div class="desc">Fit for Duty Declaration</div></div>
           <div class="actions">
+            <svg class="bookmark-icon" data-doc="FFD" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="toggleBookmark('FFD', this)"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>
             <svg id="ffd-doc-check" class="check $ffd_check_class" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" onclick="toggleStatus('fit-for-duty','ffd-doc-check')"><path d="M20 6L9 17l-5-5"/></svg>
           </div>
         </div>
         <div class="doc-row">
           <div><div class="code">EFLIGHT PLAN</div><div class="desc">eFlight Plan</div></div>
           <div class="actions">
+            <svg class="bookmark-icon" data-doc="EFLIGHT PLAN" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="toggleBookmark('EFLIGHT PLAN', this)"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>
             <svg id="sign-check" class="check $signed_class" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" onclick="openSignPad()"><path d="M20 6L9 17l-5-5"/></svg>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('rls','eFlight Plan')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg>
           </div>
         </div>
         <div class="doc-row">
           <div><div class="code">FI</div><div class="desc">Flight Details \u2013 GMT</div></div>
-          <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('fi','Flight Details \u2013 GMT')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
+          <div class="actions"><svg class="bookmark-icon" data-doc="FI" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="toggleBookmark('FI', this)"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('fi','Flight Details \u2013 GMT')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
         </div>
         <div class="doc-row">
           <div><div class="code">FIL</div><div class="desc">Flight Details \u2013 Local</div></div>
-          <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('fil','Flight Details \u2013 Local')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
+          <div class="actions"><svg class="bookmark-icon" data-doc="FIL" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="toggleBookmark('FIL', this)"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('fil','Flight Details \u2013 Local')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
         </div>
         <div class="doc-row">
           <div><div class="code">WBD</div><div class="desc">Weight &amp; Balance Data (TPS)</div></div>
-          <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('wb','Weight &amp; Balance Data')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
+          <div class="actions"><svg class="bookmark-icon" data-doc="WBD" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="toggleBookmark('WBD', this)"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('wb','Weight &amp; Balance Data')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
         </div>
         <div class="doc-row">
           <div><div class="code">AL*</div><div class="desc">Field Condition Report &amp; NOTAMs</div></div>
-          <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('notams','NOTAMs')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
+          <div class="actions"><svg class="bookmark-icon" data-doc="AL*" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="toggleBookmark('AL*', this)"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('notams','NOTAMs')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
         </div>
         <div class="doc-row">
           <div><div class="code">FR</div><div class="desc">Field Reports</div></div>
-          <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('field_report','Field Reports')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
+          <div class="actions"><svg class="bookmark-icon" data-doc="FR" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="toggleBookmark('FR', this)"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('field_report','Field Reports')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
         </div>
         <div class="doc-row">
           <div><div class="code">WX*</div><div class="desc">Winds &amp; Weather</div></div>
-          <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('weather','Winds &amp; Weather')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
+          <div class="actions"><svg class="bookmark-icon" data-doc="WX*" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="toggleBookmark('WX*', this)"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('weather','Winds &amp; Weather')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
         </div>
         <div class="doc-row">
           <div><div class="code">G*L/SS</div><div class="desc">Customers Requiring Special Services</div></div>
@@ -1716,34 +1880,6 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         </div>
       </div>
       <div id="weather-body"><p class="placeholder-note">Loading\u2026</p></div>
-    </section>
-
-    <section id="time-view" class="view">
-      <div class="topbar">
-        <button class="back-link" onclick="showView('overview')">Back</button>
-        <div class="topbar-title"><h1>Time Difference</h1></div>
-      </div>
-      <div class="card">
-        <div class="info-row"><span class="lbl">$origin Local &middot; Departure</span><span class="val" id="time-orig-local">$sched_out</span></div>
-        <div class="info-row"><span class="lbl">$origin Zulu &middot; Departure</span><span class="val" id="time-orig-zulu">\u2014</span></div>
-        <div class="info-row"><span class="lbl">$destination Local &middot; Arrival</span><span class="val" id="time-dest-local">$sched_in</span></div>
-        <div class="info-row" style="border-bottom:none;"><span class="lbl">$destination Zulu &middot; Arrival</span><span class="val" id="time-dest-zulu">\u2014</span></div>
-      </div>
-      <p class="placeholder-note">Destination minus origin: $tz_diff hours</p>
-    </section>
-
-    <section id="aircraft-view" class="view">
-      <div class="topbar">
-        <button class="back-link" onclick="showView('overview')">Back</button>
-        <div class="topbar-title"><h1>Aircraft</h1></div>
-      </div>
-      <div class="card">
-        <div class="info-row"><span class="lbl">Tail Number</span><span class="val">$tail_number_html</span></div>
-        <div class="info-row"><span class="lbl">Fleet Number</span><span class="val">$fin_html</span></div>
-        <div class="info-row"><span class="lbl">ICAO Type</span><span class="val">$fleet_type_icao</span></div>
-        <div class="info-row" style="border-bottom:none;"><span class="lbl">Aircraft</span><span class="val">$aircraft_name_html</span></div>
-      </div>
-      <p class="placeholder-note">Engine \u2014 not available; SimBrief's OFP doesn't include engine data.</p>
     </section>
 
     <section id="pdf-view" class="view">
@@ -1983,6 +2119,7 @@ const LEG_DESTINATION_ICAO = "$destination_icao";
 const LEG_DEP_DATE = "$dep_date";
 const LEG_ARR_DATE = "$arr_date";
 const LEG_SCHED_IN = "$sched_in";
+const LEG_BOOKMARKED_DOCS = $bookmarked_docs_json;
 function showView(view){
   document.getElementById('overview-view').classList.toggle('active', view==='overview');
   document.getElementById('documents-view').classList.toggle('active', view==='documents');
@@ -1994,8 +2131,6 @@ function showView(view){
   document.getElementById('weather-view').classList.toggle('active', view==='weather');
   document.getElementById('settings-view').classList.toggle('active', view==='settings');
   document.getElementById('more-view').classList.toggle('active', view==='more');
-  document.getElementById('time-view').classList.toggle('active', view==='time');
-  document.getElementById('aircraft-view').classList.toggle('active', view==='aircraft');
   document.getElementById('tab-overview').classList.toggle('active', view==='overview');
   document.getElementById('tab-schedule').classList.toggle('active', view==='pairing');
   document.getElementById('tab-docs').classList.toggle('active', view==='documents');
@@ -2005,9 +2140,9 @@ function showView(view){
   window.scrollTo(0,0);
   if(view === 'release') initReleaseView();
   if(view === 'confirm') initConfirmView();
-  if(view === 'time') initTimeView();
   if(view === 'sign') initSignPad();
   if(view === 'pairing') initPairingView();
+  if(view === 'overview') initOverviewPills();
   if(view === 'weather' && !_weatherLoaded) loadWeather();
 }
 function saveSimbriefUser(value){
@@ -2191,12 +2326,6 @@ function toggleSection(name){
   const body = document.getElementById(name+'-body');
   const collapsed = bar.classList.toggle('collapsed');
   body.style.display = collapsed ? 'none' : 'block';
-}
-function openCrewDetail(){
-  showView('documents');
-  document.getElementById('crew-bar').classList.remove('collapsed');
-  document.getElementById('crew-body').style.display = 'block';
-  document.getElementById('crew-bar').scrollIntoView({block: 'start'});
 }
 function openAllCommands(){
   showView('documents');
@@ -2470,19 +2599,26 @@ function renderPairing(seqData){
   cacheWrap.appendChild(cacheMsg);
   body.appendChild(cacheWrap);
 
+  // Each day is one clickable pane — tapping anywhere in it (except the
+  // paper-plane "send via SimBrief" icon, which stops propagation) is the
+  // only way into Overview from here now; individual leg rows are no
+  // longer their own nav target, just information + that one action.
   (seqData.duty_days || []).forEach(day => {
+    const pane = document.createElement('div');
+    pane.style.cssText = 'margin-bottom:14px;border-radius:16px;overflow:hidden;border:1px solid var(--border);cursor:pointer;';
+    pane.onclick = () => generatePairingLeg(seqData.seq, day.duty_day, 0, position);
+
     const bar = document.createElement('div');
     bar.className = 'section-bar';
-    bar.style.cursor = 'default';
+    bar.style.cssText = 'background:var(--navy);cursor:pointer;';
     bar.textContent = 'Day ' + day.duty_day + ' — RPT ' + (day.report || '');
-    body.appendChild(bar);
+    pane.appendChild(bar);
 
     const list = document.createElement('div');
     list.className = 'doc-list';
     (day.legs || []).forEach((leg, i) => {
       const row = document.createElement('div');
       row.className = 'doc-row';
-      row.style.cursor = 'pointer';
       const left = document.createElement('div');
       const code = document.createElement('div');
       code.className = 'code';
@@ -2505,13 +2641,11 @@ function renderPairing(seqData){
       sbIcon.innerHTML = '<path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/>';
       sbIcon.onclick = (e) => { e.stopPropagation(); generatePairingLeg(seqData.seq, day.duty_day, i, position, 'release'); };
       actions.appendChild(sbIcon);
-      actions.insertAdjacentHTML('beforeend', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>');
       row.appendChild(left);
       row.appendChild(actions);
-      row.onclick = () => generatePairingLeg(seqData.seq, day.duty_day, i, position);
       list.appendChild(row);
     });
-    body.appendChild(list);
+    pane.appendChild(list);
 
     const bits = [
       day.release ? ('RLS ' + day.release) : '',
@@ -2522,9 +2656,11 @@ function renderPairing(seqData){
     if(bits){
       const note = document.createElement('p');
       note.className = 'placeholder-note';
+      note.style.margin = '0';
       note.textContent = bits;
-      body.appendChild(note);
+      pane.appendChild(note);
     }
+    body.appendChild(pane);
   });
   if(!body.children.length){
     body.innerHTML = '<p class="placeholder-note">No duty days on this sequence.</p>';
@@ -2618,7 +2754,7 @@ function mmddyyToISO(s){
   return '20' + yr + '-' + mo + '-' + day;
 }
 let _timeViewLoaded = false;
-async function initTimeView(){
+async function initTimeDiffAccordion(){
   if(_timeViewLoaded) return;
   _timeViewLoaded = true;
   const [origTz, destTz] = await Promise.all([
@@ -2628,13 +2764,100 @@ async function initTimeView(){
   if(origTz && origTz.tz && LEG_SCHED_OUT){
     const [h, m] = LEG_SCHED_OUT.split(':').map(Number);
     const z = localToZuluParts(mmddyyToISO(LEG_DEP_DATE), h, m, origTz.tz);
-    document.getElementById('time-orig-zulu').textContent = z.h + ':' + z.m + 'Z';
+    document.getElementById('td-orig-zulu').textContent = z.h + ':' + z.m + 'Z';
   }
   if(destTz && destTz.tz && LEG_SCHED_IN){
     const [h, m] = LEG_SCHED_IN.split(':').map(Number);
     const z = localToZuluParts(mmddyyToISO(LEG_ARR_DATE), h, m, destTz.tz);
-    document.getElementById('time-dest-zulu').textContent = z.h + ':' + z.m + 'Z';
+    document.getElementById('td-dest-zulu').textContent = z.h + ':' + z.m + 'Z';
   }
+}
+function toggleStatRow(name){
+  const row = document.getElementById('stat-' + name);
+  const opening = !row.classList.contains('open');
+  row.classList.toggle('open');
+  if(opening && name === 'timediff') initTimeDiffAccordion();
+}
+async function toggleBookmark(doc, el){
+  try {
+    const r = await fetch('/fos/' + LEG_ID + '/bookmark', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({doc}),
+    });
+    const data = await r.json();
+    if(!r.ok){ showToast(data.error || 'Could not update bookmark'); return; }
+    const bookmarked = data.bookmarked_docs || [];
+    document.querySelectorAll('.bookmark-icon[data-doc="' + doc.replace(/"/g, '\\"') + '"]').forEach(icon => {
+      icon.classList.toggle('bookmarked', bookmarked.includes(doc));
+    });
+    const countEl = document.getElementById('ov-saved-count');
+    if(countEl) countEl.textContent = bookmarked.length;
+  } catch(e) { showToast('Request failed: ' + e); }
+}
+document.querySelectorAll('.bookmark-icon').forEach(icon => {
+  if(LEG_BOOKMARKED_DOCS.includes(icon.dataset.doc)) icon.classList.add('bookmarked');
+});
+function openOvAllCommands(){
+  showView('documents');
+  document.getElementById('flight-bar').classList.remove('collapsed');
+  document.getElementById('flight-body').style.display = 'block';
+  document.getElementById('flight-bar').scrollIntoView({block: 'start'});
+}
+let _ovPillsLoaded = false;
+async function initOverviewPills(){
+  if(_ovPillsLoaded || !LEG_SEQ) return;
+  _ovPillsLoaded = true;
+  const strip = document.getElementById('ov-pill-strip');
+  try {
+    const r = await fetch('/pbs/sequences/' + encodeURIComponent(LEG_SEQ));
+    if(!r.ok) return;
+    const seqData = await r.json();
+    const position = LEG_POSITION || (seqData.positions && seqData.positions[0]) || '';
+    for(const day of (seqData.duty_days || [])){
+      const legs = day.legs || [];
+      const idx = legs.findIndex(l => l.flight_number === LEG_FLIGHT_NUMBER && l.origin === LEG_ORIGIN && l.destination === LEG_DESTINATION);
+      if(idx === -1) continue;
+      legs.forEach((l, i) => {
+        const pill = document.createElement('button');
+        pill.className = 'leg-pill' + (i === idx ? ' selected' : '');
+        pill.textContent = l.flight_number || '—';
+        if(i !== idx) pill.onclick = () => generatePairingLeg(seqData.seq, day.duty_day, i, position);
+        strip.appendChild(pill);
+      });
+      break;
+    }
+  } catch(e) { /* best-effort — leave the strip empty */ }
+}
+async function prefileVatsim(){
+  showToast('Fetching VATSIM prefile…');
+  try {
+    const r = await fetch('/fos/' + LEG_ID + '/prefile');
+    const data = await r.json();
+    if(!r.ok || !data.vatsim){ showToast(data.error || 'VATSIM prefile not available — generate a SimBrief OFP first'); return; }
+    submitPrefileForm(data.vatsim.action, {raw: data.vatsim.raw, fuel_time: data.vatsim.fuel_time});
+  } catch(e) { showToast('Request failed: ' + e); }
+}
+async function prefileIvao(){
+  showToast('Fetching IVAO prefile…');
+  try {
+    const r = await fetch('/fos/' + LEG_ID + '/prefile');
+    const data = await r.json();
+    if(!r.ok || !data.ivao){ showToast(data.error || 'IVAO prefile not available — generate a SimBrief OFP first'); return; }
+    submitPrefileForm(data.ivao.action, {flightPlan: data.ivao.flight_plan});
+  } catch(e) { showToast('Request failed: ' + e); }
+}
+function submitPrefileForm(action, fields){
+  const form = document.createElement('form');
+  form.method = 'GET';
+  form.action = action;
+  form.target = '_blank';
+  for(const [name, value] of Object.entries(fields)){
+    const input = document.createElement('input');
+    input.type = 'hidden'; input.name = name; input.value = value || '';
+    form.appendChild(input);
+  }
+  document.body.appendChild(form);
+  form.submit();
+  form.remove();
 }
 
 async function submitSimbriefGen(){
@@ -2841,6 +3064,7 @@ function renderWeather(stations){
   const params = new URLSearchParams(window.location.search);
   const view = params.get('view');
   if(view === 'pairing' || view === 'release' || view === 'confirm') showView(view);
+  else initOverviewPills();
 })();
 </script>
 </body>

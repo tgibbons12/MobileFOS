@@ -75,16 +75,26 @@ def fetch_ofp_leg_fields(simbrief_user, timeout=15):
         except ValueError:
             return ""
 
-    # SimBrief's <crew> block: cpt/fo are the pilots. It also carries dx
-    # (dispatcher) and pu (purser) but those aren't flight crew for this
-    # app's purposes, so only the pilots make the roster.
+    # SimBrief's <crew> block: cpt/fo are the pilots, pu is the purser (lead
+    # flight attendant — aboard the aircraft, unlike dx the dispatcher who
+    # stays on the ground and is excluded here), and fa repeats once per
+    # additional flight attendant. Real names for all of these come from
+    # SimBrief — confirmed against a real OFP XML sample (2026-08-20) that
+    # does carry a full <fa> roster, correcting an earlier assumption that
+    # SimBrief had no cabin crew data at all. Only DOM/EMP# (synthesized in
+    # fos_pages.synthesize_crew) aren't real.
     crew = [
         f"{role} {name}"
         for role, name in (
             ("CA", text("crew/cpt")),
             ("FO", text("crew/fo")),
+            ("PU", text("crew/pu")),
         )
         if name
+    ] + [
+        f"FA {el.text.strip()}"
+        for el in root.findall("crew/fa")
+        if el is not None and el.text and el.text.strip()
     ]
 
     def fuel_lbs(path):
@@ -126,11 +136,14 @@ def fetch_ofp_leg_fields(simbrief_user, timeout=15):
         "tail_number": text("aircraft/reg"),
         "fleet_type": text("aircraft/icaocode"),
         # Aircraft detail popup fields — same paths fos_pages.py/MASTERLOG.py
-        # already read successfully elsewhere, not guessed. SimBrief's OFP
-        # has no engine-type field at all, so that's not listed here; the
-        # Aircraft view says so explicitly rather than fabricating one.
+        # already read successfully elsewhere, not guessed. aircraft/engines
+        # and aircraft/max_passengers confirmed against a real OFP XML
+        # sample (2026-08-20) — an earlier pass wrongly assumed SimBrief had
+        # no engine field at all.
         "aircraft_name": text("aircraft/name"),
         "fin": text("aircraft/fin"),
+        "engines": text("aircraft/engines"),
+        "seat_capacity": text("aircraft/max_passengers"),
         "customer_load": text("general/passengers"),
         "flight_time": seconds_to_hhmm("times/sched_block"),
         "crew": crew,
@@ -147,6 +160,51 @@ def fetch_ofp_leg_fields(simbrief_user, timeout=15):
         "extra_fuel": fuel_lbs("fuel/extra"),
     }
     return {k: v for k, v in fields.items() if v}
+
+
+def fetch_prefile_links(simbrief_user, timeout=15):
+    """
+    VATSIM/IVAO prefile forms straight from the pilot's current SimBrief
+    OFP — confirmed against a real OFP XML sample (2026-08-20) that SimBrief
+    itself renders these as ready-to-submit HTML <form> snippets embedded in
+    the XML (<vatsim_prefile>/<ivao_prefile>), each with the full ICAO
+    flight-plan string (VATSIM's "raw" field) or base64 flight-plan blob
+    (IVAO's "flightPlan" field) already built. That means this app never
+    has to construct an ICAO FPL string itself — just forward what SimBrief
+    already assembled. Returns {} for a service whose block isn't present
+    (e.g. no OFP generated yet) rather than raising, so callers can grey out
+    that specific external-app row instead of failing the whole popup.
+    """
+    resp = requests.get(OFP_URL, params={"username": simbrief_user}, timeout=timeout)
+    resp.raise_for_status()
+    root = ET.fromstring(resp.text)
+
+    def form_field(block_path, field_name):
+        form = root.find(f"{block_path}/form")
+        if form is None:
+            return None
+        action = form.get("action")
+        if not action:
+            return None
+        for inp in form.findall("input"):
+            if inp.get("name") == field_name:
+                return action, inp.get("value") or ""
+        return None
+
+    links = {}
+
+    vatsim = form_field("vatsim_prefile", "raw")
+    if vatsim:
+        action, raw = vatsim
+        fuel_time = form_field("vatsim_prefile", "fuel_time")
+        links["vatsim"] = {"action": action, "raw": raw, "fuel_time": fuel_time[1] if fuel_time else ""}
+
+    ivao = form_field("ivao_prefile", "flightPlan")
+    if ivao:
+        action, flight_plan = ivao
+        links["ivao"] = {"action": action, "flight_plan": flight_plan}
+
+    return links
 
 
 def fetch_weather_briefing(simbrief_user, timeout=15):

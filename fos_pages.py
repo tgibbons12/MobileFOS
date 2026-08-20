@@ -299,36 +299,50 @@ def _flight_attendant(rng):
     return f"{rng.choice(_FA_SURNAMES)} {chr(rng.randint(65, 90))}{chr(rng.randint(65, 90))}"
 
 
-def synthesize_crew(flight_number, dep_date, base, cpt="", fo=""):
-    """Crew roster for the app's Overview→Crew popup: CA/FO (real SimBrief
-    names when the leg has them) plus two flight attendants, which SimBrief's
-    OFP never carries at all — no OFP field or other verified source in this
-    app has a cabin-crew roster, so FA identity/EMP# here is synthesized the
-    same deterministic way build_nsc_page() already does for the printed NSC
-    page (seeded off the flight's own identity, so re-opening the popup for
-    the same flight always shows the same names/numbers). Seeded separately
-    from build_nsc_page's rng (that one needs a parsed SimBrief root this
-    popup doesn't have), so the two won't show identical draws — cosmetic
-    only, not a correctness issue for simulated cabin crew.
+def synthesize_crew(flight_number, dep_date, base, crew_entries):
+    """Crew roster for the app's Overview→Crew popup. crew_entries is the
+    leg's own "crew" field — a list of "ROLE Name" strings (e.g. "CA JOHN
+    SMITH", "FA JANE DOE") that simbrief_ofp.fetch_ofp_leg_fields() builds
+    from real SimBrief OFP data (crew/cpt, crew/fo, crew/pu, and one
+    crew/fa per flight attendant — confirmed against a real OFP XML sample
+    2026-08-20, correcting an earlier assumption that SimBrief had no cabin
+    crew data at all). DOM (domicile/base) and EMP# aren't real — SimBrief
+    has no such fields — so those two are synthesized deterministically
+    here, seeded off the flight's own identity so reopening the popup for
+    the same flight always shows the same numbers.
+
+    A PBS-only leg that hasn't been dispatched via SimBrief yet has no
+    crew_entries at all; in that case this falls back to a same-shaped
+    synthetic CA/FO/FA/FA roster (same deterministic scheme
+    build_nsc_page() already uses for the printed NSC page, just seeded
+    separately since this popup has no parsed SimBrief root to match it
+    against) so the popup still shows something coherent rather than
+    nothing.
     """
     rng = _rng(f"{flight_number}{dep_date}{base}")
 
-    def _name(real, seat):
-        if _has_name(real):
-            parts = [p for p in str(real).replace(',', ' ').split() if p]
-            surname = parts[-1].upper()
-            initials = "".join(p[0] for p in parts[:-1]).upper()
-            return f"{surname} {initials}" if initials else surname
-        return _flight_attendant(rng) if seat not in ("CA", "FO") else f"CREW {seat}"
+    def _abbrev(name):
+        parts = [p for p in str(name).replace(',', ' ').split() if p]
+        if not parts:
+            return name
+        surname = parts[-1].upper()
+        initials = "".join(p[0] for p in parts[:-1]).upper()
+        return f"{surname} {initials}" if initials else surname
 
     roster = []
-    for seat, real in (("CA", cpt), ("FO", fo), ("01", ""), ("02", "")):
-        roster.append({
-            "seat": seat,
-            "name": _name(real, seat),
-            "dom": base,
-            "emp": f"{rng.randint(100000, 999999)}",
-        })
+    if crew_entries:
+        for entry in crew_entries:
+            seat, _, name = entry.partition(" ")
+            roster.append({
+                "seat": seat,
+                "name": _abbrev(name) if _has_name(name) else f"CREW {seat}",
+                "dom": base,
+                "emp": f"{rng.randint(100000, 999999)}",
+            })
+    else:
+        for seat in ("CA", "FO", "01", "02"):
+            name = f"CREW {seat}" if seat in ("CA", "FO") else _flight_attendant(rng)
+            roster.append({"seat": seat, "name": name, "dom": base, "emp": f"{rng.randint(100000, 999999)}"})
     return roster
 
 
