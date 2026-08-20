@@ -1,11 +1,11 @@
 {
-  "name": "mobileFOS",
-  "short_name": "mobileFOS",
-  "description": "mobileFOS Flight Planning",
+  "name": "MobileCCI",
+  "short_name": "MobileCCI",
+  "description": "MobileCCI Flight Planning",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#142c52",
-  "theme_color": "#142c52",
+  "background_color": "#f5f5f7",
+  "theme_color": "#0071e3",
   "orientation": "portrait",
   "icons": [
     {

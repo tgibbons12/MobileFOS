@@ -253,27 +253,38 @@ def _require_login():
 
 
 AUTH_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
+<script>(function(){var t=localStorage.getItem('fos_theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);})();</script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<meta name="theme-color" content="#142c52">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="mobileFOS">
+<meta name="apple-mobile-web-app-title" content="MobileCCI">
 <link rel="manifest" href="/static/manifest.json">
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <link rel="icon" href="/static/icon-192.png">
-<title>$title – FOS</title>
+<meta name="theme-color" content="#f5f5f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+<title>$title – MobileCCI</title>
 <style>
-  html,body{overscroll-behavior:none;background:#eef1f4;}
-  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;margin:0;padding:24px;color:#1a1f29;}
-  h1{font-size:18px;color:#144e94;margin:0 0 16px;}
-  label{display:block;font-size:13px;font-weight:600;margin:10px 0 4px;}
-  input[type=text],input[type=password]{width:100%;max-width:320px;font-family:inherit;font-size:13.5px;padding:9px 10px;border:1px solid #e3e6ea;border-radius:5px;box-sizing:border-box;background:#fbfbfc;}
-  button{margin-top:16px;background:#1c63b7;color:#fff;border:none;padding:10px 18px;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;}
-  .panel{max-width:320px;padding:14px;background:#fff;border:1px solid #e3e6ea;border-radius:6px;margin-top:10px;}
-  .msg{margin-top:8px;font-size:13px;color:#c0392b;}
-  .switch{margin-top:14px;font-size:13px;}
-  .switch a{color:#1c63b7;}
+  :root{
+    --bg:#f5f5f7; --card:#fff; --border:#d2d2d7; --label:#6e6e73; --value:#1d1d1f;
+    --blue:#0071e3; --blue-dark:#0058a8; --red:#ff3b30; --inactive:#9aa1ab;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#000; --card:#1c1c1e; --border:#38383a; --label:#98989d; --value:#f5f5f7; --inactive:#636366; }
+  }
+  :root[data-theme="dark"]{ --bg:#000; --card:#1c1c1e; --border:#38383a; --label:#98989d; --value:#f5f5f7; --inactive:#636366; }
+  :root[data-theme="light"]{ --bg:#f5f5f7; --card:#fff; --border:#d2d2d7; --label:#6e6e73; --value:#1d1d1f; --inactive:#9aa1ab; }
+  html,body{overscroll-behavior:none;background:var(--bg);}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;margin:0;padding:24px;color:var(--value);}
+  h1{font-size:18px;color:var(--blue-dark);margin:0 0 16px;}
+  label{display:block;font-size:13px;font-weight:600;margin:10px 0 4px;color:var(--value);}
+  input[type=text],input[type=password]{width:100%;max-width:320px;font-family:inherit;font-size:13.5px;padding:9px 10px;border:1px solid var(--border);border-radius:5px;box-sizing:border-box;background:var(--card);color:var(--value);}
+  button{margin-top:16px;background:var(--blue);color:#fff;border:none;padding:10px 18px;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;}
+  .panel{max-width:320px;padding:14px;background:var(--card);border:1px solid var(--border);border-radius:6px;margin-top:10px;}
+  .msg{margin-top:8px;font-size:13px;color:var(--red);}
+  .switch{margin-top:14px;font-size:13px;color:var(--value);}
+  .switch a{color:var(--blue);}
 </style></head><body>
 <h1>$title</h1>
 <div class="panel">
@@ -1160,57 +1171,68 @@ def render_fos_html(leg):
 
 
 LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
+<script>(function(){var t=localStorage.getItem('fos_theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);})();</script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<meta name="theme-color" content="#142c52">
+<meta name="theme-color" content="#f5f5f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="mobileFOS">
+<meta name="apple-mobile-web-app-title" content="MobileCCI">
 <link rel="manifest" href="/static/manifest.json">
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <link rel="icon" href="/static/icon-192.png">
-<title>FOS</title>
+<title>MobileCCI</title>
 <style>
-  html,body{height:100%;overscroll-behavior:none;background:#eef1f4;}
-  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;margin:0;padding:24px;color:#1a1f29;}
-  h1{font-size:18px;color:#144e94;margin:0 0 16px;}
-  label{display:block;font-size:13px;font-weight:600;margin:10px 0 4px;}
-  textarea, select, input[type=text]{width:100%;max-width:640px;font-family:inherit;font-size:13.5px;padding:9px 10px;border:1px solid #e3e6ea;border-radius:5px;box-sizing:border-box;background:#fbfbfc;}
+  :root{
+    --bg:#f5f5f7; --card:#fff; --border:#d2d2d7; --label:#6e6e73; --value:#1d1d1f;
+    --blue:#0071e3; --blue-dark:#0058a8; --red:#ff3b30; --green:#34c759; --inactive:#9aa1ab;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#000; --card:#1c1c1e; --border:#38383a; --label:#98989d; --value:#f5f5f7; --inactive:#636366; }
+  }
+  :root[data-theme="dark"]{ --bg:#000; --card:#1c1c1e; --border:#38383a; --label:#98989d; --value:#f5f5f7; --inactive:#636366; }
+  :root[data-theme="light"]{ --bg:#f5f5f7; --card:#fff; --border:#d2d2d7; --label:#6e6e73; --value:#1d1d1f; --inactive:#9aa1ab; }
+  html,body{height:100%;overscroll-behavior:none;background:var(--bg);}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;margin:0;padding:24px;color:var(--value);}
+  h1{font-size:18px;color:var(--blue-dark);margin:0 0 16px;}
+  label{display:block;font-size:13px;font-weight:600;margin:10px 0 4px;color:var(--value);}
+  textarea, select, input[type=text]{width:100%;max-width:640px;font-family:inherit;font-size:13.5px;padding:9px 10px;border:1px solid var(--border);border-radius:5px;box-sizing:border-box;background:var(--card);color:var(--value);}
   textarea{height:160px;font-family:ui-monospace,Menlo,monospace;font-size:12.5px;}
-  button{margin-top:10px;background:#1c63b7;color:#fff;border:none;padding:10px 18px;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;}
-  button.secondary{background:#2fa355;}
-  .arow{display:flex;align-items:center;justify-content:space-between;gap:10px;background:#fff;border:1px solid #e3e6ea;border-radius:6px;padding:10px 14px;margin-bottom:8px;max-width:640px;}
-  .arow-link{flex:1;min-width:0;text-decoration:none;color:#1a1f29;font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-  .arow-del{flex:0 0 auto;background:none;border:none;color:#9aa1ab;cursor:pointer;padding:6px;margin:-6px;display:flex;}
+  button{margin-top:10px;background:var(--blue);color:#fff;border:none;padding:10px 18px;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;}
+  button.secondary{background:var(--green);}
+  .arow{display:flex;align-items:center;justify-content:space-between;gap:10px;background:var(--card);border:1px solid var(--border);border-radius:6px;padding:10px 14px;margin-bottom:8px;max-width:640px;}
+  .arow-link{flex:1;min-width:0;text-decoration:none;color:var(--value);font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .arow-del{flex:0 0 auto;background:none;border:none;color:var(--inactive);cursor:pointer;padding:6px;margin:-6px;display:flex;}
   .arow-del svg{width:16px;height:16px;}
-  .arow-del:hover{color:#c0392b;}
-  .clear-all-link{float:right;color:#1c63b7;font-size:12.5px;font-weight:600;background:none;border:none;cursor:pointer;padding:0;}
-  .arow span{color:#6b7380;float:right;}
-  .empty{color:#6b7380;font-style:italic;}
-  .msg{margin-top:8px;font-size:13px;}
-  .panel{max-width:640px;padding:14px;background:#fff;border:1px solid #e3e6ea;border-radius:6px;margin-top:10px;}
-  .tabs{display:flex;gap:8px;max-width:640px;border-bottom:1px solid #e3e6ea;margin-bottom:16px;}
-  .tab-btn{margin:0;background:none;color:#6b7380;border:none;border-bottom:2px solid transparent;border-radius:0;padding:10px 4px;font-size:14px;font-weight:600;cursor:pointer;}
-  .tab-btn.active{color:#144e94;border-bottom-color:#1c63b7;}
+  .arow-del:hover{color:var(--red);}
+  .clear-all-link{float:right;color:var(--blue);font-size:12.5px;font-weight:600;background:none;border:none;cursor:pointer;padding:0;}
+  .arow span{color:var(--label);float:right;}
+  .empty{color:var(--label);font-style:italic;}
+  .msg{margin-top:8px;font-size:13px;color:var(--value);}
+  .panel{max-width:640px;padding:14px;background:var(--card);border:1px solid var(--border);border-radius:6px;margin-top:10px;}
+  .tabs{display:flex;gap:8px;max-width:640px;border-bottom:1px solid var(--border);margin-bottom:16px;}
+  .tab-btn{margin:0;background:none;color:var(--label);border:none;border-bottom:2px solid transparent;border-radius:0;padding:10px 4px;font-size:14px;font-weight:600;cursor:pointer;}
+  .tab-btn.active{color:var(--blue-dark);border-bottom-color:var(--blue);}
   .tab-panel{display:none;}
   .tab-panel.active{display:block;}
-  hr{max-width:640px;margin:14px 0;border:none;border-top:1px solid #e3e6ea;}
+  hr{max-width:640px;margin:14px 0;border:none;border-top:1px solid var(--border);}
 
   .sub-view{display:none;}
   .sub-view.active{display:block;}
   .subview-topbar{display:flex;align-items:center;gap:14px;margin-bottom:16px;max-width:640px;}
   .subview-topbar h1{margin:0;}
-  .back-link{color:#1c63b7;font-size:14px;font-weight:600;text-decoration:none;background:none;border:none;padding:0;margin:0;cursor:pointer;}
+  .back-link{color:var(--blue);font-size:14px;font-weight:600;text-decoration:none;background:none;border:none;padding:0;margin:0;cursor:pointer;}
   .home-tiles{display:flex;flex-direction:column;gap:12px;max-width:640px;}
-  .home-tile{display:flex;align-items:center;gap:14px;width:100%;text-align:left;background:#fff;border:1px solid #e3e6ea;border-radius:10px;padding:16px;margin:0;cursor:pointer;box-shadow:0 1px 2px rgba(0,0,0,.04);}
+  .home-tile{display:flex;align-items:center;gap:14px;width:100%;text-align:left;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:16px;margin:0;cursor:pointer;box-shadow:0 1px 2px rgba(0,0,0,.04);}
   .home-tile:disabled{opacity:.55;cursor:default;}
-  .home-tile svg{width:26px;height:26px;color:#1c63b7;flex:0 0 auto;}
-  .home-tile .tile-title{font-size:15px;font-weight:700;color:#1a1f29;}
-  .home-tile .tile-sub{font-size:12.5px;color:#6b7380;margin-top:2px;}
+  .home-tile svg{width:26px;height:26px;color:var(--blue);flex:0 0 auto;}
+  .home-tile .tile-title{font-size:15px;font-weight:700;color:var(--value);}
+  .home-tile .tile-sub{font-size:12.5px;color:var(--label);margin-top:2px;}
 </style></head><body>
 
 <div id="home-view" class="sub-view active">
-  <h1>FOS</h1>
+  <h1>MobileCCI</h1>
   <div class="home-tiles">
     <button class="home-tile" onclick="showHomeView('load-sequence')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>
@@ -1231,7 +1253,7 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
   <h1 style="margin-top:28px;font-size:15px;">Recent Flights $clear_flights_link</h1>
   <div id="archive-list">$rows</div>
   <form method="POST" action="/logout" style="margin-top:28px;max-width:640px;">
-    <button type="submit" style="width:100%;background:#6b7380;">Sign Out ($username)</button>
+    <button type="submit" style="width:100%;background:var(--label);">Sign Out ($username)</button>
   </form>
 </div>
 
@@ -1257,7 +1279,7 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
 
   <div id="tab-manual" class="tab-panel">
     <div class="panel">
-      <div style="font-size:13px;color:#6b7380;margin-bottom:4px;">Skips PBS entirely — just enough to identify the flight. Everything else (aircraft, times, fuel...) gets set on SimBrief's own dispatch page on the next screen.</div>
+      <div style="font-size:13px;color:var(--label);margin-bottom:4px;">Skips PBS entirely — just enough to identify the flight. Everything else (aircraft, times, fuel...) gets set on SimBrief's own dispatch page on the next screen.</div>
       <label for="manual-orig">Origin</label>
       <input id="manual-orig" type="text" placeholder="ICAO or IATA">
       <label for="manual-dest">Destination</label>
@@ -1275,7 +1297,7 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
     <button class="back-link" onclick="showHomeView('load-sequence')">Back</button>
     <h1>Pick a Leg</h1>
   </div>
-  <div id="pick-leg-summary" style="font-size:13px;color:#6b7380;margin-bottom:10px;max-width:640px;"></div>
+  <div id="pick-leg-summary" style="font-size:13px;color:var(--label);margin-bottom:10px;max-width:640px;"></div>
   <div id="pick-leg-list" style="max-width:640px;"></div>
   <div id="pick-leg-msg" class="msg"></div>
 </div>
@@ -1286,7 +1308,7 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
     <h1>Import from SimBrief</h1>
   </div>
   <div class="panel">
-    <div style="font-size:13px;color:#6b7380;margin-bottom:4px;">Loads whatever OFP is currently on this SimBrief account right now — for dispatching the flight you're on today, not for browsing a schedule.</div>
+    <div style="font-size:13px;color:var(--label);margin-bottom:4px;">Loads whatever OFP is currently on this SimBrief account right now — for dispatching the flight you're on today, not for browsing a schedule.</div>
     <label for="sb-user">SimBrief Username</label>
     <input id="sb-user" type="text" placeholder="Your SimBrief username">
     <br><button onclick="loadFromSimbrief()">Load Current Flight</button>
@@ -1325,22 +1347,22 @@ function loadPbsFile(e){
   reader.onload = () => importPbs(reader.result);
   reader.onerror = () => {
     el.textContent = 'Could not read that file.';
-    el.style.color = '#c0392b';
+    el.style.color = 'var(--red)';
   };
   reader.readAsText(file);
 }
 function importPbs(text){
   const el = document.getElementById('import-msg');
-  if(!text || !text.trim()){ el.textContent = 'That file was empty.'; el.style.color = '#c0392b'; return; }
+  if(!text || !text.trim()){ el.textContent = 'That file was empty.'; el.style.color = 'var(--red)'; return; }
   fetch('/import-pbs', {method:'POST', headers:{'Content-Type':'text/plain'}, body: text})
     .then(r => r.json().then(data => ({ok:r.ok, data})))
     .then(({ok, data}) => {
-      if(!ok){ el.textContent = data.error || 'Import failed'; el.style.color = '#c0392b'; return; }
+      if(!ok){ el.textContent = data.error || 'Import failed'; el.style.color = 'var(--red)'; return; }
       el.textContent = `Imported ${data.sequences_parsed} sequence(s), ${data.legs_parsed} legs.`;
-      el.style.color = '#2fa355';
+      el.style.color = 'var(--green)';
       loadSequences();
     })
-    .catch(e=>{ el.textContent = 'Request failed: ' + e; el.style.color = '#c0392b'; });
+    .catch(e=>{ el.textContent = 'Request failed: ' + e; el.style.color = 'var(--red)'; });
 }
 
 const TRASH_ICON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg>';
@@ -1377,13 +1399,13 @@ async function openSequence(seq){
   try {
     const seqR = await fetch('/pbs/sequences/' + seq);
     const seqData = await seqR.json();
-    if(!seqR.ok){ el.textContent = seqData.error || 'Sequence not found'; el.style.color = '#c0392b'; return; }
+    if(!seqR.ok){ el.textContent = seqData.error || 'Sequence not found'; el.style.color = 'var(--red)'; return; }
     el.textContent = '';
     renderLegPicker(seqData);
     showHomeView('pick-leg');
   } catch(e) {
     el.textContent = 'Request failed: ' + e;
-    el.style.color = '#c0392b';
+    el.style.color = 'var(--red)';
   }
 }
 
@@ -1401,7 +1423,7 @@ function renderLegPicker(seqData){
   list.innerHTML = '';
   (seqData.duty_days || []).forEach(day => {
     const heading = document.createElement('div');
-    heading.style.cssText = 'font-size:13px;font-weight:600;color:#144e94;margin:14px 0 6px;';
+    heading.style.cssText = 'font-size:13px;font-weight:600;color:var(--blue-dark);margin:14px 0 6px;';
     heading.textContent = 'Day ' + day.duty_day + ' — RPT ' + (day.report || '');
     list.appendChild(heading);
     (day.legs || []).forEach((leg, i) => {
@@ -1437,11 +1459,11 @@ async function generateFromSequence(seq, dutyDay, legIndex, position){
       body: JSON.stringify({duty_day: dutyDay, leg_index: legIndex, position: position}),
     });
     const genData = await genR.json();
-    if(!genR.ok){ el.textContent = genData.error || 'Generate failed'; el.style.color = '#c0392b'; return; }
+    if(!genR.ok){ el.textContent = genData.error || 'Generate failed'; el.style.color = 'var(--red)'; return; }
     window.location.href = genData.fos_url + '?view=release';
   } catch(e) {
     el.textContent = 'Request failed: ' + e;
-    el.style.color = '#c0392b';
+    el.style.color = 'var(--red)';
   }
 }
 
@@ -1452,7 +1474,7 @@ async function submitManualEntry(){
   const flight_number = document.getElementById('manual-fltnum').value.trim();
   if(!origin || !destination || !flight_number){
     el.textContent = 'Origin, destination, and flight number are all required.';
-    el.style.color = '#c0392b';
+    el.style.color = 'var(--red)';
     return;
   }
   el.textContent = 'Starting…';
@@ -1463,18 +1485,18 @@ async function submitManualEntry(){
       body: JSON.stringify({origin, destination, flight_number}),
     });
     const data = await r.json();
-    if(!r.ok){ el.textContent = data.error || 'Could not start this flight'; el.style.color = '#c0392b'; return; }
+    if(!r.ok){ el.textContent = data.error || 'Could not start this flight'; el.style.color = 'var(--red)'; return; }
     window.location.href = data.fos_url + '?view=release';
   } catch(e) {
     el.textContent = 'Request failed: ' + e;
-    el.style.color = '#c0392b';
+    el.style.color = 'var(--red)';
   }
 }
 
 function loadFromSimbrief(){
   const el = document.getElementById('sb-msg');
   const user = document.getElementById('sb-user').value.trim();
-  if(!user){ el.textContent = 'Enter a SimBrief username first.'; el.style.color = '#c0392b'; return; }
+  if(!user){ el.textContent = 'Enter a SimBrief username first.'; el.style.color = 'var(--red)'; return; }
   localStorage.setItem('fos_simbrief_user', user);
   fetch('/settings/simbrief-user', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({simbrief_user: user})});
   el.textContent = 'Loading current flight…';
@@ -1482,10 +1504,10 @@ function loadFromSimbrief(){
   fetch('/generate', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({simbrief_user: user})})
     .then(r => r.json().then(data => ({ok:r.ok, data})))
     .then(({ok, data}) => {
-      if(!ok){ el.textContent = data.error || 'Load failed'; el.style.color = '#c0392b'; return; }
+      if(!ok){ el.textContent = data.error || 'Load failed'; el.style.color = 'var(--red)'; return; }
       window.location.href = data.fos_url + '?view=confirm';
     })
-    .catch(e=>{ el.textContent = 'Request failed: ' + e; el.style.color = '#c0392b'; });
+    .catch(e=>{ el.textContent = 'Request failed: ' + e; el.style.color = 'var(--red)'; });
 }
 
 // Current Flight / Request New Data are rendered server-side now (see
@@ -1513,12 +1535,12 @@ FOS_TEMPLATE = """<!DOCTYPE html>
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="mobileFOS">
+<meta name="apple-mobile-web-app-title" content="MobileCCI">
 <link rel="manifest" href="/static/manifest.json">
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <link rel="icon" href="/static/icon-192.png">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-<title>Flight $flight_number \u2013 FOS</title>
+<title>Flight $flight_number \u2013 MobileCCI</title>
 <style>
   :root{
     --navy:#1d1d1f; --blue:#0071e3; --blue-dark:#0058a8;
@@ -1540,13 +1562,21 @@ FOS_TEMPLATE = """<!DOCTYPE html>
        hue instead of a flat color-swap. */
     .pdf-page{filter:invert(1) hue-rotate(180deg);}
   }
+  :root[data-theme="dark"]{
+    --navy:#2c2c2e; --bg:#000; --card:#1c1c1e; --border:#38383a; --label:#98989d; --value:#f5f5f7; --inactive:#636366;
+  }
+  :root[data-theme="light"]{
+    --navy:#1d1d1f; --bg:#f5f5f7; --card:#fff; --border:#d2d2d7; --label:#6e6e73; --value:#1d1d1f; --inactive:#9aa1ab;
+  }
+  :root[data-theme="dark"] .pdf-page{filter:invert(1) hue-rotate(180deg);}
+  :root[data-theme="light"] .pdf-page{filter:none;}
   *{box-sizing:border-box;}
   html,body{margin:0;padding:0;height:100%;overscroll-behavior:none;background:var(--bg);}
   body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:var(--value);-webkit-font-smoothing:antialiased;}
   button{font-family:inherit;}
   :focus-visible{outline:2px solid var(--blue-dark);outline-offset:2px;}
   @media (prefers-reduced-motion: reduce){ *{transition:none !important;animation:none !important;} }
-  .app-shell{display:flex;flex-direction:column;min-height:100vh;min-height:100dvh;width:100%;padding-top:env(safe-area-inset-top);padding-left:env(safe-area-inset-left);padding-right:env(safe-area-inset-right);}
+  .app-shell{display:flex;flex-direction:column;min-height:100vh;min-height:100dvh;width:100%;padding-left:env(safe-area-inset-left);padding-right:env(safe-area-inset-right);}
   .main{flex:1;min-width:0;padding:14px 16px calc(72px + env(safe-area-inset-bottom));}
   .tabbar{position:fixed;left:env(safe-area-inset-left);right:env(safe-area-inset-right);bottom:0;display:flex;justify-content:center;background:var(--card);border-top:1px solid var(--border);padding:5px 0 calc(5px + env(safe-area-inset-bottom));z-index:20;}
   .tab-btn{flex:1;max-width:110px;display:flex;flex-direction:column;align-items:center;gap:3px;background:transparent;border:none;color:var(--label);cursor:pointer;padding:4px 2px;position:relative;}
@@ -1596,7 +1626,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .weight-grid>div{display:flex;flex-direction:column;align-items:center;gap:2px;background:var(--bg);border-radius:8px;padding:7px 4px;}
   .weight-grid .wg-lbl{font-size:9.5px;color:var(--label);text-transform:uppercase;letter-spacing:.03em;}
   .weight-grid .wg-val{font-size:12.5px;font-weight:700;color:var(--value);font-variant-numeric:tabular-nums;}
-  .topbar{display:flex;flex-wrap:wrap;align-items:center;margin-bottom:10px;position:sticky;top:env(safe-area-inset-top);z-index:10;background:var(--bg);padding-top:6px;margin-top:-6px;margin-left:-16px;margin-right:-16px;padding-left:16px;padding-right:16px;}
+  .topbar{display:flex;flex-wrap:wrap;align-items:center;margin-bottom:10px;position:sticky;top:0;z-index:10;background:var(--bg);padding-top:calc(env(safe-area-inset-top) + 6px);margin-top:-6px;margin-left:-16px;margin-right:-16px;padding-left:16px;padding-right:16px;}
   .back-link{order:1;display:flex;align-items:center;color:var(--value);background:none;border:none;cursor:pointer;padding:6px 4px;text-decoration:none;}
   .topbar-actions{order:2;margin-left:auto;display:flex;align-items:center;gap:14px;}
   .topbar-title{order:3;flex:1 1 100%;text-align:center;margin-top:2px;}
@@ -1623,6 +1653,8 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .info-row .val{color:var(--value);font-weight:500;text-align:right;word-break:break-word;}
   .search-block{background:var(--card);padding:12px 14px;border-bottom:1px solid var(--border);}
   .search-block label{display:block;font-size:13px;font-weight:600;margin-bottom:6px;}
+  .theme-opt{flex:1;font-family:inherit;font-size:14px;font-weight:600;padding:9px 0;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--value);cursor:pointer;}
+  .theme-opt.active{background:var(--blue);border-color:var(--blue);color:#fff;}
   .search-block input,.search-block select{width:100%;padding:9px 10px;border:1px solid var(--border);border-radius:5px;font-size:13.5px;background:var(--card);color:var(--value);}
   .search-row{display:flex;gap:10px;background:var(--card);padding:12px 14px;border-bottom:1px solid var(--border);}
   .search-row .search-block{flex:1;border-bottom:none;padding:0;background:none;}
@@ -2005,6 +2037,14 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         <label for="aero-key">FlightAware AeroAPI Key</label>
         <input id="aero-key" type="password" placeholder="Your AeroAPI key" value="$aeroapi_key" onchange="saveAeroApiKey(this.value)">
       </div>
+      <div class="search-block">
+        <label>Appearance</label>
+        <div style="display:flex;gap:8px;">
+          <button type="button" class="theme-opt" data-theme-opt="light" onclick="setThemePref('light')">Light</button>
+          <button type="button" class="theme-opt" data-theme-opt="auto" onclick="setThemePref('auto')">Auto</button>
+          <button type="button" class="theme-opt" data-theme-opt="dark" onclick="setThemePref('dark')">Dark</button>
+        </div>
+      </div>
       <div id="settings-msg" class="placeholder-note"></div>
     </section>
     <section id="confirm-view" class="view">
@@ -2127,6 +2167,7 @@ function showView(view){
   if(view === 'release') initReleaseView();
   if(view === 'confirm') initConfirmView();
   if(view === 'sign') initSignPad();
+  if(view === 'settings') updateThemeButtons();
   if(view === 'saveddocs') initSavedDocs();
   if(view === 'pairing') initPairingView();
   if(view === 'overview') initOverviewPills();
@@ -2143,6 +2184,22 @@ function saveAeroApiKey(value){
   fetch('/settings/aeroapi-key', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({aeroapi_key: key})})
     .then(()=>{ document.getElementById('settings-msg').textContent = 'Saved.'; })
     .catch(()=>{ document.getElementById('settings-msg').textContent = 'Could not save — try again.'; });
+}
+function setThemePref(pref){
+  if(pref === 'auto'){
+    localStorage.removeItem('fos_theme');
+    document.documentElement.removeAttribute('data-theme');
+  } else {
+    localStorage.setItem('fos_theme', pref);
+    document.documentElement.setAttribute('data-theme', pref);
+  }
+  updateThemeButtons();
+}
+function updateThemeButtons(){
+  const current = localStorage.getItem('fos_theme') || 'auto';
+  document.querySelectorAll('.theme-opt').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.themeOpt === current);
+  });
 }
 function initReleaseView(){
   prefillSimbriefGen();
