@@ -151,6 +151,24 @@ def _fleet_type_icao(code):
     return _FLEET_TYPE_ICAO.get(code, code)
 
 
+def _minutes_late(sched, est):
+    """Signed minutes from sched to est on a 24h clock, taking the shorter
+    way around midnight rather than a flat HH:MM string/lexical compare
+    (which broke on an overnight delay: "09:40" > "22:40" is False as a
+    string, so an 11-hour-late flight read as early/on-time). Returns the
+    value in (-720, 720] — positive means late, negative means early —
+    since without real calendar dates on both sides, the shorter arc
+    around a 24h clock is the only sane way to disambiguate "11h late"
+    from "13h early" for two bare HH:MM values."""
+    try:
+        sh, sm = (int(x) for x in sched.split(":"))
+        eh, em = (int(x) for x in est.split(":"))
+    except ValueError:
+        return None
+    diff = (eh * 60 + em) - (sh * 60 + sm)
+    return ((diff + 720) % 1440) - 720
+
+
 def _station_time_html(sched, est):
     """Overview's flight card, mobileCCI-style: the current (estimated)
     time in front, the original scheduled time struck through next to it
@@ -165,7 +183,8 @@ def _station_time_html(sched, est):
     shown = est or sched
     if not shown:
         return ""
-    late = bool(sched and est and est > sched)
+    minutes_late = _minutes_late(sched, est) if (sched and est) else None
+    late = bool(minutes_late and minutes_late > 0)
     css_class = "est-time late" if late else "est-time"
     html_out = f'<span class="{css_class}">{html.escape(shown)}</span>'
     if sched and est and sched != est:
@@ -459,9 +478,16 @@ def _find(flight_number, dep_date, origin=None, destination=None):
     if not origin or not destination:
         return None
     # origin/destination live inside the JSON data blob, not as real
-    # columns (see models.Leg) — filter in Python, not filter_by().
+    # columns (see models.Leg) — filter in Python, not filter_by(). Compare
+    # ICAO-normalized: a PBS-pairing leg's origin/destination are the
+    # pairing's raw 3-letter station codes, while a SimBrief-enriched leg
+    # carries the OFP's 4-letter ICAO codes — a raw string compare ("PHX"
+    # vs "KPHX") never matches, so this fallback would silently never fire
+    # for the exact case it exists to catch.
+    origin_icao, dest_icao = _airport_icao(origin), _airport_icao(destination)
     for row in query.all():
-        if row.data.get("origin") == origin and row.data.get("destination") == destination \
+        if _airport_icao(row.data.get("origin", "")) == origin_icao \
+                and _airport_icao(row.data.get("destination", "")) == dest_icao \
                 and _dates_match(row.dep_date, dep_date):
             return row
     return None
@@ -2158,7 +2184,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   </main>
   <nav class="tabbar" aria-label="Primary">
     <button class="tab-btn active" id="tab-overview" onclick="showView('overview')">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></svg>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0z"/><path d="M9 10l2 2 4-4"/></svg>
       <span>Overview</span>
     </button>
     <button class="tab-btn" id="tab-schedule" onclick="showView('pairing')">
@@ -2166,7 +2192,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
       <span>Schedule</span>
     </button>
     <button class="tab-btn" id="tab-messages" onclick="showView('messages')">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 6l9 7 9-7"/></svg>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
       <span>Messages</span>
     </button>
     <button class="tab-btn" id="tab-docs" onclick="showView('doclocker')">
@@ -2304,7 +2330,13 @@ async function prefillSimbriefGen(){
         outer:
         for(const day of (seqData.duty_days || [])){
           for(const l of (day.legs || [])){
-            if(l.flight_number === LEG_FLIGHT_NUMBER && l.origin === LEG_ORIGIN && l.destination === LEG_DESTINATION){
+            // Match on ICAO-normalized codes, not the raw origin/destination
+            // strings: a PBS-pairing leg's own l.origin is the pairing's
+            // 3-letter station code, but LEG_ORIGIN can already be a
+            // SimBrief-overwritten ICAO code (4-letter) once this leg's
+            // been regenerated once before — a raw string match silently
+            // fails forever after that, same bug as initOverviewPills().
+            if(l.flight_number === LEG_FLIGHT_NUMBER && (l.origin_icao || l.origin) === LEG_ORIGIN_ICAO && (l.destination_icao || l.destination) === LEG_DESTINATION_ICAO){
               orig = l.origin_icao || l.origin;
               dest = l.destination_icao || l.destination;
               if(!document.getElementById('sbgen-time').value && l.dep_local && l.dep_local.length === 4){
@@ -2928,7 +2960,11 @@ async function initOverviewPills(){
     const position = LEG_POSITION || (seqData.positions && seqData.positions[0]) || '';
     for(const day of (seqData.duty_days || [])){
       const legs = day.legs || [];
-      const idx = legs.findIndex(l => l.flight_number === LEG_FLIGHT_NUMBER && l.origin === LEG_ORIGIN && l.destination === LEG_DESTINATION);
+      // ICAO-normalized match — see prefillSimbriefGen()'s identical fix
+      // for why a raw origin/destination string compare silently orphans
+      // a leg from its own pairing's pill strip once it's carried a
+      // SimBrief-overwritten ICAO code.
+      const idx = legs.findIndex(l => l.flight_number === LEG_FLIGHT_NUMBER && (l.origin_icao || l.origin) === LEG_ORIGIN_ICAO && (l.destination_icao || l.destination) === LEG_DESTINATION_ICAO);
       if(idx === -1) continue;
       legs.forEach((l, i) => {
         const pill = document.createElement('button');
