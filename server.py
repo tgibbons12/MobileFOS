@@ -169,26 +169,32 @@ def _minutes_late(sched, est):
     return ((diff + 720) % 1440) - 720
 
 
-def _station_time_html(sched, est):
-    """Overview's flight card, mobileCCI-style: the current (estimated)
-    time in front, the original scheduled time struck through next to it
-    — but only when they actually differ, rather than always showing two
-    identical numbers. Color is a real signal, not decoration: sched_out/
-    sched_in come from the PBS pairing, est_out/est_in from the SimBrief
-    OFP fetch — both "%H:%M" 24h strings already on the leg schema, so a
-    later estimate than scheduled (red) vs on-time/earlier/no-estimate-yet
-    (green) costs nothing to compute, it's just a comparison this app
-    wasn't running before."""
-    sched, est = (sched or "").strip(), (est or "").strip()
-    shown = est or sched
+def _station_time_html(pairing_sched, current_sched, est):
+    """Overview's flight card, mobileCCI-style: the current known time in
+    front, the pairing's original published time struck through next to it
+    — but only when they actually differ. "Current known time" is a
+    priority chain, not just est: est_out/est_in (a live SimBrief estimate)
+    wins when present, otherwise current_sched (the generic sched_out/
+    sched_in — whichever source wrote it last, so it reflects a redispatch
+    even before SimBrief has a fresh estimate) wins over pairing_sched
+    (the ORIGINAL PBS-pairing time, frozen the moment it was imported —
+    see DEFAULT_LEG's pairing_sched_out/in comment). Getting this chain
+    wrong is what silently kept showing the original pre-delay time after
+    a redispatch: falling back straight to pairing_sched instead of
+    current_sched skipped right past a newly-generated OFP's own updated
+    schedule whenever it hadn't yet gotten a separate est_out."""
+    pairing_sched = (pairing_sched or "").strip()
+    current_sched = (current_sched or "").strip()
+    est = (est or "").strip()
+    shown = est or current_sched or pairing_sched
     if not shown:
         return ""
-    minutes_late = _minutes_late(sched, est) if (sched and est) else None
+    minutes_late = _minutes_late(pairing_sched, shown) if (pairing_sched and shown) else None
     late = bool(minutes_late and minutes_late > 0)
     css_class = "est-time late" if late else "est-time"
     html_out = f'<span class="{css_class}">{html.escape(shown)}</span>'
-    if sched and est and sched != est:
-        html_out += f'<span class="sched-time">{html.escape(sched)}</span>'
+    if pairing_sched and shown != pairing_sched:
+        html_out += f'<span class="sched-time">{html.escape(pairing_sched)}</span>'
     return html_out
 
 
@@ -1183,12 +1189,14 @@ def render_fos_html(leg):
     ctx["leg_id"] = str(leg.get("id", ""))
     ctx["origin_icao"] = _airport_icao(ctx.get("origin", ""))
     ctx["destination_icao"] = _airport_icao(ctx.get("destination", ""))
-    # Prefer the PBS pairing's own published time over the generic sched_out/
-    # sched_in (which SimBrief also writes) — see DEFAULT_LEG's comment.
-    # Falls back to sched_out/sched_in for a SimBrief-only leg with no
-    # pairing behind it at all.
-    ctx["dep_time_html"] = _station_time_html(ctx.get("pairing_sched_out") or ctx.get("sched_out"), ctx.get("est_out"))
-    ctx["arr_time_html"] = _station_time_html(ctx.get("pairing_sched_in") or ctx.get("sched_in"), ctx.get("est_in"))
+    # pairing_sched_out/in (frozen at PBS import) is the strikethrough
+    # baseline; sched_out/in (overwritten by any later source) is the best
+    # currently-known schedule; est_out/in (a live SimBrief estimate) wins
+    # over both when present. See _station_time_html's docstring — using
+    # pairing_sched as the display fallback here instead of sched was the
+    # bug that kept showing pre-delay times after a redispatch.
+    ctx["dep_time_html"] = _station_time_html(ctx.get("pairing_sched_out") or ctx.get("sched_out"), ctx.get("sched_out"), ctx.get("est_out"))
+    ctx["arr_time_html"] = _station_time_html(ctx.get("pairing_sched_in") or ctx.get("sched_in"), ctx.get("sched_in"), ctx.get("est_in"))
     ctx["fleet_type_icao"] = _fleet_type_icao(ctx.get("fleet_type", ""))
     # Overview shows two parallel readings of the same aircraft: Fleet Type
     # stays the raw PBS sub-fleet code (e.g. "32A"), Equipment Type is the
