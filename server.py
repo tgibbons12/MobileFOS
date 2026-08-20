@@ -344,7 +344,7 @@ def logout():
     return redirect(url_for("login"))
 
 DEFAULT_LEG = {
-    "seq": "", "date": "", "flight_number": "", "origin": "", "destination": "",
+    "seq": "", "date": "", "base": "", "flight_number": "", "origin": "", "destination": "",
     "route": "", "dep_date": "", "arr_date": "", "sched_out": "", "sched_in": "",
     "est_out": "", "est_in": "", "dep_gate": "", "arr_gate": "",
     "fleet_type": "", "equipment_type": "", "tail_number": "", "tail_routing": "",
@@ -1043,9 +1043,14 @@ def render_fos_html(leg):
     crew = ctx.get("crew")
     crew_list = crew if isinstance(crew, list) else ([crew] if crew else [])
     ctx["crew_display"] = ", ".join(crew_list)
+    # DOM (domicile) is the pilot's actual crew base from the PBS bid-pack's
+    # own title block (pbs_parser's "BASE <code> ..." line) — not the leg's
+    # destination, which was wrong (a crew's domicile doesn't change leg to
+    # leg). Falls back to destination only for a leg with no PBS origin at
+    # all (e.g. a bare SimBrief-only leg never merged from a bid pack).
     roster = synthesize_crew(
         ctx.get("flight_number", ""), ctx.get("dep_date", ""),
-        ctx.get("destination", ""), crew_list,
+        ctx.get("base") or ctx.get("destination", ""), crew_list,
     )
     # Overview's Crew accordion shows the full roster (CA/FO/PU/FA — real
     # SimBrief names when this leg's been dispatched) with DOM (crew
@@ -1059,7 +1064,7 @@ def render_fos_html(leg):
             f'<span class="val">DOM {html.escape(member["dom"])} &middot; EMP {html.escape(member["emp"])}</span></div>'
         )
     ctx["crew_rows"] = "".join(rows)
-    ctx["crew_count"] = f"{len(roster)} assigned"
+    ctx["crew_count"] = f"{len(roster)}/{len(roster)}"
     ctx["leg_id"] = str(leg.get("id", ""))
     ctx["origin_icao"] = _airport_icao(ctx.get("origin", ""))
     ctx["destination_icao"] = _airport_icao(ctx.get("destination", ""))
@@ -1075,7 +1080,7 @@ def render_fos_html(leg):
     # Overview's Aircraft stat row wants one glanceable value — the real
     # tail number if this leg's actually been dispatched (SimBrief-sourced),
     # falling back to the decoded type when only a PBS pairing exists yet.
-    ctx["aircraft_display"] = ctx.get("tail_number") or ctx["equipment_type"] or "—"
+    ctx["aircraft_display"] = ctx.get("fin") or ctx.get("tail_number") or ctx["equipment_type"] or "—"
     ctx["aircraft_name_html"] = html.escape(ctx.get("aircraft_name") or "") or "—"
     ctx["fin_html"] = html.escape(ctx.get("fin") or "") or "—"
     ctx["tail_number_html"] = html.escape(ctx.get("tail_number") or "") or "—"
@@ -1494,7 +1499,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   :focus-visible{outline:2px solid var(--blue-dark);outline-offset:2px;}
   @media (prefers-reduced-motion: reduce){ *{transition:none !important;animation:none !important;} }
   .app-shell{display:flex;flex-direction:column;min-height:100vh;min-height:100dvh;width:100%;padding-top:env(safe-area-inset-top);padding-left:env(safe-area-inset-left);padding-right:env(safe-area-inset-right);}
-  .main{flex:1;min-width:0;width:100%;max-width:760px;margin:0 auto;padding:14px 16px calc(72px + env(safe-area-inset-bottom));}
+  .main{flex:1;min-width:0;padding:14px 16px calc(72px + env(safe-area-inset-bottom));}
   .tabbar{position:fixed;left:env(safe-area-inset-left);right:env(safe-area-inset-right);bottom:0;display:flex;background:var(--card);border-top:1px solid var(--border);padding:6px 0 calc(6px + env(safe-area-inset-bottom));z-index:20;}
   .tab-btn{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;background:transparent;border:none;color:var(--label);cursor:pointer;padding:4px 2px;position:relative;}
   .tab-btn svg{width:22px;height:22px;}
@@ -1612,8 +1617,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           </button>
         </div>
         <div class="topbar-title">
-          <h1>Flight $flight_number</h1>
-          <p>SEQ $seq</p>
+          <h1 style="color:var(--value);">SEQ $seq</h1>
         </div>
       </div>
       <div class="flight-card">
@@ -1727,7 +1731,6 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           </div>
         </div>
       </div>
-      <button class="docs-btn" id="pairing-btn" style="background:var(--blue-dark);margin-top:12px;" onclick="showView('pairing')">View Full Pairing</button>
     </section>
     <section id="documents-view" class="view">
       <div class="topbar">

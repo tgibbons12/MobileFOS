@@ -184,6 +184,7 @@ def pbs_leg_to_fos_leg(meta, seq, day, leg, position):
     return {
         "seq": seq["seq"],
         "date": "",
+        "base": meta.get("base", ""),
         "flight_number": leg["flight_number"],
         "origin": leg["origin"], "destination": leg["destination"],
         "dep_date": "", "arr_date": "",
