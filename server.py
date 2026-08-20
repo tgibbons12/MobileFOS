@@ -348,7 +348,8 @@ DEFAULT_LEG = {
     "route": "", "dep_date": "", "arr_date": "", "sched_out": "", "sched_in": "",
     "est_out": "", "est_in": "", "dep_gate": "", "arr_gate": "",
     "fleet_type": "", "equipment_type": "", "tail_number": "", "tail_routing": "",
-    "aircraft_name": "", "fin": "", "engines": "", "seat_capacity": "",
+    "aircraft_name": "", "fin": "", "engines": "", "selcal": "", "seat_capacity": "",
+    "max_zfw": "", "max_tow_struct": "", "max_ldw": "",
     "bookmarked_docs": [],
     "status": "", "customer_load": "", "position": "", "crew": [],
     "flight_time": "", "odl_time": "", "duty_time": "", "ground_time": "",
@@ -454,25 +455,31 @@ def _store_leg(leg):
     leg.pop("id", None)
     existing = _find(leg.get("flight_number"), leg.get("dep_date"))
     if existing:
-        # OR, not overwrite: a regenerate (e.g. "Request New Data" re-sending
-        # to SimBrief) must never flip a real attestation back off, but it
-        # also shouldn't swallow build_leg_from_sources() setting signed_in
-        # True on fresh OFP data — plain overwrite-from-old was doing exactly
-        # that, silently discarding the auto-sign-in this same session added.
-        signed_in = existing.data.get("signed_in") or leg.get("signed_in", False)
-        ffd = existing.data.get("fit_for_duty") or leg.get("fit_for_duty", False)
-        # Same reasoning as signed_in/fit_for_duty above: neither a PBS
-        # re-import nor a SimBrief regenerate ever carries gate data of its
-        # own, so a blank incoming value here means "this source doesn't
-        # know," not "clear the gate" — a real previously-applied (AeroAPI
-        # or SimBrief) gate should survive re-merging, not get silently
-        # wiped back to blank.
-        dep_gate = leg.get("dep_gate") or existing.data.get("dep_gate", "")
-        arr_gate = leg.get("arr_gate") or existing.data.get("arr_gate", "")
-        merged = {
-            **existing.data, **leg, "signed_in": signed_in, "fit_for_duty": ffd,
-            "dep_gate": dep_gate, "arr_gate": arr_gate,
-        }
+        # Merge, don't overwrite: neither a PBS re-import nor a SimBrief
+        # regenerate carries every field the other source does (PBS has
+        # seq/position/hotel/gates-from-AeroAPI; SimBrief has tail/crew/
+        # weights but no seq at all), and DEFAULT_LEG backfills whatever a
+        # given source omits with "" — so a blank incoming value means
+        # "this source doesn't know," not "clear it." A field the caller
+        # actually meant to blank isn't a real scenario in this app: every
+        # merge here only ever adds day-of-ops detail on top of a pairing,
+        # never intentionally erases it. This previously bit signed_in/
+        # fit_for_duty (a regenerate flipping a real attestation back off)
+        # and gates (a re-import wiping an applied AeroAPI/SimBrief gate);
+        # generalizing it here instead of re-special-casing field by field
+        # every time this bug class resurfaces (most recently: seq).
+        merged = dict(existing.data)
+        for key, value in leg.items():
+            if value not in ("", None, [], {}):
+                merged[key] = value
+        # signed_in/fit_for_duty are real booleans, not blankable strings —
+        # False is meaningful, not "unknown" — so they need their own OR
+        # instead of the generic rule above (which would just re-apply
+        # existing.data's own value for a False leg.get() and never let a
+        # fresh sign-in actually clear an old one, which is fine, but was
+        # already explicit here before the refactor — kept explicit).
+        merged["signed_in"] = existing.data.get("signed_in") or leg.get("signed_in", False)
+        merged["fit_for_duty"] = existing.data.get("fit_for_duty") or leg.get("fit_for_duty", False)
         existing.data = merged
         existing.flight_number = merged.get("flight_number")
         existing.dep_date = merged.get("dep_date")
@@ -1096,6 +1103,12 @@ def render_fos_html(leg):
     ctx["fin_html"] = html.escape(ctx.get("fin") or "") or "—"
     ctx["tail_number_html"] = html.escape(ctx.get("tail_number") or "") or "—"
     ctx["engines_html"] = html.escape(ctx.get("engines") or "") or "—"
+    ctx["selcal_html"] = html.escape(ctx.get("selcal") or "") or "—"
+    zfw, tow, ldw = ctx.get("max_zfw"), ctx.get("max_tow_struct"), ctx.get("max_ldw")
+    ctx["max_weights_html"] = (
+        f"ZFW {html.escape(zfw)} &middot; TOW {html.escape(tow)} &middot; LDW {html.escape(ldw)}"
+        if zfw and tow and ldw else "—"
+    )
     raw_seat_capacity = ctx.get("seat_capacity") or ""
     ctx["pax_display"] = (
         f'{ctx["customer_load"]} / {raw_seat_capacity}'
@@ -1622,7 +1635,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
       <div class="topbar">
         <a class="back-link" href="/">Back</a>
         <div class="topbar-actions">
-          <button class="icon-btn" title="Settings" onclick="showToast('Settings')">
+          <button class="icon-btn" title="Settings" onclick="showView('settings')">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.34 1.87l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.7 1.7 0 00-1.87-.34 1.7 1.7 0 00-1 1.55V21a2 2 0 11-4 0v-.09A1.7 1.7 0 009 19.4a1.7 1.7 0 00-1.87.34l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.7 1.7 0 004.6 15a1.7 1.7 0 00-1.55-1H3a2 2 0 110-4h.09A1.7 1.7 0 004.6 9a1.7 1.7 0 00-.34-1.87l-.06-.06a2 2 0 112.83-2.83l.06.06A1.7 1.7 0 009 4.6a1.7 1.7 0 001-1.55V3a2 2 0 114 0v.09a1.7 1.7 0 001 1.55 1.7 1.7 0 001.87-.34l.06-.06a2 2 0 112.83 2.83l-.06.06A1.7 1.7 0 0019.4 9a1.7 1.7 0 001.55 1H21a2 2 0 110 4h-.09a1.7 1.7 0 00-1.55 1z"/></svg>
           </button>
         </div>
@@ -1652,7 +1665,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           </div>
           <div class="panel-card" id="ov-docs-card">
             <div class="panel-card-hdr">Preflight Docs</div>
-            <div class="doc-row" style="cursor:pointer;" onclick="showView('doclocker')">
+            <div class="doc-row" style="cursor:pointer;" onclick="showView('saveddocs')">
               <div style="display:flex;align-items:center;gap:10px;">
                 <svg class="lead-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/><path d="M12 11v6"/><path d="M9 14l3 3 3-3"/></svg>
                 <div class="code">Saved Docs</div>
@@ -1727,6 +1740,8 @@ FOS_TEMPLATE = """<!DOCTYPE html>
               <div class="stat-detail-row"><span class="lbl">ICAO Type</span><span class="val">$fleet_type_icao</span></div>
               <div class="stat-detail-row"><span class="lbl">Aircraft</span><span class="val">$aircraft_name_html</span></div>
               <div class="stat-detail-row"><span class="lbl">Engine</span><span class="val">$engines_html</span></div>
+              <div class="stat-detail-row"><span class="lbl">SELCAL</span><span class="val">$selcal_html</span></div>
+              <div class="stat-detail-row"><span class="lbl">Max Weights (Structural)</span><span class="val">$max_weights_html</span></div>
             </div>
           </div>
           <div class="stat-row" id="stat-pax">
@@ -1745,7 +1760,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
       <div class="topbar">
         <button class="back-link" onclick="showView('overview')">Back</button>
         <div class="topbar-actions">
-          <button class="icon-btn" title="Settings" onclick="showToast('Settings')">
+          <button class="icon-btn" title="Settings" onclick="showView('settings')">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.34 1.87l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.7 1.7 0 00-1.87-.34 1.7 1.7 0 00-1 1.55V21a2 2 0 11-4 0v-.09A1.7 1.7 0 009 19.4a1.7 1.7 0 00-1.87.34l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.7 1.7 0 004.6 15a1.7 1.7 0 00-1.55-1H3a2 2 0 110-4h.09A1.7 1.7 0 004.6 9a1.7 1.7 0 00-.34-1.87l-.06-.06a2 2 0 112.83-2.83l.06.06A1.7 1.7 0 009 4.6a1.7 1.7 0 001-1.55V3a2 2 0 114 0v.09a1.7 1.7 0 001 1.55 1.7 1.7 0 001.87-.34l.06-.06a2 2 0 112.83 2.83l-.06.06A1.7 1.7 0 0019.4 9a1.7 1.7 0 001.55 1H21a2 2 0 110 4h-.09a1.7 1.7 0 00-1.55 1z"/></svg>
           </button>
         </div>
@@ -1767,7 +1782,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         <input id="doc-search" type="text" placeholder="">
       </div>
       <div class="doc-list">
-        <div class="doc-row" style="cursor:pointer;" onclick="showView('doclocker')">
+        <div class="doc-row" style="cursor:pointer;" onclick="showView('saveddocs')">
           <div><div class="code">Saved Docs</div></div>
           <div class="val" style="color:var(--label);font-size:13px;">0</div>
         </div>
@@ -1869,12 +1884,20 @@ FOS_TEMPLATE = """<!DOCTYPE html>
       <div id="weather-body"><p class="placeholder-note">Loading\u2026</p></div>
     </section>
 
-    <section id="doclocker-view" class="view">
+    <section id="saveddocs-view" class="view">
       <div class="topbar">
         <button class="back-link" onclick="showView('overview')">Back</button>
         <div class="topbar-title"><h1>Saved Docs</h1></div>
       </div>
-      <div id="doclocker-body"><p class="placeholder-note">No saved documents yet.</p></div>
+      <div id="saveddocs-body"><p class="placeholder-note">No saved documents yet.</p></div>
+    </section>
+
+    <section id="doclocker-view" class="view">
+      <div class="topbar">
+        <button class="back-link" onclick="showView('overview')">Back</button>
+        <div class="topbar-title"><h1>Docs</h1></div>
+      </div>
+      <p class="placeholder-note">No documents.</p>
     </section>
 
     <section id="messages-view" class="view">
@@ -2061,24 +2084,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         <button class="back-link" onclick="showView('overview')">Back</button>
         <div class="topbar-title"><h1>More</h1></div>
       </div>
-      <div class="doc-list">
-        <div class="doc-row" style="cursor:pointer;" onclick="showView('release')">
-          <div><div class="code">SB</div><div class="desc">Send to SimBrief</div></div>
-          <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></div>
-        </div>
-        <div class="doc-row" style="cursor:pointer;" onclick="exportToForeFlight()">
-          <div><div class="code">FF</div><div class="desc">Export to ForeFlight</div></div>
-          <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></div>
-        </div>
-        <div class="doc-row" style="cursor:pointer;" onclick="showToast('Web')">
-          <div><div class="code">WEB</div><div class="desc">Web</div></div>
-          <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></div>
-        </div>
-        <div class="doc-row" style="cursor:pointer;" onclick="showView('settings')">
-          <div><div class="code">SET</div><div class="desc">Settings</div></div>
-          <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></div>
-        </div>
-      </div>
+      <p class="placeholder-note">Nothing here yet — SimBrief and ForeFlight moved to Overview's External Apps card; Settings is now the gear icon at top right.</p>
     </section>
   </main>
   <nav class="tabbar" aria-label="Primary">
@@ -2132,6 +2138,7 @@ function showView(view){
   document.getElementById('pairing-view').classList.toggle('active', view==='pairing');
   document.getElementById('weather-view').classList.toggle('active', view==='weather');
   document.getElementById('doclocker-view').classList.toggle('active', view==='doclocker');
+  document.getElementById('saveddocs-view').classList.toggle('active', view==='saveddocs');
   document.getElementById('messages-view').classList.toggle('active', view==='messages');
   document.getElementById('settings-view').classList.toggle('active', view==='settings');
   document.getElementById('more-view').classList.toggle('active', view==='more');
@@ -2139,14 +2146,16 @@ function showView(view){
   document.getElementById('tab-schedule').classList.toggle('active', view==='pairing');
   document.getElementById('tab-docs').classList.toggle('active', view==='doclocker');
   document.getElementById('tab-messages').classList.toggle('active', view==='messages');
-  // Release/Confirm/Settings/More are all reached through the More tab now
-  // (mobileCCI's five-tab bar has no dedicated Release/Settings icon).
-  document.getElementById('tab-more').classList.toggle('active', view==='release' || view==='confirm' || view==='settings' || view==='more');
+  // Release/Confirm are still only reached through the More tab; Settings
+  // moved to the topbar gear icon (mobileCCI's five-tab bar has no
+  // dedicated Release icon, but does put settings at top right, not
+  // under More).
+  document.getElementById('tab-more').classList.toggle('active', view==='release' || view==='confirm' || view==='more');
   window.scrollTo(0,0);
   if(view === 'release') initReleaseView();
   if(view === 'confirm') initConfirmView();
   if(view === 'sign') initSignPad();
-  if(view === 'doclocker') initDocLocker();
+  if(view === 'saveddocs') initSavedDocs();
   if(view === 'pairing') initPairingView();
   if(view === 'overview') initOverviewPills();
   if(view === 'weather' && !_weatherLoaded) loadWeather();
@@ -2808,8 +2817,8 @@ const DOC_CODE_TO_KIND = {
   'AL*': ['notams', 'NOTAMs'], 'FR': ['field_report', 'Field Reports'],
   'WX*': ['weather', 'Winds & Weather'],
 };
-function initDocLocker(){
-  const body = document.getElementById('doclocker-body');
+function initSavedDocs(){
+  const body = document.getElementById('saveddocs-body');
   if(!LEG_BOOKMARKED_DOCS.length){
     body.innerHTML = '<p class="placeholder-note">No saved documents yet. Bookmark one under All Commands to save it here.</p>';
     return;

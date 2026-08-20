@@ -165,7 +165,16 @@ def fetch_ofp_leg_fields(simbrief_user, timeout=15):
         "aircraft_name": text("aircraft/name"),
         "fin": text("aircraft/fin"),
         "engines": text("aircraft/engines"),
+        "selcal": text("aircraft/selcal"),
         "seat_capacity": text("aircraft/max_passengers"),
+        # Structural (airframe-certified) max weights, not this flight's own
+        # operational/performance-limited figures (weights/max_tow, est_zfw,
+        # etc.) — confirmed against the same real OFP XML sample's <weights>
+        # block. fuel_lbs() is just generic int-with-commas formatting,
+        # reused here for the same reason.
+        "max_zfw": fuel_lbs("weights/max_zfw"),
+        "max_tow_struct": fuel_lbs("weights/max_tow_struct"),
+        "max_ldw": fuel_lbs("weights/max_ldw"),
         "customer_load": text("general/passengers"),
         "flight_time": seconds_to_hhmm("times/sched_block"),
         "crew": crew,
