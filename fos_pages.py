@@ -299,6 +299,39 @@ def _flight_attendant(rng):
     return f"{rng.choice(_FA_SURNAMES)} {chr(rng.randint(65, 90))}{chr(rng.randint(65, 90))}"
 
 
+def synthesize_crew(flight_number, dep_date, base, cpt="", fo=""):
+    """Crew roster for the app's Overview→Crew popup: CA/FO (real SimBrief
+    names when the leg has them) plus two flight attendants, which SimBrief's
+    OFP never carries at all — no OFP field or other verified source in this
+    app has a cabin-crew roster, so FA identity/EMP# here is synthesized the
+    same deterministic way build_nsc_page() already does for the printed NSC
+    page (seeded off the flight's own identity, so re-opening the popup for
+    the same flight always shows the same names/numbers). Seeded separately
+    from build_nsc_page's rng (that one needs a parsed SimBrief root this
+    popup doesn't have), so the two won't show identical draws — cosmetic
+    only, not a correctness issue for simulated cabin crew.
+    """
+    rng = _rng(f"{flight_number}{dep_date}{base}")
+
+    def _name(real, seat):
+        if _has_name(real):
+            parts = [p for p in str(real).replace(',', ' ').split() if p]
+            surname = parts[-1].upper()
+            initials = "".join(p[0] for p in parts[:-1]).upper()
+            return f"{surname} {initials}" if initials else surname
+        return _flight_attendant(rng) if seat not in ("CA", "FO") else f"CREW {seat}"
+
+    roster = []
+    for seat, real in (("CA", cpt), ("FO", fo), ("01", ""), ("02", "")):
+        roster.append({
+            "seat": seat,
+            "name": _name(real, seat),
+            "dom": base,
+            "emp": f"{rng.randint(100000, 999999)}",
+        })
+    return roster
+
+
 # ---------------------------------------------------------------------------
 # FI — flight information
 # ---------------------------------------------------------------------------

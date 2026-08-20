@@ -125,6 +125,12 @@ def fetch_ofp_leg_fields(simbrief_user, timeout=15):
         "est_in": epoch_to("%H:%M", "times/est_in"),
         "tail_number": text("aircraft/reg"),
         "fleet_type": text("aircraft/icaocode"),
+        # Aircraft detail popup fields — same paths fos_pages.py/MASTERLOG.py
+        # already read successfully elsewhere, not guessed. SimBrief's OFP
+        # has no engine-type field at all, so that's not listed here; the
+        # Aircraft view says so explicitly rather than fabricating one.
+        "aircraft_name": text("aircraft/name"),
+        "fin": text("aircraft/fin"),
         "customer_load": text("general/passengers"),
         "flight_time": seconds_to_hhmm("times/sched_block"),
         "crew": crew,

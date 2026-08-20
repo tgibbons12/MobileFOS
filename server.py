@@ -30,7 +30,7 @@ from string import Template
 import aeroapi
 import pbs_parser
 import release_engine
-from fos_pages import AIRLINE_IATA
+from fos_pages import AIRLINE_IATA, synthesize_crew
 from models import db, User, Leg, PbsImport, SignatureLog, ReleaseCache
 import simbrief_ofp
 
@@ -339,6 +339,7 @@ DEFAULT_LEG = {
     "route": "", "dep_date": "", "arr_date": "", "sched_out": "", "sched_in": "",
     "est_out": "", "est_in": "", "dep_gate": "", "arr_gate": "",
     "fleet_type": "", "equipment_type": "", "tail_number": "", "tail_routing": "",
+    "aircraft_name": "", "fin": "",
     "status": "", "customer_load": "", "position": "", "crew": [],
     "flight_time": "", "odl_time": "", "duty_time": "", "ground_time": "",
     "tz_diff": "", "hotel_details": "", "limo_details": "",
@@ -991,19 +992,28 @@ def render_fos_html(leg):
     crew = ctx.get("crew")
     crew_list = crew if isinstance(crew, list) else ([crew] if crew else [])
     ctx["crew_display"] = ", ".join(crew_list)
-    # Documents' Crew section gets its own row per crew member (role +
-    # name split into columns) instead of Overview's compact comma-joined
-    # summary — names come from SimBrief, so escape before building raw HTML.
+    cpt_name = next((e.partition(" ")[2] for e in crew_list if e.startswith("CA ")), "")
+    fo_name = next((e.partition(" ")[2] for e in crew_list if e.startswith("FO ")), "")
+    roster = synthesize_crew(
+        ctx.get("flight_number", ""), ctx.get("dep_date", ""),
+        ctx.get("destination", ""), cpt=cpt_name, fo=fo_name,
+    )
+    # Documents' Crew section shows the full roster (CA/FO — real SimBrief
+    # names when this leg's been dispatched — plus flight attendants, which
+    # SimBrief's OFP never carries at all) with DOM (crew domicile/base) and
+    # employee number columns, same shape as the printed NSC crew-list page.
     rows = []
-    for entry in crew_list:
-        role, _, name = entry.partition(" ")
+    for member in roster:
         rows.append(
-            f'<div class="info-row"><span class="lbl">{html.escape(role)}</span>'
-            f'<span class="val">{html.escape(name)}</span></div>'
+            f'<div class="info-row"><span class="lbl">{html.escape(member["seat"])} '
+            f'{html.escape(member["name"])}</span>'
+            f'<span class="val">DOM {html.escape(member["dom"])} &middot; EMP {html.escape(member["emp"])}</span></div>'
         )
-    ctx["crew_rows"] = "".join(rows) or '<p class="placeholder-note">No named crew on this leg.</p>'
-    ctx["crew_count"] = f"{len(crew_list)} assigned" if crew_list else "—"
+    ctx["crew_rows"] = "".join(rows)
+    ctx["crew_count"] = f"{len(roster)} assigned"
     ctx["leg_id"] = str(leg.get("id", ""))
+    ctx["origin_icao"] = _airport_icao(ctx.get("origin", ""))
+    ctx["destination_icao"] = _airport_icao(ctx.get("destination", ""))
     ctx["dep_time_html"] = _station_time_html(ctx.get("sched_out"), ctx.get("est_out"))
     ctx["arr_time_html"] = _station_time_html(ctx.get("sched_in"), ctx.get("est_in"))
     ctx["fleet_type_icao"] = _fleet_type_icao(ctx.get("fleet_type", ""))
@@ -1017,6 +1027,9 @@ def render_fos_html(leg):
     # tail number if this leg's actually been dispatched (SimBrief-sourced),
     # falling back to the decoded type when only a PBS pairing exists yet.
     ctx["aircraft_display"] = ctx.get("tail_number") or ctx["equipment_type"] or "—"
+    ctx["aircraft_name_html"] = html.escape(ctx.get("aircraft_name") or "") or "—"
+    ctx["fin_html"] = html.escape(ctx.get("fin") or "") or "—"
+    ctx["tail_number_html"] = html.escape(ctx.get("tail_number") or "") or "—"
     # Neither PBS nor a SimBrief OFP ever carries a flight "status" — it's
     # not data either source has. Derive one locally from what this app
     # actually tracks rather than leaving it permanently blank.
@@ -1397,7 +1410,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
-<meta name="theme-color" content="#142c52">
+<meta name="theme-color" content="#1d1d1f">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -1409,9 +1422,9 @@ FOS_TEMPLATE = """<!DOCTYPE html>
 <title>Flight $flight_number \u2013 FOS</title>
 <style>
   :root{
-    --navy:#142c52; --blue:#1c63b7; --blue-dark:#144e94; --green:#2fa355;
-    --bg:#eef1f4; --card:#fff; --border:#e3e6ea; --label:#6b7380; --value:#1a1f29;
-    --red:#e0393e; --inactive:#9aa1ab; --radius:6px;
+    --navy:#1d1d1f; --blue:#0071e3; --blue-dark:#0058a8;
+    --bg:#f5f5f7; --card:#fff; --border:#d2d2d7; --label:#6e6e73; --value:#1d1d1f;
+    --red:#ff3b30; --inactive:#9aa1ab; --radius:10px;
   }
   *{box-sizing:border-box;}
   html,body{margin:0;padding:0;height:100%;overscroll-behavior:none;background:var(--bg);}
@@ -1432,7 +1445,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .flight-card .station.dest{align-items:flex-end;text-align:right;}
   .flight-card .station-date{font-size:11px;color:var(--label);text-transform:uppercase;letter-spacing:.02em;}
   .flight-card .station-code{font-size:22px;font-weight:700;}
-  .flight-card .est-time{font-size:15px;font-weight:700;color:var(--green);}
+  .flight-card .est-time{font-size:15px;font-weight:700;color:var(--blue-dark);}
   .flight-card .sched-time{font-size:12px;color:var(--label);text-decoration:line-through;margin-left:6px;}
   .flight-card .station-gate{font-size:12px;color:var(--label);margin-top:2px;}
   .flight-card .duration{flex:0 0 auto;display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:11px;color:var(--label);gap:4px;padding:0 4px;}
@@ -1452,13 +1465,13 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .topbar-title p{font-size:11px;margin:2px 0 0;color:var(--label);}
   .icon-btn{background:none;border:none;color:#5b6472;cursor:pointer;padding:2px;display:flex;}
   .icon-btn svg{width:19px;height:19px;}
-  .status-bar{background:var(--green);color:#fff;display:flex;align-items:center;justify-content:space-between;padding:8px 14px;border-radius:var(--radius) var(--radius) 0 0;font-size:13px;font-weight:600;}
+  .status-bar{background:var(--navy);color:#fff;display:flex;align-items:center;justify-content:space-between;padding:8px 14px;border-radius:var(--radius) var(--radius) 0 0;font-size:13px;font-weight:600;}
   .flight-summary{background:var(--card);display:flex;align-items:center;padding:12px 14px;border-bottom:1px solid var(--border);font-size:13px;gap:18px;flex-wrap:wrap;}
   .flight-summary .fnum{font-size:15px;font-weight:700;}
   .flight-summary .col{display:flex;flex-direction:column;line-height:1.5;}
-  .flight-summary .col.highlight{color:var(--green);font-weight:600;}
+  .flight-summary .col.highlight{color:var(--blue-dark);font-weight:600;}
   .duty-badges{display:flex;justify-content:flex-end;gap:22px;padding:10px 14px 8px;background:var(--card);font-size:12px;font-weight:600;}
-  .duty-badges span{display:flex;align-items:center;gap:5px;color:var(--green);}
+  .duty-badges span{display:flex;align-items:center;gap:5px;color:var(--blue-dark);}
   .duty-badges span.inactive{color:var(--inactive);}
   .duty-badges svg{width:15px;height:15px;}
   .docs-btn{display:block;width:100%;background:var(--blue);color:#fff;border:none;padding:11px;font-size:14px;font-weight:600;cursor:pointer;}
@@ -1485,7 +1498,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .doc-row .actions{display:flex;align-items:center;gap:26px;flex:0 0 auto;}
   .doc-row .actions svg{width:19px;height:19px;color:#5b6472;cursor:pointer;padding:7px;margin:-7px;box-sizing:content-box;}
   .doc-row .check{color:var(--inactive,#9aa1ab);cursor:pointer;}
-  .doc-row .check.signed{color:var(--green);}
+  .doc-row .check.signed{color:var(--blue-dark);}
   #sign-pad{touch-action:none;background:#fff;border:1px solid var(--border);border-radius:6px;width:100%;height:220px;}
   .placeholder-note{padding:12px 14px;color:var(--label);font-style:italic;font-size:13px;background:var(--card);}
   .view{display:none;}
@@ -1536,11 +1549,15 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         </div>
       </div>
       <div class="stat-list">
-        <div class="stat-row"><span>Time difference</span><span class="val">$tz_diff</span></div>
-        <button class="stat-row linked" onclick="showView('documents')">
+        <button class="stat-row linked" onclick="showView('time')">
+          <span>Time difference</span><span class="val">$tz_diff <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></span>
+        </button>
+        <button class="stat-row linked" onclick="openCrewDetail()">
           <span>Crew</span><span class="val">$crew_count <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></span>
         </button>
-        <div class="stat-row"><span>Aircraft</span><span class="val">$aircraft_display</span></div>
+        <button class="stat-row linked" onclick="showView('aircraft')">
+          <span>Aircraft</span><span class="val">$aircraft_display <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></span>
+        </button>
         <div class="stat-row"><span>Passengers</span><span class="val">$customer_load</span></div>
       </div>
       <div class="duty-badges">
@@ -1605,7 +1622,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           <div><div class="code">Saved Docs</div></div>
           <div class="val" style="color:var(--label);font-size:13px;">0</div>
         </div>
-        <div class="doc-row" style="cursor:pointer;" onclick="showToast('Not available yet')">
+        <div class="doc-row" style="cursor:pointer;" onclick="openAllCommands()">
           <div><div class="code">All Commands</div></div>
           <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></div>
         </div>
@@ -1666,9 +1683,13 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           <div><div class="code">WX*</div><div class="desc">Winds &amp; Weather</div></div>
           <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('weather','Winds &amp; Weather')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
         </div>
-        <div class="doc-row" style="border-bottom:none;">
+        <div class="doc-row">
           <div><div class="code">G*L/SS</div><div class="desc">Customers Requiring Special Services</div></div>
           <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="showToast('Not available \u2014 no data source for this document yet')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
+        </div>
+        <div class="doc-row" style="border-bottom:none;">
+          <div><div class="code">MOT</div><div class="desc">Mandatory Off Time</div></div>
+          <div class="val" style="color:var(--label);font-size:13px;font-style:italic;">Not available</div>
         </div>
       </div>
       <button class="section-bar collapsed" id="extapps-bar" onclick="toggleSection('extapps')">
@@ -1676,16 +1697,12 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
       </button>
       <div class="doc-list" id="extapps-body" style="display:none;">
-        <div class="doc-row" style="cursor:pointer;" onclick="showToast('Not available \u2014 no integration configured yet')">
-          <div><div class="code">FD Pro</div></div>
+        <div class="doc-row" style="cursor:pointer;" onclick="showView('release')">
+          <div><div class="code">SimBrief</div><div class="desc">Send to SimBrief Dispatch</div></div>
           <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><path d="M15 3h6v6"/><path d="M10 14L21 3"/></svg></div>
         </div>
-        <div class="doc-row" style="cursor:pointer;" onclick="showToast('Not available \u2014 no integration configured yet')">
-          <div><div class="code">SkyPath</div></div>
-          <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><path d="M15 3h6v6"/><path d="M10 14L21 3"/></svg></div>
-        </div>
-        <div class="doc-row" style="border-bottom:none;cursor:pointer;" onclick="showToast('Not available \u2014 no integration configured yet')">
-          <div><div class="code">WSI Pilotbrief</div></div>
+        <div class="doc-row" style="border-bottom:none;cursor:pointer;" onclick="exportToForeFlight()">
+          <div><div class="code">ForeFlight</div><div class="desc">Export Route</div></div>
           <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><path d="M15 3h6v6"/><path d="M10 14L21 3"/></svg></div>
         </div>
       </div>
@@ -1699,6 +1716,34 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         </div>
       </div>
       <div id="weather-body"><p class="placeholder-note">Loading\u2026</p></div>
+    </section>
+
+    <section id="time-view" class="view">
+      <div class="topbar">
+        <button class="back-link" onclick="showView('overview')">Back</button>
+        <div class="topbar-title"><h1>Time Difference</h1></div>
+      </div>
+      <div class="card">
+        <div class="info-row"><span class="lbl">$origin Local &middot; Departure</span><span class="val" id="time-orig-local">$sched_out</span></div>
+        <div class="info-row"><span class="lbl">$origin Zulu &middot; Departure</span><span class="val" id="time-orig-zulu">\u2014</span></div>
+        <div class="info-row"><span class="lbl">$destination Local &middot; Arrival</span><span class="val" id="time-dest-local">$sched_in</span></div>
+        <div class="info-row" style="border-bottom:none;"><span class="lbl">$destination Zulu &middot; Arrival</span><span class="val" id="time-dest-zulu">\u2014</span></div>
+      </div>
+      <p class="placeholder-note">Destination minus origin: $tz_diff hours</p>
+    </section>
+
+    <section id="aircraft-view" class="view">
+      <div class="topbar">
+        <button class="back-link" onclick="showView('overview')">Back</button>
+        <div class="topbar-title"><h1>Aircraft</h1></div>
+      </div>
+      <div class="card">
+        <div class="info-row"><span class="lbl">Tail Number</span><span class="val">$tail_number_html</span></div>
+        <div class="info-row"><span class="lbl">Fleet Number</span><span class="val">$fin_html</span></div>
+        <div class="info-row"><span class="lbl">ICAO Type</span><span class="val">$fleet_type_icao</span></div>
+        <div class="info-row" style="border-bottom:none;"><span class="lbl">Aircraft</span><span class="val">$aircraft_name_html</span></div>
+      </div>
+      <p class="placeholder-note">Engine \u2014 not available; SimBrief's OFP doesn't include engine data.</p>
     </section>
 
     <section id="pdf-view" class="view">
@@ -1763,10 +1808,10 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           <div id="aero-msg" style="margin-top:10px;font-size:13px;color:var(--label);"></div>
           <div id="aero-results" style="display:none;margin-top:10px;">
             <div class="info-row"><span class="lbl">Suggested Route</span><span class="val" id="aero-route-val">—</span></div>
-            <button onclick="applyAeroRoute()" style="margin:8px 0 0;width:100%;background:var(--green);color:#fff;border:none;padding:9px;border-radius:5px;font-size:13px;font-weight:600;cursor:pointer;">Use This Route</button>
+            <button onclick="applyAeroRoute()" style="margin:8px 0 0;width:100%;background:var(--blue);color:#fff;border:none;padding:9px;border-radius:5px;font-size:13px;font-weight:600;cursor:pointer;">Use This Route</button>
             <div class="info-row" style="margin-top:10px;"><span class="lbl">Suggested Gate — Origin</span><span class="val" id="aero-gate-orig">—</span></div>
             <div class="info-row"><span class="lbl">Suggested Gate — Destination</span><span class="val" id="aero-gate-dest">—</span></div>
-            <button onclick="applyAeroGates()" style="margin:8px 0 0;width:100%;background:var(--green);color:#fff;border:none;padding:9px;border-radius:5px;font-size:13px;font-weight:600;cursor:pointer;">Apply Gates to This Flight</button>
+            <button onclick="applyAeroGates()" style="margin:8px 0 0;width:100%;background:var(--blue);color:#fff;border:none;padding:9px;border-radius:5px;font-size:13px;font-weight:600;cursor:pointer;">Apply Gates to This Flight</button>
             <p class="placeholder-note" id="aero-basis" style="margin-top:8px;"></p>
           </div>
         </div>
@@ -1866,7 +1911,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         <button class="docs-btn" id="release-gen-btn" style="border-radius:5px;" onclick="generateRelease()">Generate Release</button>
         <div id="release-status" style="margin-top:10px;font-size:13px;color:var(--label);"></div>
         <div id="release-downloads" style="display:none;margin-top:10px;gap:10px;flex-wrap:wrap;">
-          <a id="release-rls-link" style="display:none;background:var(--green);color:#fff;text-decoration:none;padding:9px 14px;border-radius:5px;font-size:13px;font-weight:600;">Download RLS PDF</a>
+          <a id="release-rls-link" style="display:none;background:var(--blue);color:#fff;text-decoration:none;padding:9px 14px;border-radius:5px;font-size:13px;font-weight:600;">Download RLS PDF</a>
           <a id="release-wb-link" style="display:none;background:var(--blue-dark);color:#fff;text-decoration:none;padding:9px 14px;border-radius:5px;font-size:13px;font-weight:600;">Download W&amp;B PDF</a>
         </div>
         <button id="confirm-continue-btn" style="display:none;margin-top:10px;width:100%;background:var(--label);color:#fff;border:none;padding:11px;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;" onclick="showView('overview')">Continue to Flight</button>
@@ -1933,6 +1978,11 @@ const LEG_SCHED_OUT = "$sched_out";
 const LEG_FLEET_TYPE = "$fleet_type";
 const LEG_FLEET_TYPE_ICAO = "$fleet_type_icao";
 const LEG_EQUIPMENT_TYPE = "$equipment_type";
+const LEG_ORIGIN_ICAO = "$origin_icao";
+const LEG_DESTINATION_ICAO = "$destination_icao";
+const LEG_DEP_DATE = "$dep_date";
+const LEG_ARR_DATE = "$arr_date";
+const LEG_SCHED_IN = "$sched_in";
 function showView(view){
   document.getElementById('overview-view').classList.toggle('active', view==='overview');
   document.getElementById('documents-view').classList.toggle('active', view==='documents');
@@ -1944,6 +1994,8 @@ function showView(view){
   document.getElementById('weather-view').classList.toggle('active', view==='weather');
   document.getElementById('settings-view').classList.toggle('active', view==='settings');
   document.getElementById('more-view').classList.toggle('active', view==='more');
+  document.getElementById('time-view').classList.toggle('active', view==='time');
+  document.getElementById('aircraft-view').classList.toggle('active', view==='aircraft');
   document.getElementById('tab-overview').classList.toggle('active', view==='overview');
   document.getElementById('tab-schedule').classList.toggle('active', view==='pairing');
   document.getElementById('tab-docs').classList.toggle('active', view==='documents');
@@ -1953,6 +2005,7 @@ function showView(view){
   window.scrollTo(0,0);
   if(view === 'release') initReleaseView();
   if(view === 'confirm') initConfirmView();
+  if(view === 'time') initTimeView();
   if(view === 'sign') initSignPad();
   if(view === 'pairing') initPairingView();
   if(view === 'weather' && !_weatherLoaded) loadWeather();
@@ -2115,7 +2168,7 @@ function generateRelease(force){
       _releaseCache = data; // ensureRelease()/viewDoc() reuse this — one generation serves both paths
       status.innerHTML = (data.cached ? 'Release already on file (generated ' + new Date(data.generated_at).toLocaleString() + ').' : 'Release generated.')
         + ' <a href="#" onclick="generateRelease(true);return false;" style="color:inherit;">Regenerate</a>';
-      status.style.color = '#2fa355';
+      status.style.color = 'var(--blue-dark)';
       const rlsLink = document.getElementById('release-rls-link');
       rlsLink.href = 'data:application/pdf;base64,' + data.rls_pdf_b64;
       rlsLink.download = data.filename;
@@ -2138,6 +2191,18 @@ function toggleSection(name){
   const body = document.getElementById(name+'-body');
   const collapsed = bar.classList.toggle('collapsed');
   body.style.display = collapsed ? 'none' : 'block';
+}
+function openCrewDetail(){
+  showView('documents');
+  document.getElementById('crew-bar').classList.remove('collapsed');
+  document.getElementById('crew-body').style.display = 'block';
+  document.getElementById('crew-bar').scrollIntoView({block: 'start'});
+}
+function openAllCommands(){
+  showView('documents');
+  document.getElementById('flight-bar').classList.remove('collapsed');
+  document.getElementById('flight-body').style.display = 'block';
+  document.getElementById('flight-bar').scrollIntoView({block: 'start'});
 }
 function toggleStatus(kind, elId){
   fetch('/fos/' + LEG_ID + '/' + kind, {method:'POST'})
@@ -2397,7 +2462,7 @@ function renderPairing(seqData){
   cacheWrap.style.cssText = 'padding:11px 14px;background:var(--card);border-bottom:1px solid var(--border);';
   const cacheBtn = document.createElement('button');
   cacheBtn.textContent = 'Generate & Cache All Legs in Sequence';
-  cacheBtn.style.cssText = 'margin:0;width:100%;background:var(--green);color:#fff;border:none;padding:10px;border-radius:5px;font-size:13.5px;font-weight:600;cursor:pointer;';
+  cacheBtn.style.cssText = 'margin:0;width:100%;background:var(--blue);color:#fff;border:none;padding:10px;border-radius:5px;font-size:13.5px;font-weight:600;cursor:pointer;';
   cacheBtn.onclick = () => cacheAllPairingLegs(seqData, position, cacheMsg);
   const cacheMsg = document.createElement('div');
   cacheMsg.style.cssText = 'margin-top:8px;font-size:12.5px;color:var(--label);';
@@ -2495,7 +2560,7 @@ async function cacheAllPairingLegs(seqData, position, msgEl){
     }
   }
   msgEl.textContent = `Cached ${ok} of ${total} legs.` + (fails.length ? ' Failures: ' + fails.join('; ') : '');
-  msgEl.style.color = fails.length ? '#c0392b' : '#2fa355';
+  msgEl.style.color = fails.length ? '#c0392b' : 'var(--blue-dark)';
 }
 
 const _DDMMMYY_MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
@@ -2540,6 +2605,36 @@ function localToZuluParts(dateISO, hour, minute, tzName){
   }
   const result = new Date(guess);
   return {h: String(result.getUTCHours()).padStart(2, '0'), m: String(result.getUTCMinutes()).padStart(2, '0')};
+}
+
+// Leg dates come back from the server as "MM/DD/YY" (simbrief_ofp.py's
+// epoch_to format), not the "YYYY-MM-DD" localToZuluParts() needs. Falls
+// back to today when a leg has no real date yet (a PBS pairing never
+// carries one) — best-effort for the Time Difference popup, not exact.
+function mmddyyToISO(s){
+  const m = /^(\d{2})\/(\d{2})\/(\d{2})$/.exec(s || '');
+  if(!m) return todayZuluISO();
+  const [, mo, day, yr] = m;
+  return '20' + yr + '-' + mo + '-' + day;
+}
+let _timeViewLoaded = false;
+async function initTimeView(){
+  if(_timeViewLoaded) return;
+  _timeViewLoaded = true;
+  const [origTz, destTz] = await Promise.all([
+    LEG_ORIGIN_ICAO ? fetch('/airport-timezone/' + encodeURIComponent(LEG_ORIGIN_ICAO)).then(r=>r.ok?r.json():null).catch(()=>null) : null,
+    LEG_DESTINATION_ICAO ? fetch('/airport-timezone/' + encodeURIComponent(LEG_DESTINATION_ICAO)).then(r=>r.ok?r.json():null).catch(()=>null) : null,
+  ]);
+  if(origTz && origTz.tz && LEG_SCHED_OUT){
+    const [h, m] = LEG_SCHED_OUT.split(':').map(Number);
+    const z = localToZuluParts(mmddyyToISO(LEG_DEP_DATE), h, m, origTz.tz);
+    document.getElementById('time-orig-zulu').textContent = z.h + ':' + z.m + 'Z';
+  }
+  if(destTz && destTz.tz && LEG_SCHED_IN){
+    const [h, m] = LEG_SCHED_IN.split(':').map(Number);
+    const z = localToZuluParts(mmddyyToISO(LEG_ARR_DATE), h, m, destTz.tz);
+    document.getElementById('time-dest-zulu').textContent = z.h + ':' + z.m + 'Z';
+  }
 }
 
 async function submitSimbriefGen(){
@@ -2648,7 +2743,7 @@ async function pollSimbriefReady(user, beforeTs, el, btn, attempt){
 
   if(ts && ts !== beforeTs){
     el.textContent = 'Flight plan ready — loading it…';
-    el.style.color = '#2fa355';
+    el.style.color = 'var(--blue-dark)';
     try {
       const r2 = await fetch('/generate', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({simbrief_user: user, carry_gates_from: LEG_ID})});
       const data2 = await r2.json();
