@@ -985,6 +985,13 @@ def render_fos_html(leg):
             ctx["status"] = "Scheduled"
     ctx["signed_in_class"] = "" if ctx.get("signed_in") else "inactive"
     ctx["ffd_class"] = "" if ctx.get("fit_for_duty") else "inactive"
+    # Same fit_for_duty value, different CSS convention: the Overview badge
+    # (ffd_class above) defaults to green and needs "inactive" to grey out;
+    # the Documents row's check mark (.doc-row .check) is the opposite —
+    # defaults grey, needs "signed" to go green, matching the sign-pad
+    # check's own convention right below. Reusing ffd_class on that
+    # checkmark meant it could only ever render grey, signed or not.
+    ctx["ffd_check_class"] = "signed" if ctx.get("fit_for_duty") else ""
     ctx["signed_class"] = "signed" if ctx.get("signature") else ""
     # Raw user-typed account settings, not OFP/PBS data — escaped before
     # landing in an HTML attribute since, unlike the rest of ctx, a pilot
@@ -1556,7 +1563,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         <div class="doc-row">
           <div><div class="code">FFD</div><div class="desc">Fit for Duty Declaration</div></div>
           <div class="actions">
-            <svg id="ffd-doc-check" class="check $ffd_class" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" onclick="toggleStatus('fit-for-duty','ffd-doc-check')"><path d="M20 6L9 17l-5-5"/></svg>
+            <svg id="ffd-doc-check" class="check $ffd_check_class" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" onclick="toggleStatus('fit-for-duty','ffd-doc-check')"><path d="M20 6L9 17l-5-5"/></svg>
           </div>
         </div>
         <div class="doc-row">
@@ -1986,11 +1993,18 @@ function toggleStatus(kind, elId){
       const badgeId = kind === 'signin' ? 'signin-badge' : 'ffd-badge';
       // Two elements can show this same status (the Overview badge, now
       // read-only, and wherever it's actually toggled from) — keep both
-      // in sync rather than just the one that was tapped.
-      [elId, badgeId].forEach(id => {
-        const el = document.getElementById(id);
-        if(el) el.classList.toggle('inactive', !data[key]);
-      });
+      // in sync rather than just the one that was tapped. They use
+      // opposite CSS conventions though: the badge defaults green and
+      // needs "inactive" to grey out, while a .doc-row .check (like
+      // ffd-doc-check) defaults grey and needs "signed" to go green,
+      // same as the sign-pad check — toggling "inactive" on that one
+      // just left it permanently grey regardless of actual state.
+      const badge = document.getElementById(badgeId);
+      if(badge) badge.classList.toggle('inactive', !data[key]);
+      if(elId !== badgeId){
+        const check = document.getElementById(elId);
+        if(check) check.classList.toggle('signed', !!data[key]);
+      }
     })
     .catch(()=>showToast('Update failed'));
 }
