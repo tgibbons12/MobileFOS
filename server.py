@@ -576,7 +576,12 @@ def get_pbs_sequence(seq_number):
     out["operator"] = _IATA_TO_ICAO.get(operator_iata, operator_iata)
     out["duty_days"] = [
         {**day, "legs": [
-            {**leg, "origin_icao": _airport_icao(leg["origin"]), "destination_icao": _airport_icao(leg["destination"])}
+            {
+                **leg,
+                "origin_icao": _airport_icao(leg["origin"]),
+                "destination_icao": _airport_icao(leg["destination"]),
+                "fleet_type_icao": _fleet_type_icao(leg.get("equipment", "")),
+            }
             for leg in day["legs"]
         ]}
         for day in seq["duty_days"]
@@ -1251,7 +1256,15 @@ function renderLegPicker(seqData){
       const row = document.createElement('a');
       row.className = 'arow';
       row.href = '#';
-      row.innerHTML = (leg.flight_number || '—') + ' ' + (leg.origin || '') + '→' + (leg.destination || '') +
+      // fleet_type_icao falls back to the raw PBS code when unmapped, so
+      // it only ever differs from leg.equipment when it actually decoded
+      // to something (e.g. "A319" for "19E") — showing both here means
+      // you know the real aircraft type before picking a leg, not just
+      // its internal sub-fleet code.
+      const fleet = leg.fleet_type_icao
+        ? ' · ' + leg.fleet_type_icao + (leg.equipment && leg.equipment !== leg.fleet_type_icao ? ' (' + leg.equipment + ')' : '')
+        : '';
+      row.innerHTML = (leg.flight_number || '—') + ' ' + (leg.origin || '') + '→' + (leg.destination || '') + fleet +
         ' <span>' + (leg.dep_local || '') + '/' + (leg.arr_local || '') + '</span>';
       row.onclick = (e) => { e.preventDefault(); generateFromSequence(seqData.seq, day.duty_day, i, position); };
       list.appendChild(row);
@@ -1697,6 +1710,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         <div class="search-block">
           <label for="sbgen-type">Aircraft Type — ICAO code (B738) or your saved airframe's Internal ID (123456_1582090020)</label>
           <input id="sbgen-type" type="text" placeholder="B738 or 123456_1582090020">
+          <div id="sbgen-type-hint" style="margin-top:4px;font-size:12px;color:var(--label);"></div>
         </div>
         <div class="search-block">
           <label for="sbgen-route">Route (optional — blank uses SimBrief's last-used route for this city pair)</label>
@@ -1854,10 +1868,15 @@ async function prefillSimbriefGen(){
   // Leg-specific aircraft data wins over the last-remembered one: a
   // SimBrief-loaded leg's fleet_type is already a real ICAO type code
   // (aircraft/icaocode); a PBS-pairing leg's raw equipment token gets
-  // normalized server-side (_fleet_type_icao) for the sub-fleet prefixes
-  // that are confirmed (31x->A319, 21x->A321 today) and passed through
-  // unchanged otherwise.
+  // decoded server-side (_fleet_type_icao) against the real sub-fleet
+  // table and passed through unchanged if unmapped.
   document.getElementById('sbgen-type').value = LEG_FLEET_TYPE_ICAO || LEG_EQUIPMENT_TYPE || localStorage.getItem('fos_simbrief_airframe') || '';
+  // "A319" alone doesn't say which A319 (e.g. 19E/19F/19S are all
+  // different sub-fleets with different winglet/config variants) — show
+  // the raw PBS code alongside the decoded type when they actually
+  // differ, so that's visible before sending.
+  document.getElementById('sbgen-type-hint').textContent =
+    (LEG_FLEET_TYPE && LEG_FLEET_TYPE_ICAO && LEG_FLEET_TYPE !== LEG_FLEET_TYPE_ICAO) ? 'PBS code: ' + LEG_FLEET_TYPE : '';
   document.getElementById('sbgen-fltnum').value = LEG_FLIGHT_NUMBER || '';
   document.getElementById('sbgen-date').value = todayZuluISO();
   document.getElementById('sbgen-time').value = LEG_SCHED_OUT || '';
