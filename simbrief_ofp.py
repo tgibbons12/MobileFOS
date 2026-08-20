@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 
 import requests
 
+from fos_pages import airline_iata
+
 OFP_URL = "https://www.simbrief.com/api/xml.fetcher.php"
 
 
@@ -140,8 +142,22 @@ def fetch_ofp_leg_fields(simbrief_user, timeout=15):
         except ValueError:
             return ""
 
+    # general/icao_airline and general/iata_airline are the same two real
+    # fields fos_pages.build_context() already reads for the printed
+    # release's routing line, confirmed against the real OFP XML sample —
+    # SimBrief often omits iata_airline, so airline_iata() falls back to
+    # the AIRLINE_IATA table (fos_pages.py) keyed on the ICAO code.
+    airline_icao = text("general/icao_airline")
+    airline_iata_raw = text("general/iata_airline")
     fields = {
         "flight_number": text("general/flight_number"),
+        "airline_icao": airline_icao,
+        # airline_iata() falls back to a truncated ICAO code ("XX" if even
+        # that's blank) when it has nothing better — only worth calling
+        # when there's a real ICAO or IATA code to work from, otherwise
+        # this field should stay blank so the caller's own fallback chain
+        # (PBS pairing operator, then no prefix at all) can take over.
+        "airline_iata": airline_iata(airline_icao, airline_iata_raw) if (airline_icao or airline_iata_raw) else "",
         "origin": text("origin/icao_code"),
         "destination": text("destination/icao_code"),
         # Enroute waypoints only (no orig/dest) — same general/route path

@@ -193,9 +193,38 @@ def _station_time_html(pairing_sched, current_sched, est):
     late = bool(minutes_late and minutes_late > 0)
     css_class = "est-time late" if late else "est-time"
     html_out = f'<span class="{css_class}">{html.escape(shown)}</span>'
-    if pairing_sched and shown != pairing_sched:
-        html_out += f'<span class="sched-time">{html.escape(pairing_sched)}</span>'
+    # Always render the second line when a pairing time exists — even when
+    # it matches (on time) — instead of only when it differs. A card that
+    # sometimes has one line and sometimes two threw off vertical alignment
+    # against neighboring cards; struck-through only applies when the two
+    # values actually diverge.
+    if pairing_sched:
+        superseded = " superseded" if shown != pairing_sched else ""
+        html_out += f'<span class="sched-time{superseded}">{html.escape(pairing_sched)}</span>'
     return html_out
+
+
+def _fmt_display_date(mmddyy):
+    """"07/06/26" -> "JUL 06", mobileCCI-style. Blank in, blank out (a
+    PBS-only leg has no real dep_date yet — see pbs_leg_to_fos_leg)."""
+    mmddyy = (mmddyy or "").strip()
+    if not mmddyy:
+        return ""
+    try:
+        dt = datetime.strptime(mmddyy, "%m/%d/%y")
+    except ValueError:
+        return mmddyy
+    return dt.strftime("%b %d").upper()
+
+
+def _fmt_duration_hm(hhmm):
+    """"02:27" -> "02h 27m". Blank/unparseable in, blank out."""
+    hhmm = (hhmm or "").strip()
+    try:
+        h, m = hhmm.split(":")
+        return f"{int(h):02d}h {int(m):02d}m"
+    except ValueError:
+        return hhmm
 
 
 def _js_str(s):
@@ -392,6 +421,8 @@ DEFAULT_LEG = {
     # against what was published. Keeping the pairing's time in a separate,
     # SimBrief-untouched field is what render_fos_html now compares against.
     "pairing_sched_out": "", "pairing_sched_in": "",
+    "airline_iata": "", "airline_icao": "",
+    "pending_date_slip": None,
     "est_out": "", "est_in": "", "dep_gate": "", "arr_gate": "",
     "fleet_type": "", "equipment_type": "", "tail_number": "", "tail_routing": "",
     "aircraft_name": "", "fin": "", "engines": "", "selcal": "", "seat_capacity": "",
@@ -569,6 +600,22 @@ def _store_leg(leg):
         # already explicit here before the refactor — kept explicit).
         merged["signed_in"] = existing.data.get("signed_in") or leg.get("signed_in", False)
         merged["fit_for_duty"] = existing.data.get("fit_for_duty") or leg.get("fit_for_duty", False)
+        # A genuine date slip: this merge just moved dep_date off whatever
+        # it was a moment ago (both sides real dates, not "" -> a date,
+        # which is just the leg's first-ever date assignment, not a
+        # slip). Flags it for the Overview lockout popup instead of
+        # silently accepting it — a day-late reroute like the reported
+        # PHX-RNO-after-a-diversion case shouldn't quietly become "normal"
+        # without the pilot confirming it. Left alone (not re-derived) when
+        # no new slip is found this round, so an already-pending one
+        # survives an unrelated field update.
+        old_dep_date = (existing.data.get("dep_date") or "").strip()
+        new_dep_date = (merged.get("dep_date") or "").strip()
+        if old_dep_date and new_dep_date and old_dep_date != new_dep_date:
+            merged["pending_date_slip"] = {
+                "old_dep_date": old_dep_date, "new_dep_date": new_dep_date,
+                "new_sched_out": merged.get("sched_out", ""), "new_sched_in": merged.get("sched_in", ""),
+            }
         existing.data = merged
         existing.flight_number = merged.get("flight_number")
         existing.dep_date = merged.get("dep_date")
@@ -724,6 +771,7 @@ def get_pbs_sequence(seq_number):
     out = dict(seq)
     operator_iata = _pbs_meta().get("operator", "").upper()
     out["operator"] = _IATA_TO_ICAO.get(operator_iata, operator_iata)
+    out["operator_iata"] = operator_iata
     out["duty_days"] = [
         {**day, "legs": [
             {
@@ -831,6 +879,34 @@ def toggle_bookmark(leg_id):
         bookmarked.append(doc)
     data = _save_leg(row, {**row.data, "bookmarked_docs": bookmarked})
     return jsonify({"bookmarked_docs": data.get("bookmarked_docs", [])})
+
+
+@app.route("/fos/<int:leg_id>/resolve-date-slip", methods=["POST"])
+def resolve_date_slip(leg_id):
+    """Answers the full-screen lockout popup _store_leg's date-slip
+    detection triggers. Confirm hard-overwrites pairing_sched_out/in (the
+    strikethrough/on-time baseline — see DEFAULT_LEG) with the new day's
+    time, so the redispatched schedule becomes the accepted one instead of
+    permanently reading as "late" against a schedule that no longer
+    applies. Reject just dismisses the popup — dep_date/sched_out already
+    reflect the new day either way (that happened at merge time, before
+    this popup ever shows), only the pairing baseline is what's gated on
+    this decision."""
+    row = _get_leg_row(leg_id)
+    if not row:
+        return jsonify({"error": "not found"}), 404
+    body = request.get_json(silent=True) or {}
+    action = body.get("action")
+    if action not in ("confirm", "reject"):
+        return jsonify({"error": "action must be 'confirm' or 'reject'"}), 400
+    slip = row.data.get("pending_date_slip")
+    new_data = dict(row.data)
+    if action == "confirm" and slip:
+        new_data["pairing_sched_out"] = slip.get("new_sched_out") or new_data.get("pairing_sched_out")
+        new_data["pairing_sched_in"] = slip.get("new_sched_in") or new_data.get("pairing_sched_in")
+    new_data["pending_date_slip"] = None
+    data = _save_leg(row, new_data)
+    return jsonify({"id": data["id"], "pairing_sched_out": data.get("pairing_sched_out"), "pairing_sched_in": data.get("pairing_sched_in")})
 
 
 @app.route("/fos/<int:leg_id>/prefile")
@@ -1197,6 +1273,15 @@ def render_fos_html(leg):
     # bug that kept showing pre-delay times after a redispatch.
     ctx["dep_time_html"] = _station_time_html(ctx.get("pairing_sched_out") or ctx.get("sched_out"), ctx.get("sched_out"), ctx.get("est_out"))
     ctx["arr_time_html"] = _station_time_html(ctx.get("pairing_sched_in") or ctx.get("sched_in"), ctx.get("sched_in"), ctx.get("est_in"))
+    ctx["dep_date_display"] = _fmt_display_date(ctx.get("dep_date"))
+    ctx["arr_date_display"] = _fmt_display_date(ctx.get("arr_date"))
+    ctx["flight_time_display"] = _fmt_duration_hm(ctx.get("flight_time"))
+    # IATA prefix on the flight number wherever it's displayed (especially
+    # the Schedule pill strip — see initOverviewPills()); ICAO is the
+    # fallback when SimBrief never reported an IATA code (fetch_ofp_leg_
+    # fields' comment on why that happens), and a bare flight number is
+    # the last resort for a leg with no known operator at all.
+    ctx["flight_designator"] = (ctx.get("airline_iata") or ctx.get("airline_icao") or "") + ctx.get("flight_number", "")
     ctx["fleet_type_icao"] = _fleet_type_icao(ctx.get("fleet_type", ""))
     # Overview shows two parallel readings of the same aircraft: Fleet Type
     # stays the raw PBS sub-fleet code (e.g. "32A"), Equipment Type is the
@@ -1228,6 +1313,7 @@ def render_fos_html(leg):
     bookmarked = bookmarked if isinstance(bookmarked, list) else []
     ctx["saved_docs_count"] = str(len(bookmarked))
     ctx["bookmarked_docs_json"] = json.dumps(bookmarked)
+    ctx["pending_date_slip_json"] = json.dumps(ctx.get("pending_date_slip") or None)
     # Neither PBS nor a SimBrief OFP ever carries a flight "status" — it's
     # not data either source has. Derive one locally from what this app
     # actually tracks rather than leaving it permanently blank.
@@ -1630,7 +1716,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <link rel="icon" href="/static/icon-192.png">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-<title>Flight $flight_number \u2013 MobileCCI</title>
+<title>Flight $flight_designator \u2013 MobileCCI</title>
 <style>
   :root{
     --navy:#1d1d1f; --blue:#0071e3; --blue-dark:#0058a8;
@@ -1681,7 +1767,8 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .flight-card .station-code{font-size:27px;font-weight:800;}
   .flight-card .est-time{font-size:18px;font-weight:700;color:var(--green);}
   .flight-card .est-time.late{color:var(--red);}
-  .flight-card .sched-time{display:block;font-size:13px;color:var(--label);text-decoration:line-through;}
+  .flight-card .sched-time{display:block;font-size:13px;color:var(--label);}
+  .flight-card .sched-time.superseded{text-decoration:line-through;}
   .flight-card .station-gate{font-size:17px;font-weight:700;color:var(--blue);margin-top:4px;}
   .flight-card-dur{flex:0 0 auto;align-self:center;display:flex;align-items:center;gap:4px;font-size:15px;font-weight:700;color:var(--label);white-space:nowrap;padding:0 8px;}
   .flight-card-dur .dur-chevron{width:11px;height:11px;color:var(--inactive);flex:0 0 auto;}
@@ -1772,6 +1859,16 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .view.active{display:block;}
   #toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(12px);background:#1a1f29;color:#fff;padding:9px 16px;border-radius:20px;font-size:13px;opacity:0;pointer-events:none;transition:opacity .18s ease, transform .18s ease;box-shadow:0 4px 14px rgba(0,0,0,.25);z-index:10;}
   #toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
+  #date-slip-modal{display:none;position:fixed;inset:0;z-index:50;background:var(--bg);align-items:center;justify-content:center;padding:24px;}
+  #date-slip-modal.show{display:flex;}
+  .date-slip-card{max-width:400px;width:100%;background:var(--card);border-radius:18px;border:1px solid var(--border);padding:28px 24px;text-align:center;box-shadow:0 8px 30px rgba(0,0,0,.25);}
+  .date-slip-card .ds-icon{width:44px;height:44px;color:var(--red);margin-bottom:14px;}
+  .date-slip-card h2{font-size:19px;margin:0 0 10px;color:var(--value);}
+  .date-slip-card p{font-size:14.5px;color:var(--label);margin:0 0 22px;line-height:1.5;}
+  .date-slip-card .ds-actions{display:flex;gap:10px;}
+  .date-slip-card button{flex:1;font-family:inherit;font-size:15px;font-weight:700;padding:13px 0;border-radius:10px;border:none;cursor:pointer;}
+  .date-slip-card .ds-reject{background:var(--bg);color:var(--value);border:1px solid var(--border);}
+  .date-slip-card .ds-confirm{background:var(--blue);color:#fff;}
   @media (max-width:640px){
     .content-grid{grid-template-columns:1fr;}
     .col-divider{border-right:none;border-bottom:6px solid var(--bg);}
@@ -1784,6 +1881,17 @@ FOS_TEMPLATE = """<!DOCTYPE html>
 </style>
 </head>
 <body>
+<div id="date-slip-modal">
+  <div class="date-slip-card">
+    <svg class="ds-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v5"/><path d="M12 16h.01"/></svg>
+    <h2 id="ds-title">Flight delayed</h2>
+    <p id="ds-body"></p>
+    <div class="ds-actions">
+      <button type="button" class="ds-reject" onclick="resolveDateSlip('reject')">Reject</button>
+      <button type="button" class="ds-confirm" onclick="resolveDateSlip('confirm')">Confirm</button>
+    </div>
+  </div>
+</div>
 <div class="app-shell">
   <main class="main">
     <section id="overview-view" class="view active">
@@ -1807,14 +1915,14 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           <div class="panel-card">
             <div class="flight-card">
               <div class="station">
-                <div class="station-date">$dep_date</div>
+                <div class="station-date">$dep_date_display</div>
                 <div class="station-code">$origin</div>
                 <div>$dep_time_html</div>
                 <div class="station-gate" id="ov-dep-gate">$dep_gate</div>
               </div>
-              <div class="flight-card-dur"><svg class="dur-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg><span>$flight_time</span><svg class="dur-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></div>
+              <div class="flight-card-dur"><svg class="dur-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg><span>$flight_time_display</span><svg class="dur-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></div>
               <div class="station dest">
-                <div class="station-date">$arr_date</div>
+                <div class="station-date">$arr_date_display</div>
                 <div class="station-code">$destination</div>
                 <div>$arr_time_html</div>
                 <div class="station-gate" id="ov-arr-gate">$arr_gate</div>
@@ -2053,7 +2161,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
       <div class="topbar">
         <button class="back-link" onclick="showView('overview')" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
         <div class="topbar-title">
-          <h1>Flight $flight_number</h1>
+          <h1>Flight $flight_designator</h1>
           <p>Send to SimBrief</p>
         </div>
       </div>
@@ -2155,13 +2263,13 @@ FOS_TEMPLATE = """<!DOCTYPE html>
       <div class="topbar">
         <button class="back-link" onclick="showView('overview')" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
         <div class="topbar-title">
-          <h1>Flight $flight_number</h1>
+          <h1>Flight $flight_designator</h1>
           <p>Confirm &amp; Generate Release</p>
         </div>
       </div>
       <div class="status-bar"><span>SEQ $seq</span><span>$date</span></div>
       <div class="flight-summary">
-        <div class="fnum">$flight_number</div>
+        <div class="fnum">$flight_designator</div>
         <div class="col"><span>$origin</span><span>$destination</span></div>
         <div class="col"><span>$dep_date</span><span>$arr_date</span></div>
         <div class="col"><span>$sched_out</span><span>$sched_in</span></div>
@@ -2230,6 +2338,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
 <script>
 const LEG_ID = "$leg_id";
 const LEG_FLIGHT_NUMBER = "$flight_number";
+const LEG_FLIGHT_DESIGNATOR = "$flight_designator";
 const LEG_ORIGIN = "$origin";
 const LEG_DESTINATION = "$destination";
 const LEG_ROUTE = "$route";
@@ -2244,6 +2353,7 @@ const LEG_DEP_DATE = "$dep_date";
 const LEG_ARR_DATE = "$arr_date";
 const LEG_SCHED_IN = "$sched_in";
 const LEG_BOOKMARKED_DOCS = $bookmarked_docs_json;
+const LEG_PENDING_DATE_SLIP = $pending_date_slip_json;
 function showView(view){
   document.getElementById('overview-view').classList.toggle('active', view==='overview');
   document.getElementById('allcommands-view').classList.toggle('active', view==='allcommands');
@@ -2376,6 +2486,36 @@ function startAutoSync(){
 }
 function stopAutoSync(){
   if(_autoSyncTimer){ clearInterval(_autoSyncTimer); _autoSyncTimer = null; }
+}
+
+// Date-slip lockout: _store_leg (server.py) flags this leg when a sync
+// actually moves dep_date off what it was — a real day slip like a
+// diversion pushing a leg into the next morning, not just a same-day
+// delay. Blocks the page until the pilot explicitly confirms (accepts the
+// new day as the pairing's schedule going forward) or rejects (dismisses
+// without changing the pairing baseline — see resolve_date_slip's own
+// docstring for exactly what each does server-side).
+function _fmtDateMDY(mmddyy){
+  const months = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+  const parts = (mmddyy || '').split('/');
+  if(parts.length !== 3) return mmddyy || '';
+  const mi = parseInt(parts[0], 10) - 1;
+  return (months[mi] || parts[0]) + ' ' + parts[1];
+}
+function showDateSlipModalIfPending(){
+  if(!LEG_PENDING_DATE_SLIP) return;
+  const slip = LEG_PENDING_DATE_SLIP;
+  document.getElementById('ds-title').textContent = 'FLT ' + (LEG_FLIGHT_DESIGNATOR || LEG_FLIGHT_NUMBER) + ' delayed';
+  document.getElementById('ds-body').textContent =
+    'Now departing ' + (slip.new_sched_out || '?') + ' on ' + _fmtDateMDY(slip.new_dep_date) +
+    ". Confirm to accept this as the pairing's new scheduled time, or reject to dismiss.";
+  document.getElementById('date-slip-modal').classList.add('show');
+}
+async function resolveDateSlip(action){
+  try {
+    await fetch('/fos/' + LEG_ID + '/resolve-date-slip', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action})});
+  } catch(e) { /* best-effort — reload either way rather than leaving a stuck lockout */ }
+  window.location.reload();
 }
 function initReleaseView(){
   prefillSimbriefGen();
@@ -2790,6 +2930,7 @@ function renderPairing(seqData){
   const body = document.getElementById('pairing-body');
   body.innerHTML = '';
   const position = LEG_POSITION || (seqData.positions && seqData.positions[0]) || '';
+  const flightPrefix = seqData.operator_iata || seqData.operator || '';
 
   const dutyDays = seqData.duty_days || [];
   const totalLegs = dutyDays.reduce((n, d) => n + (d.legs || []).length, 0);
@@ -2843,7 +2984,7 @@ function renderPairing(seqData){
       const left = document.createElement('div');
       const code = document.createElement('div');
       code.className = 'code';
-      code.textContent = leg.flight_number || '—';
+      code.textContent = leg.flight_number ? flightPrefix + leg.flight_number : '—';
       const desc = document.createElement('div');
       desc.className = 'desc';
       desc.textContent = leg.origin + '→' + leg.destination + ' ' + leg.dep_local + '/' + leg.arr_local;
@@ -3051,6 +3192,11 @@ async function initOverviewPills(){
     if(!r.ok) return;
     const seqData = await r.json();
     const position = LEG_POSITION || (seqData.positions && seqData.positions[0]) || '';
+    // Whole pairing shares one carrier — prefer its IATA code, falling
+    // back to ICAO when the bid pack's operator code isn't a real IATA
+    // 2-letter (rare, but _IATA_TO_ICAO passes an unmapped code through
+    // unchanged server-side).
+    const flightPrefix = seqData.operator_iata || seqData.operator || '';
     for(const day of (seqData.duty_days || [])){
       const legs = day.legs || [];
       // ICAO-normalized match — see prefillSimbriefGen()'s identical fix
@@ -3062,7 +3208,7 @@ async function initOverviewPills(){
       legs.forEach((l, i) => {
         const pill = document.createElement('button');
         pill.className = 'leg-pill' + (i === idx ? ' selected' : '');
-        pill.textContent = l.flight_number || '—';
+        pill.textContent = (l.flight_number ? flightPrefix + l.flight_number : '—');
         if(i !== idx) pill.onclick = () => generatePairingLeg(seqData.seq, day.duty_day, i, position);
         strip.appendChild(pill);
       });
@@ -3308,6 +3454,7 @@ function renderWeather(stations){
   const view = params.get('view');
   if(view === 'pairing' || view === 'release' || view === 'confirm') showView(view);
   else initOverviewPills();
+  showDateSlipModalIfPending();
   startAutoSync();
 })();
 </script>

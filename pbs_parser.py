@@ -185,6 +185,9 @@ def pbs_leg_to_fos_leg(meta, seq, day, leg, position):
         "seq": seq["seq"],
         "date": "",
         "base": meta.get("base", ""),
+        # The bid-pack's own "OPERATOR / FLEET" line — real AA PBS exports
+        # give the carrier's 2-letter IATA code there (e.g. "AA"), not ICAO.
+        "airline_iata": meta.get("operator", ""),
         "flight_number": leg["flight_number"],
         "origin": leg["origin"], "destination": leg["destination"],
         "dep_date": "", "arr_date": "",
