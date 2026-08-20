@@ -686,7 +686,22 @@ def generate():
             src_row = _get_leg_row(int(carry_from))
         except (TypeError, ValueError):
             src_row = None
-        if src_row:
+        # Only trust carry_from's fields (saved docs, gates, hotel, the
+        # pairing baseline, etc.) when it's genuinely the SAME real flight
+        # as what just got built — not just "whatever leg id the client
+        # happened to be viewing." carry_gates_from is sent unconditionally
+        # by every SimBrief sync/regenerate call; if the pilot's SimBrief
+        # account turns out to have a different flight on it than the one
+        # they were viewing (e.g. the flight number got changed on
+        # SimBrief's own dispatch page before generating), blindly copying
+        # src_row's fields would leak that other flight's saved docs onto
+        # this one — the reported "stray docs from other legs" bug.
+        if (
+            src_row
+            and src_row.data.get("flight_number") == leg.get("flight_number")
+            and _airport_icao(src_row.data.get("origin", "")) == _airport_icao(leg.get("origin", ""))
+            and _airport_icao(src_row.data.get("destination", "")) == _airport_icao(leg.get("destination", ""))
+        ):
             for key in (
                 "seq", "position", "base", "duty_time", "ground_time",
                 "hotel_details", "limo_details", "dep_gate", "arr_gate",
@@ -1912,7 +1927,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .doc-row .actions svg{width:19px;height:19px;color:var(--label);cursor:pointer;padding:7px;margin:-7px;box-sizing:content-box;}
   .doc-row .check{color:var(--inactive,#9aa1ab);cursor:pointer;}
   .doc-row .check.signed{color:var(--blue-dark);}
-  .doc-row .actions svg.bookmark-icon.bookmarked{color:var(--blue);}
+  .doc-row .actions svg.bookmark-icon.bookmarked{color:var(--blue);fill:var(--blue);}
   .doc-row .actions svg.ext-link{color:var(--blue);}
   #sign-pad{touch-action:none;background:#fff;border:1px solid var(--border);border-radius:6px;width:100%;height:220px;}
   .placeholder-note{padding:12px 14px;color:var(--label);font-style:italic;font-size:13px;background:var(--card);}
