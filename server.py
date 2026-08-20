@@ -1558,7 +1558,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .flight-card .station{flex:1;display:flex;flex-direction:column;gap:2px;min-width:0;}
   .flight-card .station.dest{align-items:flex-end;text-align:right;}
   .flight-card .station-date{font-size:10.5px;color:var(--label);text-transform:uppercase;letter-spacing:.02em;}
-  .flight-card .station-code{font-size:19px;font-weight:700;}
+  .flight-card .station-code{font-size:20px;font-weight:800;}
   .flight-card .est-time{font-size:14px;font-weight:700;color:var(--green);}
   .flight-card .est-time.late{color:var(--red);}
   .flight-card .sched-time{font-size:11px;color:var(--label);text-decoration:line-through;margin-left:5px;}
@@ -1569,17 +1569,17 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .leg-pill{flex:0 0 auto;font-family:inherit;font-size:14px;font-weight:600;padding:8px 17px;border-radius:20px;border:none;background:transparent;color:var(--value);cursor:pointer;white-space:nowrap;}
   .leg-pill.selected{background:var(--blue);color:#fff;font-weight:700;}
   .split{display:flex;gap:0;align-items:flex-start;}
-  .split-left{flex:0 0 auto;width:320px;display:flex;flex-direction:column;gap:14px;min-width:0;}
+  .split-left{flex:0 0 auto;width:340px;display:flex;flex-direction:column;gap:20px;min-width:0;}
   .split-right{flex:1;min-width:0;display:flex;flex-direction:column;gap:12px;margin-left:32px;margin-right:16px;}
   .panel-card{background:var(--card);border-radius:18px;overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,.05);border:1px solid var(--border);}
-  .panel-card-hdr{padding:12px 14px 9px;font-size:16px;font-weight:700;color:var(--value);background:var(--card);border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;}
-  .lead-icon{width:16px;height:16px;color:var(--label);flex:0 0 auto;}
-  .mot-row{padding:11px 13px;display:flex;justify-content:space-between;align-items:center;}
-  .mot-time{font-size:16px;font-weight:700;}
-  .mot-scorecard{padding:9px 13px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;color:var(--inactive);}
-  .mot-scorecard .code{font-weight:700;font-size:13.5px;color:var(--inactive);}
-  .mot-scorecard .desc{font-size:11.5px;color:var(--inactive);}
-  .mot-view{font-size:14px;font-weight:600;color:var(--inactive);}
+  .panel-card-hdr{padding:15px 17px 12px;font-size:18px;font-weight:700;color:var(--value);background:var(--card);border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;}
+  .lead-icon{width:19px;height:19px;color:var(--label);flex:0 0 auto;}
+  .mot-row{padding:14px 17px;display:flex;justify-content:space-between;align-items:center;}
+  .mot-time{font-size:18px;font-weight:700;}
+  .mot-scorecard{padding:12px 17px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;color:var(--inactive);}
+  .mot-scorecard .code{font-weight:700;font-size:15px;color:var(--inactive);}
+  .mot-scorecard .desc{font-size:13px;color:var(--inactive);}
+  .mot-view{font-size:15px;font-weight:600;color:var(--inactive);}
   .stat-row{background:var(--card);border-radius:18px;border:1px solid var(--border);overflow:hidden;}
   .stat-hdr{display:flex;justify-content:space-between;align-items:center;padding:14px 16px;cursor:pointer;font-size:16px;font-weight:700;background:none;border:none;width:100%;text-align:left;color:var(--value);}
   .stat-hdr .val{color:var(--label);font-weight:500;display:flex;align-items:center;gap:6px;font-size:16px;}
@@ -1587,7 +1587,8 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .stat-row.open .stat-hdr svg{transform:rotate(180deg);}
   .stat-body{display:none;border-top:1px solid var(--border);}
   .stat-row.open .stat-body{display:block;}
-  .stat-detail-row{display:flex;justify-content:space-between;padding:10px 15px;font-size:13.5px;border-bottom:1px solid var(--border);}
+  .stat-detail-row{position:relative;display:flex;justify-content:space-between;padding:10px 15px;font-size:13.5px;}
+  .stat-detail-row:not(:last-child)::after{content:'';position:absolute;left:15px;right:15px;bottom:0;height:1px;background:var(--border);}
   .stat-detail-row:last-child{border-bottom:none;}
   .stat-detail-row .lbl{color:var(--label);}
   .stat-detail-row .val{font-weight:600;font-variant-numeric:tabular-nums;}
@@ -1596,7 +1597,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .weight-grid .wg-lbl{font-size:9.5px;color:var(--label);text-transform:uppercase;letter-spacing:.03em;}
   .weight-grid .wg-val{font-size:12.5px;font-weight:700;color:var(--value);font-variant-numeric:tabular-nums;}
   .topbar{display:flex;flex-wrap:wrap;align-items:center;margin-bottom:10px;position:sticky;top:env(safe-area-inset-top);z-index:10;background:var(--bg);padding-top:6px;margin-top:-6px;margin-left:-16px;margin-right:-16px;padding-left:16px;padding-right:16px;}
-  .back-link{order:1;color:var(--blue-dark);font-size:15px;font-weight:500;background:none;border:none;cursor:pointer;padding:4px 2px;}
+  .back-link{order:1;display:flex;align-items:center;color:var(--value);background:none;border:none;cursor:pointer;padding:6px 4px;text-decoration:none;}
   .topbar-actions{order:2;margin-left:auto;display:flex;align-items:center;gap:14px;}
   .topbar-title{order:3;flex:1 1 100%;text-align:center;margin-top:2px;}
   .topbar-title h1{font-size:18px;margin:0;font-weight:600;color:var(--blue-dark);}
@@ -1630,9 +1631,10 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .section-bar.collapsed svg.chevron{transform:rotate(180deg);}
   .no-prefs{padding:10px 14px;color:var(--label);font-size:13px;font-style:italic;background:var(--card);border-bottom:1px solid var(--border);}
   .doc-list{background:var(--card);}
-  .doc-row{display:flex;align-items:center;justify-content:space-between;padding:12px 15px;border-bottom:1px solid var(--border);gap:10px;}
-  .doc-row .code{font-weight:700;font-size:14px;}
-  .doc-row .desc{font-size:13px;color:var(--label);margin-top:1px;}
+  .doc-row{position:relative;display:flex;align-items:center;justify-content:space-between;padding:15px 17px;gap:12px;}
+  .doc-row:not(:last-child)::after{content:'';position:absolute;left:17px;right:17px;bottom:0;height:1px;background:var(--border);}
+  .doc-row .code{font-weight:700;font-size:15.5px;}
+  .doc-row .desc{font-size:14px;color:var(--label);margin-top:2px;}
   .doc-row .actions{display:flex;align-items:center;gap:26px;flex:0 0 auto;}
   .doc-row .actions svg{width:19px;height:19px;color:var(--label);cursor:pointer;padding:7px;margin:-7px;box-sizing:content-box;}
   .doc-row .check{color:var(--inactive,#9aa1ab);cursor:pointer;}
@@ -1661,7 +1663,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   <main class="main">
     <section id="overview-view" class="view active">
       <div class="topbar">
-        <a class="back-link" href="/">Back</a>
+        <a class="back-link" href="/" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></a>
         <div class="topbar-actions">
           <button class="icon-btn" title="Settings" onclick="showView('settings')">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.34 1.87l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.7 1.7 0 00-1.87-.34 1.7 1.7 0 00-1 1.55V21a2 2 0 11-4 0v-.09A1.7 1.7 0 009 19.4a1.7 1.7 0 00-1.87.34l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.7 1.7 0 004.6 15a1.7 1.7 0 00-1.55-1H3a2 2 0 110-4h.09A1.7 1.7 0 004.6 9a1.7 1.7 0 00-.34-1.87l-.06-.06a2 2 0 112.83-2.83l.06.06A1.7 1.7 0 009 4.6a1.7 1.7 0 001-1.55V3a2 2 0 114 0v.09a1.7 1.7 0 001 1.55 1.7 1.7 0 001.87-.34l.06-.06a2 2 0 112.83 2.83l-.06.06A1.7 1.7 0 0019.4 9a1.7 1.7 0 001.55 1H21a2 2 0 110 4h-.09a1.7 1.7 0 00-1.55 1z"/></svg>
@@ -1698,7 +1700,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
                 <svg class="lead-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/><path d="M12 11v6"/><path d="M9 14l3 3 3-3"/></svg>
                 <div class="code">Saved Docs</div>
               </div>
-              <div class="val" id="ov-saved-count" style="color:var(--label);font-size:12px;">$saved_docs_count</div>
+              <div class="actions"><span class="val" id="ov-saved-count" style="color:var(--label);font-size:13px;">$saved_docs_count</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></div>
             </div>
             <div class="doc-row" style="cursor:pointer;" onclick="openOvAllCommands()">
               <div style="display:flex;align-items:center;gap:10px;">
@@ -1709,7 +1711,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
             </div>
             <div class="doc-row" style="border-bottom:none;cursor:pointer;" onclick="showToast('Not available yet')">
               <div><div class="code">Favorite Groups</div></div>
-              <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></div>
+              <div class="actions"><span style="color:var(--blue);font-weight:800;font-size:20px;letter-spacing:1px;">&bull;&bull;&bull;</span></div>
             </div>
           </div>
           <div class="panel-card">
@@ -1794,7 +1796,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
     </section>
     <section id="allcommands-view" class="view">
       <div class="topbar">
-        <button class="back-link" onclick="showView('overview')">Back</button>
+        <button class="back-link" onclick="showView('overview')" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
         <div class="topbar-title"><h1>All Commands</h1></div>
       </div>
       <div class="panel-card">
@@ -1845,7 +1847,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
     </section>
     <section id="weather-view" class="view">
       <div class="topbar">
-        <button class="back-link" onclick="showView('allcommands')">Back</button>
+        <button class="back-link" onclick="showView('allcommands')" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
         <div class="topbar-title">
           <h1>Winds &amp; Weather</h1>
           <p>WX*$origin / WX*$destination</p>
@@ -1856,7 +1858,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
 
     <section id="saveddocs-view" class="view">
       <div class="topbar">
-        <button class="back-link" onclick="showView('overview')">Back</button>
+        <button class="back-link" onclick="showView('overview')" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
         <div class="topbar-title"><h1>Saved Docs</h1></div>
       </div>
       <div id="saveddocs-body"><p class="placeholder-note">No saved documents yet.</p></div>
@@ -1864,7 +1866,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
 
     <section id="doclocker-view" class="view">
       <div class="topbar">
-        <button class="back-link" onclick="showView('overview')">Back</button>
+        <button class="back-link" onclick="showView('overview')" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
         <div class="topbar-title"><h1>Docs</h1></div>
       </div>
       <p class="placeholder-note">No documents.</p>
@@ -1872,7 +1874,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
 
     <section id="messages-view" class="view">
       <div class="topbar">
-        <button class="back-link" onclick="showView('overview')">Back</button>
+        <button class="back-link" onclick="showView('overview')" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
         <div class="topbar-title"><h1>Messages</h1></div>
       </div>
       <p class="placeholder-note">No messages.</p>
@@ -1880,7 +1882,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
 
     <section id="pdf-view" class="view">
       <div class="topbar">
-        <button class="back-link" onclick="closePdfView()">Back</button>
+        <button class="back-link" onclick="closePdfView()" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
         <div class="topbar-actions">
           <a id="pdf-export-link" style="font-size:14px;color:var(--blue-dark);text-decoration:none;font-weight:600;">Export</a>
         </div>
@@ -1893,7 +1895,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
 
     <section id="sign-view" class="view">
       <div class="topbar">
-        <button class="back-link" onclick="showView('allcommands')">Back</button>
+        <button class="back-link" onclick="showView('allcommands')" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
         <div class="topbar-title">
           <h1>Sign eFlight Plan</h1>
           <p id="sign-status-line">Acknowledges receipt of the current release</p>
@@ -1911,7 +1913,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
     </section>
     <section id="pairing-view" class="view">
       <div class="topbar">
-        <button class="back-link" onclick="showView('overview')">Back</button>
+        <button class="back-link" onclick="showView('overview')" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
         <div class="topbar-title">
           <h1>Pairing</h1>
           <p>SEQ $seq — full trip</p>
@@ -1921,7 +1923,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
     </section>
     <section id="release-view" class="view">
       <div class="topbar">
-        <button class="back-link" onclick="showView('overview')">Back</button>
+        <button class="back-link" onclick="showView('overview')" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
         <div class="topbar-title">
           <h1>Flight $flight_number</h1>
           <p>Send to SimBrief</p>
@@ -1989,7 +1991,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
     </section>
     <section id="settings-view" class="view">
       <div class="topbar">
-        <button class="back-link" onclick="showView('overview')">Back</button>
+        <button class="back-link" onclick="showView('overview')" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
         <div class="topbar-title">
           <h1>Settings</h1>
           <p>Applies to every flight on this account</p>
@@ -2007,7 +2009,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
     </section>
     <section id="confirm-view" class="view">
       <div class="topbar">
-        <button class="back-link" onclick="showView('overview')">Back</button>
+        <button class="back-link" onclick="showView('overview')" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
         <div class="topbar-title">
           <h1>Flight $flight_number</h1>
           <p>Confirm &amp; Generate Release</p>
@@ -2051,7 +2053,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
     </section>
     <section id="more-view" class="view">
       <div class="topbar">
-        <button class="back-link" onclick="showView('overview')">Back</button>
+        <button class="back-link" onclick="showView('overview')" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
         <div class="topbar-title"><h1>More</h1></div>
       </div>
       <p class="placeholder-note">Nothing here yet — SimBrief and ForeFlight moved to Overview's External Apps card; Settings is now the gear icon at top right.</p>
