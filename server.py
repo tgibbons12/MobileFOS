@@ -1506,17 +1506,17 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .tab-btn span{font-size:10px;font-weight:600;}
   .tab-btn.active{color:var(--blue-dark);}
   .tab-btn .badge{position:absolute;top:0;left:50%;margin-left:6px;width:15px;height:15px;border-radius:50%;background:var(--red);color:#fff;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;}
-  .flight-card{background:var(--card);display:flex;align-items:stretch;padding:14px;border-radius:16px;border:1px solid var(--border);box-shadow:0 1px 2px rgba(0,0,0,.05);gap:10px;margin-bottom:10px;}
+  .flight-card{display:flex;align-items:stretch;padding:12px 13px 4px;gap:8px;}
   .flight-card .station{flex:1;display:flex;flex-direction:column;gap:2px;min-width:0;}
   .flight-card .station.dest{align-items:flex-end;text-align:right;}
-  .flight-card .station-date{font-size:11px;color:var(--label);text-transform:uppercase;letter-spacing:.02em;}
-  .flight-card .station-code{font-size:22px;font-weight:700;}
-  .flight-card .est-time{font-size:15px;font-weight:700;color:var(--green);}
+  .flight-card .station-date{font-size:10.5px;color:var(--label);text-transform:uppercase;letter-spacing:.02em;}
+  .flight-card .station-code{font-size:19px;font-weight:700;}
+  .flight-card .est-time{font-size:14px;font-weight:700;color:var(--green);}
   .flight-card .est-time.late{color:var(--red);}
-  .flight-card .sched-time{font-size:12px;color:var(--label);text-decoration:line-through;margin-left:6px;}
-  .flight-card .station-gate{font-size:16px;font-weight:700;color:var(--blue);margin-top:3px;}
-  .flight-card .duration{flex:0 0 auto;display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:11px;color:var(--label);gap:4px;padding:0 4px;}
-  .flight-card .duration svg{width:18px;height:18px;color:var(--inactive);}
+  .flight-card .sched-time{font-size:11px;color:var(--label);text-decoration:line-through;margin-left:5px;}
+  .flight-card .station-gate{font-size:15px;font-weight:700;color:var(--blue);margin-top:2px;}
+  .flight-card-dur{text-align:center;font-size:10.5px;color:var(--label);padding:0 13px 11px;}
+  .flight-card-dur svg{width:15px;height:15px;color:var(--inactive);vertical-align:middle;margin-right:4px;}
   .pill-strip{display:flex;gap:8px;overflow-x:auto;padding:8px 0 12px;scrollbar-width:none;}
   .pill-strip::-webkit-scrollbar{display:none;}
   .leg-pill{flex:0 0 auto;font-family:inherit;font-size:13px;font-weight:600;padding:7px 16px;border-radius:20px;border:none;background:transparent;color:var(--value);cursor:pointer;white-space:nowrap;}
@@ -1620,27 +1620,29 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           <h1 style="color:var(--value);">SEQ $seq</h1>
         </div>
       </div>
-      <div class="flight-card">
-        <div class="station">
-          <div class="station-date">$dep_date</div>
-          <div class="station-code">$origin</div>
-          <div>$dep_time_html</div>
-          <div class="station-gate" id="ov-dep-gate">$dep_gate</div>
-        </div>
-        <div class="duration">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6-13v13m6 0l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"/></svg>
-          $flight_time
-        </div>
-        <div class="station dest">
-          <div class="station-date">$arr_date</div>
-          <div class="station-code">$destination</div>
-          <div>$arr_time_html</div>
-          <div class="station-gate" id="ov-arr-gate">$arr_gate</div>
-        </div>
-      </div>
       <div class="pill-strip" id="ov-pill-strip"></div>
       <div class="split">
         <div class="split-left">
+          <div class="panel-card">
+            <div class="flight-card">
+              <div class="station">
+                <div class="station-date">$dep_date</div>
+                <div class="station-code">$origin</div>
+                <div>$dep_time_html</div>
+                <div class="station-gate" id="ov-dep-gate">$dep_gate</div>
+              </div>
+              <div class="station dest">
+                <div class="station-date">$arr_date</div>
+                <div class="station-code">$destination</div>
+                <div>$arr_time_html</div>
+                <div class="station-gate" id="ov-arr-gate">$arr_gate</div>
+              </div>
+            </div>
+            <div class="flight-card-dur">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6-13v13m6 0l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"/></svg>
+              $flight_time
+            </div>
+          </div>
           <div class="panel-card" id="ov-docs-card">
             <div class="panel-card-hdr">Preflight Docs</div>
             <div class="doc-row" style="cursor:pointer;" onclick="showToast('No saved docs yet')">
