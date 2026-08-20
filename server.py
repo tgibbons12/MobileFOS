@@ -1522,7 +1522,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .leg-pill.selected{background:var(--blue);color:#fff;font-weight:700;}
   .split{display:flex;gap:0;align-items:flex-start;}
   .split-left{flex:0 0 auto;width:310px;display:flex;flex-direction:column;gap:12px;min-width:0;}
-  .split-right{flex:0 1 400px;min-width:0;display:flex;flex-direction:column;gap:10px;margin-left:24px;}
+  .split-right{flex:1;min-width:0;display:flex;flex-direction:column;gap:10px;margin-left:32px;margin-right:16px;}
   .panel-card{background:var(--card);border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,.05);border:1px solid var(--border);}
   .panel-card-hdr{padding:11px 13px 8px;font-size:15px;font-weight:700;color:var(--value);background:var(--card);border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;}
   .lead-icon{width:16px;height:16px;color:#5b6472;flex:0 0 auto;}
@@ -1600,7 +1600,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
     .flight-card .station-code{font-size:19px;}
     .split{flex-direction:column;}
     .split-left{width:100%;}
-    .split-right{margin-left:0;margin-top:2px;width:100%;flex-basis:auto;}
+    .split-right{margin-left:0;margin-right:0;margin-top:2px;width:100%;}
   }
 </style>
 </head>
