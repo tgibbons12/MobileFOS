@@ -461,7 +461,18 @@ def _store_leg(leg):
         # that, silently discarding the auto-sign-in this same session added.
         signed_in = existing.data.get("signed_in") or leg.get("signed_in", False)
         ffd = existing.data.get("fit_for_duty") or leg.get("fit_for_duty", False)
-        merged = {**existing.data, **leg, "signed_in": signed_in, "fit_for_duty": ffd}
+        # Same reasoning as signed_in/fit_for_duty above: neither a PBS
+        # re-import nor a SimBrief regenerate ever carries gate data of its
+        # own, so a blank incoming value here means "this source doesn't
+        # know," not "clear the gate" — a real previously-applied (AeroAPI
+        # or SimBrief) gate should survive re-merging, not get silently
+        # wiped back to blank.
+        dep_gate = leg.get("dep_gate") or existing.data.get("dep_gate", "")
+        arr_gate = leg.get("arr_gate") or existing.data.get("arr_gate", "")
+        merged = {
+            **existing.data, **leg, "signed_in": signed_in, "fit_for_duty": ffd,
+            "dep_gate": dep_gate, "arr_gate": arr_gate,
+        }
         existing.data = merged
         existing.flight_number = merged.get("flight_number")
         existing.dep_date = merged.get("dep_date")
