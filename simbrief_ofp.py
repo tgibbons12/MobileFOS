@@ -75,6 +75,28 @@ def fetch_ofp_leg_fields(simbrief_user, timeout=15):
         except ValueError:
             return ""
 
+    def epoch_to_local_hhmm(path, tz_path):
+        """sched_out/est_out/sched_in/est_in are zulu epoch timestamps —
+        epoch_to() above formats them straight in UTC. Treating that as
+        already-local (this function's predecessor) showed the wrong
+        wall-clock time next to a PBS leg's genuinely-local scheduled time.
+        Shifts by the OFP's own orig_timezone/dest_timezone hour offset,
+        same approach MASTERLOG.py's convert_to_local_time() already uses
+        for the printed release — not a new guess."""
+        zulu = epoch_to("%H:%M", path)
+        if not zulu:
+            return ""
+        offset_raw = text(tz_path)
+        if not offset_raw:
+            return zulu
+        try:
+            offset = int(float(offset_raw))
+        except ValueError:
+            return zulu
+        h, m = zulu.split(":")
+        local_h = (int(h) + offset) % 24
+        return f"{local_h:02d}:{m}"
+
     # SimBrief's <crew> block: cpt/fo are the pilots, pu is the purser (lead
     # flight attendant — aboard the aircraft, unlike dx the dispatcher who
     # stays on the ground and is excluded here), and fa repeats once per
@@ -129,10 +151,10 @@ def fetch_ofp_leg_fields(simbrief_user, timeout=15):
         "tz_diff": tz_diff(),
         "dep_date": epoch_to("%m/%d/%y", "times/sched_out"),
         "arr_date": epoch_to("%m/%d/%y", "times/sched_in"),
-        "sched_out": epoch_to("%H:%M", "times/sched_out"),
-        "sched_in": epoch_to("%H:%M", "times/sched_in"),
-        "est_out": epoch_to("%H:%M", "times/est_out"),
-        "est_in": epoch_to("%H:%M", "times/est_in"),
+        "sched_out": epoch_to_local_hhmm("times/sched_out", "times/orig_timezone"),
+        "sched_in": epoch_to_local_hhmm("times/sched_in", "times/dest_timezone"),
+        "est_out": epoch_to_local_hhmm("times/est_out", "times/orig_timezone"),
+        "est_in": epoch_to_local_hhmm("times/est_in", "times/dest_timezone"),
         "tail_number": text("aircraft/reg"),
         "fleet_type": text("aircraft/icaocode"),
         # Aircraft detail popup fields — same paths fos_pages.py/MASTERLOG.py

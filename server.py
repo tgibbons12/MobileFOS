@@ -1515,15 +1515,14 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .flight-card .est-time.late{color:var(--red);}
   .flight-card .sched-time{font-size:11px;color:var(--label);text-decoration:line-through;margin-left:5px;}
   .flight-card .station-gate{font-size:15px;font-weight:700;color:var(--blue);margin-top:2px;}
-  .flight-card-dur{text-align:center;font-size:10.5px;color:var(--label);padding:0 13px 11px;}
-  .flight-card-dur svg{width:15px;height:15px;color:var(--inactive);vertical-align:middle;margin-right:4px;}
+  .flight-card-dur{flex:0 0 auto;align-self:center;font-size:11px;color:var(--label);white-space:nowrap;padding:0 6px;}
   .pill-strip{display:flex;gap:8px;overflow-x:auto;padding:8px 0 12px;scrollbar-width:none;}
   .pill-strip::-webkit-scrollbar{display:none;}
   .leg-pill{flex:0 0 auto;font-family:inherit;font-size:13px;font-weight:600;padding:7px 16px;border-radius:20px;border:none;background:transparent;color:var(--value);cursor:pointer;white-space:nowrap;}
   .leg-pill.selected{background:var(--blue);color:#fff;font-weight:700;}
   .split{display:flex;gap:0;align-items:flex-start;}
-  .split-left{flex:0 0 auto;width:260px;display:flex;flex-direction:column;gap:12px;min-width:0;}
-  .split-right{flex:1;min-width:0;display:flex;flex-direction:column;gap:10px;margin-left:12px;}
+  .split-left{flex:0 0 auto;width:310px;display:flex;flex-direction:column;gap:12px;min-width:0;}
+  .split-right{flex:0 1 400px;min-width:0;display:flex;flex-direction:column;gap:10px;margin-left:24px;}
   .panel-card{background:var(--card);border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,.05);border:1px solid var(--border);}
   .panel-card-hdr{padding:11px 13px 8px;font-size:15px;font-weight:700;color:var(--value);background:var(--card);border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;}
   .lead-icon{width:16px;height:16px;color:#5b6472;flex:0 0 auto;}
@@ -1601,7 +1600,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
     .flight-card .station-code{font-size:19px;}
     .split{flex-direction:column;}
     .split-left{width:100%;}
-    .split-right{margin-left:0;margin-top:2px;}
+    .split-right{margin-left:0;margin-top:2px;width:100%;flex-basis:auto;}
   }
 </style>
 </head>
@@ -1631,6 +1630,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
                 <div>$dep_time_html</div>
                 <div class="station-gate" id="ov-dep-gate">$dep_gate</div>
               </div>
+              <div class="flight-card-dur">$flight_time</div>
               <div class="station dest">
                 <div class="station-date">$arr_date</div>
                 <div class="station-code">$destination</div>
@@ -1638,14 +1638,10 @@ FOS_TEMPLATE = """<!DOCTYPE html>
                 <div class="station-gate" id="ov-arr-gate">$arr_gate</div>
               </div>
             </div>
-            <div class="flight-card-dur">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6-13v13m6 0l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"/></svg>
-              $flight_time
-            </div>
           </div>
           <div class="panel-card" id="ov-docs-card">
             <div class="panel-card-hdr">Preflight Docs</div>
-            <div class="doc-row" style="cursor:pointer;" onclick="showToast('No saved docs yet')">
+            <div class="doc-row" style="cursor:pointer;" onclick="showView('doclocker')">
               <div style="display:flex;align-items:center;gap:10px;">
                 <svg class="lead-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/><path d="M12 11v6"/><path d="M9 14l3 3 3-3"/></svg>
                 <div class="code">Saved Docs</div>
@@ -1760,7 +1756,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         <input id="doc-search" type="text" placeholder="">
       </div>
       <div class="doc-list">
-        <div class="doc-row" style="cursor:pointer;" onclick="showToast('No saved docs yet')">
+        <div class="doc-row" style="cursor:pointer;" onclick="showView('doclocker')">
           <div><div class="code">Saved Docs</div></div>
           <div class="val" style="color:var(--label);font-size:13px;">0</div>
         </div>
@@ -1860,6 +1856,22 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         </div>
       </div>
       <div id="weather-body"><p class="placeholder-note">Loading\u2026</p></div>
+    </section>
+
+    <section id="doclocker-view" class="view">
+      <div class="topbar">
+        <button class="back-link" onclick="showView('overview')">Back</button>
+        <div class="topbar-title"><h1>Saved Docs</h1></div>
+      </div>
+      <div id="doclocker-body"><p class="placeholder-note">No saved documents yet.</p></div>
+    </section>
+
+    <section id="messages-view" class="view">
+      <div class="topbar">
+        <button class="back-link" onclick="showView('overview')">Back</button>
+        <div class="topbar-title"><h1>Messages</h1></div>
+      </div>
+      <p class="placeholder-note">No messages.</p>
     </section>
 
     <section id="pdf-view" class="view">
@@ -2067,12 +2079,11 @@ FOS_TEMPLATE = """<!DOCTYPE html>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18"/><path d="M8 3v4M16 3v4"/></svg>
       <span>Schedule</span>
     </button>
-    <button class="tab-btn" id="tab-messages" onclick="showToast('Messages')">
+    <button class="tab-btn" id="tab-messages" onclick="showView('messages')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 6l9 7 9-7"/></svg>
-      <span class="badge">1</span>
       <span>Messages</span>
     </button>
-    <button class="tab-btn" id="tab-docs" onclick="showView('documents')">
+    <button class="tab-btn" id="tab-docs" onclick="showView('doclocker')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5"/><path d="M9.5 13h5M9.5 16h5"/></svg>
       <span>Docs</span>
     </button>
@@ -2109,11 +2120,14 @@ function showView(view){
   document.getElementById('sign-view').classList.toggle('active', view==='sign');
   document.getElementById('pairing-view').classList.toggle('active', view==='pairing');
   document.getElementById('weather-view').classList.toggle('active', view==='weather');
+  document.getElementById('doclocker-view').classList.toggle('active', view==='doclocker');
+  document.getElementById('messages-view').classList.toggle('active', view==='messages');
   document.getElementById('settings-view').classList.toggle('active', view==='settings');
   document.getElementById('more-view').classList.toggle('active', view==='more');
   document.getElementById('tab-overview').classList.toggle('active', view==='overview');
   document.getElementById('tab-schedule').classList.toggle('active', view==='pairing');
-  document.getElementById('tab-docs').classList.toggle('active', view==='documents');
+  document.getElementById('tab-docs').classList.toggle('active', view==='doclocker');
+  document.getElementById('tab-messages').classList.toggle('active', view==='messages');
   // Release/Confirm/Settings/More are all reached through the More tab now
   // (mobileCCI's five-tab bar has no dedicated Release/Settings icon).
   document.getElementById('tab-more').classList.toggle('active', view==='release' || view==='confirm' || view==='settings' || view==='more');
@@ -2121,6 +2135,7 @@ function showView(view){
   if(view === 'release') initReleaseView();
   if(view === 'confirm') initConfirmView();
   if(view === 'sign') initSignPad();
+  if(view === 'doclocker') initDocLocker();
   if(view === 'pairing') initPairingView();
   if(view === 'overview') initOverviewPills();
   if(view === 'weather' && !_weatherLoaded) loadWeather();
@@ -2776,6 +2791,27 @@ async function toggleBookmark(doc, el){
 document.querySelectorAll('.bookmark-icon').forEach(icon => {
   if(LEG_BOOKMARKED_DOCS.includes(icon.dataset.doc)) icon.classList.add('bookmarked');
 });
+const DOC_CODE_TO_KIND = {
+  'EFLIGHT PLAN': ['rls', 'eFlight Plan'], 'FI': ['fi', 'Flight Details – GMT'],
+  'FIL': ['fil', 'Flight Details – Local'], 'WBD': ['wb', 'Weight & Balance Data'],
+  'AL*': ['notams', 'NOTAMs'], 'FR': ['field_report', 'Field Reports'],
+  'WX*': ['weather', 'Winds & Weather'],
+};
+function initDocLocker(){
+  const body = document.getElementById('doclocker-body');
+  if(!LEG_BOOKMARKED_DOCS.length){
+    body.innerHTML = '<p class="placeholder-note">No saved documents yet. Bookmark one under All Commands to save it here.</p>';
+    return;
+  }
+  body.innerHTML = '<div class="doc-list">' + LEG_BOOKMARKED_DOCS.map(code => {
+    const mapped = DOC_CODE_TO_KIND[code];
+    const action = mapped ? `viewDoc('${mapped[0]}','${mapped[1].replace(/'/g, "\\'")}')` : `showToast('${code} has no PDF to view')`;
+    return `<div class="doc-row" style="cursor:pointer;" onclick="${action}">
+      <div><div class="code">${code}</div></div>
+      <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/></svg></div>
+    </div>`;
+  }).join('') + '</div>';
+}
 function openOvAllCommands(){
   showView('documents');
   document.getElementById('flight-bar').classList.remove('collapsed');
@@ -2857,12 +2893,12 @@ async function submitSimbriefGen(){
   let depH = '', depM = '';
   if(rawTime){
     const [h, m] = rawTime.split(':').map(Number);
-    // tail_number only ever gets set by a real SimBrief OFP fetch, never
-    // by a PBS pairing — its absence is the reliable signal that this
-    // leg's time is still bare local wall-clock, not already zulu (an
-    // OFP-sourced time is computed straight from a UTC epoch and would
-    // get double-shifted if run through this conversion again).
-    if(!LEG_TAIL_NUMBER && _origTzName && isoDate){
+    // sched_out is always local wall-clock now — simbrief_ofp.py converts
+    // SimBrief's zulu epoch fields to local before they ever reach the leg
+    // schema (previously it left them as zulu, which this code used to
+    // treat as a signal to skip conversion for an already-dispatched leg;
+    // that's no longer correct now that the field itself is fixed).
+    if(_origTzName && isoDate){
       const z = localToZuluParts(isoDate, h, m, _origTzName);
       depH = z.h; depM = z.m;
     } else {
