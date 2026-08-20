@@ -1508,7 +1508,8 @@ FOS_TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
-<meta name="theme-color" content="#1d1d1f">
+<meta name="theme-color" content="#f5f5f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -1523,6 +1524,21 @@ FOS_TEMPLATE = """<!DOCTYPE html>
     --navy:#1d1d1f; --blue:#0071e3; --blue-dark:#0058a8;
     --bg:#f5f5f7; --card:#fff; --border:#d2d2d7; --label:#6e6e73; --value:#1d1d1f;
     --red:#ff3b30; --green:#34c759; --inactive:#9aa1ab; --radius:10px;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      /* Blue/red/green stay exactly as-is by request — only the neutrals
+         (surfaces, borders, text) switch for dark mode. */
+      --navy:#2c2c2e;
+      --bg:#000; --card:#1c1c1e; --border:#38383a; --label:#98989d; --value:#f5f5f7;
+      --inactive:#636366;
+    }
+    /* PDF pages are rendered bitmaps (real document ink), not styled
+       content — inverting is a deliberate reading-comfort choice here,
+       not a byproduct of the token swap above. hue-rotate after invert
+       keeps a NOTAM's red/weather-map colors closer to their original
+       hue instead of a flat color-swap. */
+    .pdf-page{filter:invert(1) hue-rotate(180deg);}
   }
   *{box-sizing:border-box;}
   html,body{margin:0;padding:0;height:100%;overscroll-behavior:none;background:var(--bg);}
@@ -1557,7 +1573,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .split-right{flex:1;min-width:0;display:flex;flex-direction:column;gap:12px;margin-left:32px;margin-right:16px;}
   .panel-card{background:var(--card);border-radius:18px;overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,.05);border:1px solid var(--border);}
   .panel-card-hdr{padding:12px 14px 9px;font-size:16px;font-weight:700;color:var(--value);background:var(--card);border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;}
-  .lead-icon{width:16px;height:16px;color:#5b6472;flex:0 0 auto;}
+  .lead-icon{width:16px;height:16px;color:var(--label);flex:0 0 auto;}
   .mot-row{padding:11px 13px;display:flex;justify-content:space-between;align-items:center;}
   .mot-time{font-size:16px;font-weight:700;}
   .mot-scorecard{padding:9px 13px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;color:var(--inactive);}
@@ -1585,7 +1601,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .topbar-title{order:3;flex:1 1 100%;text-align:center;margin-top:2px;}
   .topbar-title h1{font-size:18px;margin:0;font-weight:600;color:var(--blue-dark);}
   .topbar-title p{font-size:11px;margin:2px 0 0;color:var(--label);}
-  .icon-btn{background:none;border:none;color:#5b6472;cursor:pointer;padding:2px;display:flex;}
+  .icon-btn{background:none;border:none;color:var(--label);cursor:pointer;padding:2px;display:flex;}
   .icon-btn svg{width:19px;height:19px;}
   .status-bar{background:var(--navy);color:#fff;display:flex;align-items:center;justify-content:space-between;padding:8px 14px;border-radius:var(--radius) var(--radius) 0 0;font-size:13px;font-weight:600;}
   .flight-summary{background:var(--card);display:flex;align-items:center;padding:12px 14px;border-bottom:1px solid var(--border);font-size:13px;gap:18px;flex-wrap:wrap;}
@@ -1606,7 +1622,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .info-row .val{color:var(--value);font-weight:500;text-align:right;word-break:break-word;}
   .search-block{background:var(--card);padding:12px 14px;border-bottom:1px solid var(--border);}
   .search-block label{display:block;font-size:13px;font-weight:600;margin-bottom:6px;}
-  .search-block input,.search-block select{width:100%;padding:9px 10px;border:1px solid var(--border);border-radius:5px;font-size:13.5px;background:#fbfbfc;}
+  .search-block input,.search-block select{width:100%;padding:9px 10px;border:1px solid var(--border);border-radius:5px;font-size:13.5px;background:var(--card);color:var(--value);}
   .search-row{display:flex;gap:10px;background:var(--card);padding:12px 14px;border-bottom:1px solid var(--border);}
   .search-row .search-block{flex:1;border-bottom:none;padding:0;background:none;}
   .section-bar{display:flex;align-items:center;justify-content:space-between;background:var(--blue);color:#fff;padding:10px 14px;font-size:14px;font-weight:600;cursor:pointer;border:none;width:100%;text-align:left;}
@@ -1618,7 +1634,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .doc-row .code{font-weight:700;font-size:14px;}
   .doc-row .desc{font-size:13px;color:var(--label);margin-top:1px;}
   .doc-row .actions{display:flex;align-items:center;gap:26px;flex:0 0 auto;}
-  .doc-row .actions svg{width:19px;height:19px;color:#5b6472;cursor:pointer;padding:7px;margin:-7px;box-sizing:content-box;}
+  .doc-row .actions svg{width:19px;height:19px;color:var(--label);cursor:pointer;padding:7px;margin:-7px;box-sizing:content-box;}
   .doc-row .check{color:var(--inactive,#9aa1ab);cursor:pointer;}
   .doc-row .check.signed{color:var(--blue-dark);}
   .doc-row .actions svg.bookmark-icon.bookmarked{color:var(--blue);}
@@ -2392,6 +2408,7 @@ async function renderPdfInline(bytes){
     const scale = targetWidth / page.getViewport({scale:1}).width;
     const viewport = page.getViewport({scale});
     const canvas = document.createElement('canvas');
+    canvas.className = 'pdf-page';
     canvas.width = viewport.width;
     canvas.height = viewport.height;
     canvas.style.width = '100%';
