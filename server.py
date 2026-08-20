@@ -1582,6 +1582,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .doc-row .check{color:var(--inactive,#9aa1ab);cursor:pointer;}
   .doc-row .check.signed{color:var(--blue-dark);}
   .doc-row .actions svg.bookmark-icon.bookmarked{color:var(--blue);}
+  .doc-row .actions svg.ext-link{color:var(--blue);}
   #sign-pad{touch-action:none;background:#fff;border:1px solid var(--border);border-radius:6px;width:100%;height:220px;}
   .placeholder-note{padding:12px 14px;color:var(--label);font-style:italic;font-size:13px;background:var(--card);}
   .view{display:none;}
@@ -1670,19 +1671,19 @@ FOS_TEMPLATE = """<!DOCTYPE html>
             <div class="panel-card-hdr">External Apps</div>
             <div class="doc-row" style="cursor:pointer;" onclick="showView('release')">
               <div><div class="code">SimBrief</div><div class="desc">Send to Dispatch</div></div>
-              <div class="doc-actions"><svg class="ext-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><path d="M15 3h6v6"/><path d="M10 14L21 3"/></svg></div>
+              <div class="actions"><svg class="ext-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><path d="M15 3h6v6"/><path d="M10 14L21 3"/></svg></div>
             </div>
             <div class="doc-row" style="cursor:pointer;" onclick="exportToForeFlight()">
               <div><div class="code">ForeFlight</div><div class="desc">Export Route</div></div>
-              <div class="doc-actions"><svg class="ext-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><path d="M15 3h6v6"/><path d="M10 14L21 3"/></svg></div>
+              <div class="actions"><svg class="ext-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><path d="M15 3h6v6"/><path d="M10 14L21 3"/></svg></div>
             </div>
             <div class="doc-row" style="cursor:pointer;" onclick="prefileVatsim()">
               <div><div class="code">VATSIM</div><div class="desc">Pre-file Flight Plan</div></div>
-              <div class="doc-actions"><svg class="ext-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><path d="M15 3h6v6"/><path d="M10 14L21 3"/></svg></div>
+              <div class="actions"><svg class="ext-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><path d="M15 3h6v6"/><path d="M10 14L21 3"/></svg></div>
             </div>
             <div class="doc-row" style="border-bottom:none;cursor:pointer;" onclick="prefileIvao()">
               <div><div class="code">IVAO</div><div class="desc">Pre-file Flight Plan</div></div>
-              <div class="doc-actions"><svg class="ext-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><path d="M15 3h6v6"/><path d="M10 14L21 3"/></svg></div>
+              <div class="actions"><svg class="ext-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><path d="M15 3h6v6"/><path d="M10 14L21 3"/></svg></div>
             </div>
           </div>
         </div>
@@ -1863,11 +1864,11 @@ FOS_TEMPLATE = """<!DOCTYPE html>
       <div class="doc-list" id="extapps-body" style="display:none;">
         <div class="doc-row" style="cursor:pointer;" onclick="showView('release')">
           <div><div class="code">SimBrief</div><div class="desc">Send to SimBrief Dispatch</div></div>
-          <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><path d="M15 3h6v6"/><path d="M10 14L21 3"/></svg></div>
+          <div class="actions"><svg class="ext-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><path d="M15 3h6v6"/><path d="M10 14L21 3"/></svg></div>
         </div>
         <div class="doc-row" style="border-bottom:none;cursor:pointer;" onclick="exportToForeFlight()">
           <div><div class="code">ForeFlight</div><div class="desc">Export Route</div></div>
-          <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><path d="M15 3h6v6"/><path d="M10 14L21 3"/></svg></div>
+          <div class="actions"><svg class="ext-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><path d="M15 3h6v6"/><path d="M10 14L21 3"/></svg></div>
         </div>
       </div>
     </section>
