@@ -1037,7 +1037,13 @@ def sign_leg(leg_id):
         return jsonify({"error": "no signature image given"}), 400
 
     signed_at = datetime.now(timezone.utc).isoformat()
-    data = _save_leg(row, {**row.data, "signature": signature, "signed_at": signed_at})
+    new_data = {**row.data, "signature": signature, "signed_at": signed_at}
+    # Fit for Duty is a real attestation, not a bare checkbox — signing it
+    # here sets the flag directly (not toggle_ffd's flip) so re-signing
+    # can never accidentally turn an already-true declaration back off.
+    if body.get("kind") == "ffd":
+        new_data["fit_for_duty"] = True
+    data = _save_leg(row, new_data)
 
     db.session.add(SignatureLog(
         user_id=current_user.id, leg_id=leg_id,
@@ -2115,15 +2121,15 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         <div class="doc-row">
           <div><div class="code">FFD</div><div class="desc">Fit for Duty Declaration</div></div>
           <div class="actions">
+            <svg id="ffd-doc-check" class="check $ffd_check_class" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" onclick="openSignPad('ffd')"><path d="M20 6L9 17l-5-5"/></svg>
             <svg class="bookmark-icon" data-doc="FFD" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="toggleBookmark('FFD', this)"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>
-            <svg id="ffd-doc-check" class="check $ffd_check_class" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" onclick="toggleStatus('fit-for-duty','ffd-doc-check')"><path d="M20 6L9 17l-5-5"/></svg>
           </div>
         </div>
         <div class="doc-row">
           <div><div class="code">EFLIGHT PLAN</div><div class="desc">eFlight Plan</div></div>
           <div class="actions">
+            <svg id="sign-check" class="check $signed_class" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" onclick="openSignPad('eflightplan')"><path d="M20 6L9 17l-5-5"/></svg>
             <svg class="bookmark-icon" data-doc="EFLIGHT PLAN" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="toggleBookmark('EFLIGHT PLAN', this)"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>
-            <svg id="sign-check" class="check $signed_class" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" onclick="openSignPad()"><path d="M20 6L9 17l-5-5"/></svg>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('rls','eFlight Plan')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg>
           </div>
         </div>
@@ -2209,7 +2215,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
       <div class="topbar">
         <button class="back-link" onclick="showView('allcommands')" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
         <div class="topbar-title">
-          <h1>Sign eFlight Plan</h1>
+          <h1 id="sign-title">Sign eFlight Plan</h1>
           <p id="sign-status-line">Acknowledges receipt of the current release</p>
         </div>
       </div>
@@ -2909,7 +2915,21 @@ function closePdfView(){
   showView('allcommands');
 }
 
-function openSignPad(){
+// Fit for Duty and the eFlight Plan share the same canvas/signature slot
+// on the leg (there's only ever one "current" signature, not one per
+// document) — _signKind just tracks which check icon and which follow-up
+// effect (fit_for_duty=True server-side, see sign_leg) this particular
+// signing session is for.
+let _signKind = 'eflightplan';
+const _SIGN_KIND_COPY = {
+  ffd: {title: 'Sign Fit for Duty Declaration', line: 'Attests you are fit for duty on this flight'},
+  eflightplan: {title: 'Sign eFlight Plan', line: 'Acknowledges receipt of the current release'},
+};
+function openSignPad(kind){
+  _signKind = kind || 'eflightplan';
+  const copy = _SIGN_KIND_COPY[_signKind] || _SIGN_KIND_COPY.eflightplan;
+  document.getElementById('sign-title').textContent = copy.title;
+  document.getElementById('sign-status-line').textContent = copy.line;
   showView('sign');
 }
 let _signCtx = null, _signDrawing = false, _signHasStrokes = false;
@@ -2965,11 +2985,12 @@ async function submitSignature(){
   el.style.color = '';
   const dataUrl = document.getElementById('sign-pad').toDataURL('image/png');
   try {
-    const r = await fetch('/fos/' + LEG_ID + '/sign', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({signature: dataUrl})});
+    const r = await fetch('/fos/' + LEG_ID + '/sign', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({signature: dataUrl, kind: _signKind})});
     const data = await r.json();
     btn.disabled = false;
     if(!r.ok){ el.textContent = data.error || 'Sign failed'; el.style.color = '#c0392b'; return; }
-    const check = document.getElementById('sign-check');
+    const checkId = _signKind === 'ffd' ? 'ffd-doc-check' : 'sign-check';
+    const check = document.getElementById(checkId);
     if(check) check.classList.add('signed');
     showToast('Signed');
     showView('allcommands');
