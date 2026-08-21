@@ -30,6 +30,10 @@ from flask import Flask, request, jsonify, Response, redirect, url_for
 from flask_login import LoginManager, current_user, login_user, logout_user
 from string import Template
 import aeroapi
+import pairing_edit
+import pairing_engine
+import pbs_build
+import pbs_format
 import pbs_parser
 import release_engine
 from fos_pages import AIRLINE_IATA, synthesize_crew
@@ -285,6 +289,11 @@ def _ensure_columns():
         with db.engine.begin() as conn:
             conn.execute(sa_text("ALTER TABLE users ADD COLUMN aeroapi_key VARCHAR(255)"))
         LOG.info("Migrated: added users.aeroapi_key")
+    existing_pbs = {c["name"] for c in inspector.get_columns("pbs_imports")}
+    if "pending_edits" not in existing_pbs:
+        with db.engine.begin() as conn:
+            conn.execute(sa_text("ALTER TABLE pbs_imports ADD COLUMN pending_edits JSON"))
+        LOG.info("Migrated: added pbs_imports.pending_edits")
 
 
 with app.app_context():
@@ -892,6 +901,186 @@ def generate_from_pbs(seq_number):
     fos_leg.pop("_ofp_error", None)
     record = _store_leg(fos_leg)
     return jsonify({"fos_url": f"/fos/{record['id']}", "id": record["id"]})
+
+
+# ---------------------------------------------------------------------------
+# In-app pairing generation — searches the NAC route network for legal
+# pairings (pairing_engine, ported from the standalone nac_pairings.py
+# builder) instead of only importing a PBS bid-pack text export. Generation
+# is a two-step propose/accept: /generate runs the (budget-limited) search
+# and returns candidates without persisting anything; /accept re-verifies
+# the chosen candidate and appends it to PbsImport.sequences via the same
+# to_pbs() -> pbs_format text -> pbs_parser.parse_pbs() round trip a real
+# PBS import goes through, so a generated sequence is byte-for-byte the same
+# shape as an imported one everywhere downstream.
+# ---------------------------------------------------------------------------
+def _chain_routing(legs, chain):
+    stations = [legs[chain[0]]["o"]]
+    for i in chain:
+        stations.append(legs[i]["d"])
+    return stations
+
+
+def _next_generated_seq_number(existing_seqs):
+    """First free integer >= 9001 — visually distinct from a real bid pack's
+    1-999 sequence numbers."""
+    used = {int(s["seq"]) for s in existing_seqs if str(s.get("seq", "")).isdigit()}
+    n = 9001
+    while n in used:
+        n += 1
+    return str(n)
+
+
+@app.route("/pairings/generate", methods=["POST"])
+def generate_pairings():
+    body = request.get_json(silent=True) or {}
+    base = (body.get("base") or "").strip().upper()
+    if not base:
+        return jsonify({"error": "base is required"}), 400
+    try:
+        days = int(body.get("days", 4))
+    except (TypeError, ValueError):
+        return jsonify({"error": "days must be an integer"}), 400
+    if days < 1:
+        return jsonify({"error": "days must be at least 1"}), 400
+    try:
+        budget = min(float(body.get("budget", 5)), 10.0)
+    except (TypeError, ValueError):
+        budget = 5.0
+    try:
+        limit = min(int(body.get("limit", 5)), 8)
+    except (TypeError, ValueError):
+        limit = 5
+
+    legs, ap = pairing_engine.get_route_data()
+    if not any(l["o"] == base for l in legs):
+        return jsonify({"error": f"no departures from {base} in the route network"}), 400
+
+    search = pairing_engine.Search(legs, ap, days, budget)
+    chains = search.run(base, exact_days=True)
+    candidates = []
+    for chain in chains:
+        if pairing_engine.verify(legs, ap, chain, base, days):
+            continue
+        steps, _ = pairing_engine.walk(legs, ap, chain)
+        block = sum(legs[i]["blk"] for i in chain)
+        lpd = pairing_engine.legs_per_day(steps)
+        candidates.append({
+            "chain": list(chain),
+            "block": round(block, 2),
+            "dacv": round(block / days, 3) if days else 0,
+            "legs_per_day": lpd,
+            "routing": _chain_routing(legs, chain),
+            "shape_ok": pairing_engine.shape_ok(lpd),
+        })
+    # Score by efficiency (block/day), not raw block — maximizing raw block
+    # is the diagnosed bug that made an older version of this builder always
+    # pick the longest constructible trip regardless of how much dead time
+    # it carried.
+    candidates.sort(key=lambda c: -c["dacv"])
+    return jsonify({"base": base, "days": days, "candidates": candidates[:limit]})
+
+
+@app.route("/pairings/accept", methods=["POST"])
+def accept_pairing():
+    body = request.get_json(silent=True) or {}
+    base = (body.get("base") or "").strip().upper()
+    chain = body.get("chain")
+    if not base or not isinstance(chain, list) or not chain:
+        return jsonify({"error": "base and chain are required"}), 400
+    try:
+        chain = [int(i) for i in chain]
+    except (TypeError, ValueError):
+        return jsonify({"error": "chain must be a list of leg indices"}), 400
+
+    legs, ap = pairing_engine.get_route_data()
+    try:
+        steps, _ = pairing_engine.walk(legs, ap, chain)
+    except (IndexError, KeyError):
+        return jsonify({"error": "chain references an unknown leg — route network may have changed"}), 400
+    days_walked = steps[-1]["day"]
+    problems = pairing_engine.verify(legs, ap, chain, base, days_walked)
+    if problems:
+        return jsonify({"error": "candidate failed re-verification: " + "; ".join(problems)}), 400
+
+    row = _pbs_row()
+    if not row:
+        row = PbsImport(user_id=current_user.id, meta={"operator": "NAC", "fleet": "320", "base": base})
+        db.session.add(row)
+    elif not row.meta:
+        row.meta = {"operator": "NAC", "fleet": "320", "base": base}
+
+    seq_no = _next_generated_seq_number(row.sequences or [])
+    now = datetime.now(timezone.utc)
+    period = pbs_format.bid_period(now.year, now.month)
+    lines, _ops = pbs_build.to_pbs(legs, ap, chain, base, int(seq_no), 0, period)
+    text = pbs_format.build_text(
+        [lines], base, ap.city(base).upper(), now.strftime("%B %Y").upper(), period,
+    )
+    parsed = pbs_parser.parse_pbs(text)
+    if not parsed:
+        return jsonify({"error": "internal error: could not build sequence text"}), 500
+    new_sequence = parsed[0]
+    row.sequences = (row.sequences or []) + [new_sequence]
+    db.session.commit()
+    return jsonify(new_sequence)
+
+
+@app.route("/pbs/sequences/<seq_number>/legs/<int:duty_day>/<int:leg_index>/propose-edit", methods=["POST"])
+def propose_leg_edit(seq_number, duty_day, leg_index):
+    row = _pbs_row()
+    seq = next((s for s in (row.sequences if row else []) if s["seq"] == seq_number), None)
+    if not seq:
+        return jsonify({"error": "sequence not found"}), 404
+
+    body = request.get_json(silent=True) or {}
+    new_destination = body.get("new_destination")
+    flight_number = body.get("flight_number") or None
+    manual = body.get("manual") or None
+    if not new_destination:
+        return jsonify({"error": "new_destination is required"}), 400
+
+    legs, ap = pairing_engine.get_route_data()
+    first_day = seq["duty_days"][0] if seq["duty_days"] else None
+    dom = first_day["legs"][0]["origin"] if first_day and first_day["legs"] else ""
+
+    new_seq, violations, meta = pairing_edit.apply_leg_edit(
+        seq, dom, ap, legs, duty_day, leg_index,
+        new_destination=new_destination, flight_number=flight_number, manual=manual,
+    )
+    if new_seq is None:
+        return jsonify({"error": "; ".join(violations) or "could not apply that edit"}), 400
+
+    pending = dict(row.pending_edits or {})
+    pending[seq_number] = {"sequence": new_seq, "violations": violations, "meta": meta}
+    row.pending_edits = pending
+    db.session.commit()
+    return jsonify({"legal": not violations, "violations": violations, "preview": new_seq, "meta": meta})
+
+
+@app.route("/pbs/sequences/<seq_number>/legs/resolve-edit", methods=["POST"])
+def resolve_leg_edit(seq_number):
+    row = _pbs_row()
+    if not row:
+        return jsonify({"error": "not found"}), 404
+    body = request.get_json(silent=True) or {}
+    action = body.get("action")
+    if action not in ("confirm", "reject"):
+        return jsonify({"error": "action must be 'confirm' or 'reject'"}), 400
+    staged = (row.pending_edits or {}).get(seq_number)
+    if not staged:
+        return jsonify({"error": "no pending edit for this sequence"}), 404
+
+    if action == "confirm":
+        row.sequences = [
+            staged["sequence"] if s["seq"] == seq_number else s
+            for s in (row.sequences or [])
+        ]
+    pending = dict(row.pending_edits or {})
+    pending.pop(seq_number, None)
+    row.pending_edits = pending
+    db.session.commit()
+    return jsonify(staged["sequence"] if action == "confirm" else {"ok": True})
 
 
 @app.route("/fos/<int:leg_id>")
@@ -1506,6 +1695,10 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
       <div><div class="tile-title">Create a Flight</div><div class="tile-sub">Skip PBS — just origin, destination, and flight number</div></div>
     </button>
+    <button class="home-tile" onclick="showHomeView('load-sequence');showTab('generate');">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l19-9-9 19-2-8-8-2z"/></svg>
+      <div><div class="tile-title">Generate a Pairing</div><div class="tile-sub">Search the NAC route network for a legal trip</div></div>
+    </button>
     <button class="home-tile" onclick="showHomeView('import-simbrief')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg>
       <div><div class="tile-title">Import from SimBrief</div><div class="tile-sub">Load whatever OFP is on your account right now</div></div>
@@ -1529,6 +1722,7 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
   <div class="tabs">
     <button class="tab-btn active" id="tab-pbs-btn" onclick="showTab('pbs')">Import PBS</button>
     <button class="tab-btn" id="tab-manual-btn" onclick="showTab('manual')">Fill In Manually</button>
+    <button class="tab-btn" id="tab-generate-btn" onclick="showTab('generate')">Generate</button>
   </div>
 
   <div id="tab-pbs" class="tab-panel active">
@@ -1552,6 +1746,19 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
       <input id="manual-fltnum" type="text">
       <br><button onclick="submitManualEntry()">Continue to SimBrief</button>
       <div id="manual-msg" class="msg"></div>
+    </div>
+  </div>
+
+  <div id="tab-generate" class="tab-panel">
+    <div class="panel">
+      <div style="font-size:13px;color:var(--label);margin-bottom:4px;">Searches the NAC route network for a legal multi-day trip starting and ending at the base you enter.</div>
+      <label for="gen-base">Base</label>
+      <input id="gen-base" type="text" placeholder="e.g. PHX">
+      <label for="gen-days">Trip Length (days)</label>
+      <input id="gen-days" type="text" value="4">
+      <br><button onclick="submitGeneratePairing()">Generate</button>
+      <div id="generate-msg" class="msg"></div>
+      <div id="generate-candidates" style="margin-top:12px;"></div>
     </div>
   </div>
 </div>
@@ -1591,8 +1798,10 @@ function showHomeView(view){
 function showTab(tab){
   document.getElementById('tab-pbs').classList.toggle('active', tab==='pbs');
   document.getElementById('tab-manual').classList.toggle('active', tab==='manual');
+  document.getElementById('tab-generate').classList.toggle('active', tab==='generate');
   document.getElementById('tab-pbs-btn').classList.toggle('active', tab==='pbs');
   document.getElementById('tab-manual-btn').classList.toggle('active', tab==='manual');
+  document.getElementById('tab-generate-btn').classList.toggle('active', tab==='generate');
 }
 
 function loadArchive(){
@@ -1751,6 +1960,70 @@ async function submitManualEntry(){
     const data = await r.json();
     if(!r.ok){ el.textContent = data.error || 'Could not start this flight'; el.style.color = 'var(--red)'; return; }
     window.location.href = data.fos_url + '?view=release';
+  } catch(e) {
+    el.textContent = 'Request failed: ' + e;
+    el.style.color = 'var(--red)';
+  }
+}
+
+async function submitGeneratePairing(){
+  const el = document.getElementById('generate-msg');
+  const list = document.getElementById('generate-candidates');
+  list.innerHTML = '';
+  const base = document.getElementById('gen-base').value.trim().toUpperCase();
+  const days = parseInt(document.getElementById('gen-days').value, 10);
+  if(!base){ el.textContent = 'Enter a base station.'; el.style.color = 'var(--red)'; return; }
+  if(!days || days < 1){ el.textContent = 'Trip length must be a positive number of days.'; el.style.color = 'var(--red)'; return; }
+  el.textContent = 'Searching…';
+  el.style.color = '';
+  try {
+    const r = await fetch('/pairings/generate', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({base, days}),
+    });
+    const data = await r.json();
+    if(!r.ok){ el.textContent = data.error || 'Generate failed'; el.style.color = 'var(--red)'; return; }
+    if(!data.candidates.length){
+      el.textContent = 'No legal pairings found for that base/trip length.';
+      el.style.color = 'var(--red)';
+      return;
+    }
+    el.textContent = `Found ${data.candidates.length} candidate(s).`;
+    el.style.color = 'var(--green)';
+    list.innerHTML = data.candidates.map((c, i) => `<div class="arow" style="flex-direction:column;align-items:stretch;">
+      <div style="display:flex;justify-content:space-between;font-size:13.5px;color:var(--value);">
+        <span>${c.routing.join('-')}</span><span>${c.block.toFixed(2)}h block</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--label);margin-top:2px;">
+        <span>${c.legs_per_day.join('-')} legs/day</span><span>${c.dacv.toFixed(2)}h/day</span>
+      </div>
+      <button onclick="acceptGeneratedPairing('${base}', ${i})" style="margin-top:8px;">Accept</button>
+    </div>`).join('');
+    window._genCandidates = data.candidates;
+  } catch(e) {
+    el.textContent = 'Request failed: ' + e;
+    el.style.color = 'var(--red)';
+  }
+}
+
+async function acceptGeneratedPairing(base, i){
+  const el = document.getElementById('generate-msg');
+  const chain = (window._genCandidates || [])[i] && window._genCandidates[i].chain;
+  if(!chain){ el.textContent = 'That candidate is no longer available — generate again.'; el.style.color = 'var(--red)'; return; }
+  el.textContent = 'Accepting…';
+  el.style.color = '';
+  try {
+    const r = await fetch('/pairings/accept', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({base, chain}),
+    });
+    const data = await r.json();
+    if(!r.ok){ el.textContent = data.error || 'Accept failed'; el.style.color = 'var(--red)'; return; }
+    document.getElementById('generate-candidates').innerHTML = '';
+    el.textContent = '';
+    showTab('pbs');
+    loadSequences();
+    openSequence(data.seq);
   } catch(e) {
     el.textContent = 'Request failed: ' + e;
     el.style.color = 'var(--red)';
@@ -1976,8 +2249,8 @@ FOS_TEMPLATE = """<!DOCTYPE html>
     <h2 id="ds-title">Flight delayed</h2>
     <p id="ds-body"></p>
     <div class="ds-actions">
-      <button type="button" class="ds-reject" onclick="resolveDateSlip('reject')">Reject</button>
-      <button type="button" class="ds-confirm" onclick="resolveDateSlip('confirm')">Confirm</button>
+      <button type="button" class="ds-reject" onclick="_modalAction('reject')">Reject</button>
+      <button type="button" class="ds-confirm" onclick="_modalAction('confirm')">Confirm</button>
     </div>
   </div>
 </div>
@@ -2591,14 +2864,34 @@ function _fmtDateMDY(mmddyy){
   const mi = parseInt(parts[0], 10) - 1;
   return (months[mi] || parts[0]) + ' ' + parts[1];
 }
+// Generalized confirm/reject modal — reuses #date-slip-modal's DOM/CSS for
+// any "stage a risky change, let the user confirm or reject" flow, not just
+// the date-slip lockout it was originally built for (see also the leg-edit
+// propose/resolve flow in initPairingView()).
+let _modalOnConfirm = null, _modalOnReject = null;
+function showConfirmModal(title, body, onConfirm, onReject){
+  document.getElementById('ds-title').textContent = title;
+  document.getElementById('ds-body').textContent = body;
+  _modalOnConfirm = onConfirm;
+  _modalOnReject = onReject;
+  document.getElementById('date-slip-modal').classList.add('show');
+}
+function _modalAction(action){
+  document.getElementById('date-slip-modal').classList.remove('show');
+  const handler = action === 'confirm' ? _modalOnConfirm : _modalOnReject;
+  _modalOnConfirm = null; _modalOnReject = null;
+  if(handler) handler();
+}
 function showDateSlipModalIfPending(){
   if(!LEG_PENDING_DATE_SLIP) return;
   const slip = LEG_PENDING_DATE_SLIP;
-  document.getElementById('ds-title').textContent = 'FLT ' + (LEG_FLIGHT_DESIGNATOR || LEG_FLIGHT_NUMBER) + ' delayed';
-  document.getElementById('ds-body').textContent =
+  showConfirmModal(
+    'FLT ' + (LEG_FLIGHT_DESIGNATOR || LEG_FLIGHT_NUMBER) + ' delayed',
     'Now departing ' + (slip.new_sched_out || '?') + ' on ' + _fmtDateMDY(slip.new_dep_date) +
-    ". Confirm to accept this as the pairing's new scheduled time, or reject to dismiss.";
-  document.getElementById('date-slip-modal').classList.add('show');
+      ". Confirm to accept this as the pairing's new scheduled time, or reject to dismiss.",
+    () => resolveDateSlip('confirm'),
+    () => resolveDateSlip('reject'),
+  );
 }
 async function resolveDateSlip(action){
   try {
@@ -3106,6 +3399,16 @@ function renderPairing(seqData){
       left.appendChild(desc);
       const actions = document.createElement('div');
       actions.className = 'actions';
+      const editIcon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      editIcon.setAttribute('viewBox', '0 0 24 24');
+      editIcon.setAttribute('fill', 'none');
+      editIcon.setAttribute('stroke', 'currentColor');
+      editIcon.setAttribute('stroke-width', '2');
+      editIcon.setAttribute('stroke-linecap', 'round');
+      editIcon.setAttribute('stroke-linejoin', 'round');
+      editIcon.setAttribute('title', 'Edit this leg');
+      editIcon.innerHTML = '<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/>';
+      editIcon.onclick = (e) => { e.stopPropagation(); toggleLegEditForm(row, seqData.seq, day.duty_day, i, leg); };
       const sbIcon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
       sbIcon.setAttribute('viewBox', '0 0 24 24');
       sbIcon.setAttribute('fill', 'none');
@@ -3116,6 +3419,7 @@ function renderPairing(seqData){
       sbIcon.setAttribute('title', 'Generate via SimBrief');
       sbIcon.innerHTML = '<path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/>';
       sbIcon.onclick = (e) => { e.stopPropagation(); generatePairingLeg(seqData.seq, day.duty_day, i, position, 'release'); };
+      actions.appendChild(editIcon);
       actions.appendChild(sbIcon);
       row.appendChild(left);
       row.appendChild(actions);
@@ -3173,6 +3477,76 @@ async function cacheAllPairingLegs(seqData, position, msgEl){
   }
   msgEl.textContent = `Cached ${ok} of ${total} legs.` + (fails.length ? ' Failures: ' + fails.join('; ') : '');
   msgEl.style.color = fails.length ? '#c0392b' : 'var(--blue-dark)';
+}
+
+// Editing a leg within a pairing — swap its destination (and optionally
+// flight number), recomputed/re-validated server-side. Legs are contiguous,
+// so editing one truncates the pairing at that point (see pairing_edit.py);
+// an illegal result routes through the same confirm/reject modal the
+// date-slip lockout uses, via showConfirmModal().
+let _legEditFormOpen = null;
+function toggleLegEditForm(row, seq, dutyDay, legIndex, leg){
+  if(_legEditFormOpen){ _legEditFormOpen.remove(); _legEditFormOpen = null; }
+  const form = document.createElement('div');
+  form.className = 'panel';
+  form.style.cssText = 'margin:0;border-radius:0;border-left:none;border-right:none;';
+  // This form lives inside a duty-day pane whose own onclick navigates away
+  // (tap-anywhere-to-generate) — without this, clicking Save/Cancel or even
+  // focusing an input bubbles up and fires that navigation at the same time.
+  form.onclick = (e) => e.stopPropagation();
+  form.innerHTML = `
+    <label>New Destination</label>
+    <input type="text" class="le-dest" placeholder="${leg.destination || ''}" value="${leg.destination || ''}">
+    <label>Flight Number (optional — leave blank to match by route)</label>
+    <input type="text" class="le-flt" placeholder="${leg.flight_number || ''}">
+    <div style="display:flex;gap:8px;margin-top:10px;">
+      <button type="button" class="le-cancel" style="margin:0;flex:1;background:var(--label);">Cancel</button>
+      <button type="button" class="le-save" style="margin:0;flex:1;">Save</button>
+    </div>
+    <div class="le-msg msg"></div>
+  `;
+  form.querySelector('.le-cancel').onclick = () => { form.remove(); _legEditFormOpen = null; };
+  form.querySelector('.le-save').onclick = () => {
+    const dest = form.querySelector('.le-dest').value.trim().toUpperCase();
+    const flt = form.querySelector('.le-flt').value.trim();
+    if(!dest){ form.querySelector('.le-msg').textContent = 'Destination is required.'; return; }
+    proposeLegEdit(seq, dutyDay, legIndex, dest, flt, form.querySelector('.le-msg'));
+  };
+  row.insertAdjacentElement('afterend', form);
+  _legEditFormOpen = form;
+}
+async function proposeLegEdit(seq, dutyDay, legIndex, newDestination, flightNumber, msgEl){
+  msgEl.textContent = 'Checking…';
+  msgEl.style.color = '';
+  try {
+    const r = await fetch('/pbs/sequences/' + encodeURIComponent(seq) + '/legs/' + dutyDay + '/' + legIndex + '/propose-edit', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({new_destination: newDestination, flight_number: flightNumber || undefined}),
+    });
+    const data = await r.json();
+    if(!r.ok){ msgEl.textContent = data.error || 'Edit failed'; msgEl.style.color = 'var(--red)'; return; }
+    if(data.legal){
+      await resolveLegEdit(seq, 'confirm');
+    } else {
+      showConfirmModal(
+        'This edit breaks a legality rule',
+        data.violations.join('; ') + ' — apply the edit anyway, or reject it?',
+        () => resolveLegEdit(seq, 'confirm'),
+        () => resolveLegEdit(seq, 'reject'),
+      );
+    }
+  } catch(e) { msgEl.textContent = 'Request failed: ' + e; msgEl.style.color = 'var(--red)'; }
+}
+async function resolveLegEdit(seq, action){
+  try {
+    await fetch('/pbs/sequences/' + encodeURIComponent(seq) + '/legs/resolve-edit', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action}),
+    });
+  } catch(e) { /* best-effort */ }
+  if(_legEditFormOpen){ _legEditFormOpen.remove(); _legEditFormOpen = null; }
+  showToast(action === 'confirm' ? 'Leg updated' : 'Edit discarded');
+  initPairingView();
 }
 
 const _DDMMMYY_MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];

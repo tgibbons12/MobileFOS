@@ -63,6 +63,10 @@ class PbsImport(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey("users.id"), unique=True, nullable=False)
     meta = db.Column(db.JSON)
     sequences = db.Column(db.JSON, default=list)
+    # Staged leg-edit proposals awaiting confirm/reject, keyed by seq number —
+    # {seq_number: {"sequence": <edited seq dict>, "violations": [...], "meta": {...}}}.
+    # Same "stage it, let the user decide" shape as Leg.data's pending_date_slip.
+    pending_edits = db.Column(db.JSON, default=dict)
     updated_at = db.Column(db.DateTime(timezone=True), default=_now, onupdate=_now)
 
 
