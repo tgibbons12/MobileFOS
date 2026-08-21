@@ -21,7 +21,13 @@ RLS_RE = re.compile(
     r'(?P<duty>[\d.]+)(?:\s+(?P<fdp>[\d.]+))?\s+(?P<tafb>[\d.]+)'
 )
 HOTEL_RE = re.compile(r'^\s*(?P<sta>[A-Z]{3})\s+HOTEL\s+(?P<hotel>\S+)')
-TTL_RE = re.compile(r'^TTL')
+# The pairing-total row — same four columns as RLS (block/ground/tpay/tafb)
+# but cumulative for the whole sequence, no duty/fdp column. Previously
+# just detected-and-skipped; now captured so the library can show a
+# per-pairing TAFB/TPAY figure instead of only per-day ones.
+TTL_RE = re.compile(
+    r'^TTL\s+(?P<block>[\d.]+)\s+(?P<grnd>[\d.]+)\s+(?P<tpay>[\d.]+)\s+(?P<tafb>[\d.]+)'
+)
 
 LEG_TOKEN_RE = re.compile(r'\S+')
 
@@ -70,10 +76,15 @@ def _parse_leg_line(line):
         return None
     arr_local, arr_z = m.groups(); i += 1
 
-    block = toks[i] if i < len(toks) and re.match(r'^[\d.]+$', toks[i]) else ''
+    # Decimal only (\d+\.\d+), not bare [\d.]+ — the last leg of a duty day
+    # has no ground-time token at all, so the next thing on the line is the
+    # calendar day-of-month usage marker (a bare integer like "24"), which
+    # a looser digits-and-dots pattern would misread as a real ground time.
+    dur_re = re.compile(r'^\d+\.\d+$')
+    block = toks[i] if i < len(toks) and dur_re.match(toks[i]) else ''
     if i < len(toks):
         i += 1
-    ground = toks[i] if i < len(toks) and re.match(r'^[\d.]+$', toks[i]) else ''
+    ground = toks[i] if i < len(toks) and dur_re.match(toks[i]) else ''
 
     return {
         "equipment": eq, "flight_number": flt,
@@ -85,9 +96,11 @@ def _parse_leg_line(line):
 
 def parse_pbs(text):
     """Returns a list of sequence dicts:
-    {seq, ops_per_period, positions, duty_days: [
-        {duty_day, report, legs: [...], release, hotel, block, duty, tafb}
+    {seq, ops_per_period, positions, tafb, tpay, block, duty_days: [
+        {duty_day, report, legs: [...], release, hotel, block, duty, tpay, tafb}
     ]}
+    tafb/tpay/block at the top level are the sequence's own TTL row —
+    cumulative for the whole pairing, not just its last day.
     """
     marker = '===' * 3
     idx = text.find(marker)
@@ -109,6 +122,7 @@ def parse_pbs(text):
             "seq": header_match.group("seq"),
             "ops_per_period": header_match.group("ops"),
             "positions": header_match.group("positions").split(),
+            "block": None, "tpay": None, "tafb": None,
             "duty_days": [],
         }
         current_day = None
@@ -125,7 +139,7 @@ def parse_pbs(text):
                     "report": m.group("out"),
                     "legs": [],
                     "release": None, "hotel": None,
-                    "block": None, "duty": None, "tafb": None,
+                    "block": None, "duty": None, "tpay": None, "tafb": None,
                 }
                 seq["duty_days"].append(current_day)
                 continue
@@ -134,13 +148,18 @@ def parse_pbs(text):
                 current_day["release"] = m.group("in_")
                 current_day["block"] = m.group("block")
                 current_day["duty"] = m.group("duty")
+                current_day["tpay"] = m.group("tpay")
                 current_day["tafb"] = m.group("tafb")
                 continue
             m = HOTEL_RE.match(line)
             if m and current_day is not None:
                 current_day["hotel"] = f'{m.group("sta")} {m.group("hotel")}'
                 continue
-            if TTL_RE.match(line):
+            m = TTL_RE.match(line)
+            if m:
+                seq["block"] = m.group("block")
+                seq["tpay"] = m.group("tpay")
+                seq["tafb"] = m.group("tafb")
                 continue
             leg = _parse_leg_line(line)
             if leg and current_day is not None:

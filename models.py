@@ -39,6 +39,11 @@ class User(UserMixin, db.Model):
     # "fleet","label"} — so it can open straight to "my bid" instead of
     # requiring opr->base->fleet to be picked every time.
     bid_shortcut = db.Column(db.JSON)
+    # Individually starred pairings from the Library — [{"opr","base",
+    # "fleet","seq"}, ...] — distinct from bid_shortcut (one default
+    # opr/base/fleet) and from PbsImport.sequences (actually being flown);
+    # this is just a personal shortlist for quick re-visits.
+    saved_pairings = db.Column(db.JSON, default=list)
     created_at = db.Column(db.DateTime(timezone=True), default=_now)
 
     def set_password(self, password):

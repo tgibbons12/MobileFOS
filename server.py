@@ -293,6 +293,10 @@ def _ensure_columns():
         with db.engine.begin() as conn:
             conn.execute(sa_text("ALTER TABLE users ADD COLUMN bid_shortcut JSON"))
         LOG.info("Migrated: added users.bid_shortcut")
+    if "saved_pairings" not in existing:
+        with db.engine.begin() as conn:
+            conn.execute(sa_text("ALTER TABLE users ADD COLUMN saved_pairings JSON"))
+        LOG.info("Migrated: added users.saved_pairings")
     existing_pbs = {c["name"] for c in inspector.get_columns("pbs_imports")}
     if "pending_edits" not in existing_pbs:
         with db.engine.begin() as conn:
@@ -773,6 +777,27 @@ def _sequence_routing(seq):
     return stations
 
 
+def _layover_indices(s):
+    """Which positions in _sequence_routing(s)'s station chain are actual
+    overnights — every day except the last ends in a layover. Indices, not
+    station codes: a trip that overnights back at its own domicile (a real,
+    if unusual, shape in this data — a duty period can end back at base
+    with a HOTEL line before the next day's report) would otherwise have
+    its domicile bolded everywhere the name recurs, including the trip's
+    own origin/final destination, if this only matched by station name."""
+    indices = []
+    pos = 0  # stations[0] is the very first leg's origin; each leg after
+    # that adds one more entry (its destination), so the cumulative leg
+    # count through a day is exactly that day's last leg's index in
+    # _sequence_routing(s)'s station list.
+    days = s["duty_days"]
+    for day in days[:-1]:
+        pos += len(day["legs"])
+        if day["legs"]:
+            indices.append(pos)
+    return indices
+
+
 def _summarize_sequence(s):
     """The compact {seq, days, routing, ...} shape both /pbs/sequences and
     the pack-browsing routes list sequences with."""
@@ -787,6 +812,10 @@ def _summarize_sequence(s):
         "origin": first_leg["origin"] if first_leg else None,
         "final_destination": last_leg["destination"] if last_leg else None,
         "routing": _sequence_routing(s),
+        "layover_indices": _layover_indices(s),
+        # Pairing totals from the bid-pack's own TTL row — cumulative for
+        # the whole trip, distinct from any one day's own block/tpay/tafb.
+        "block": s.get("block"), "tpay": s.get("tpay"), "tafb": s.get("tafb"),
     }
 
 
@@ -845,7 +874,11 @@ def get_pbs_sequence(seq_number):
     seq = next((s for s in _pbs_sequences() if s["seq"] == seq_number), None)
     if not seq:
         return jsonify({"error": "not found"}), 404
-    operator_iata = _pbs_meta().get("operator", "").upper()
+    # A promoted-from-the-library sequence carries its own pack's operator
+    # (see promote_pack_sequence) — prefer that over PbsImport.meta, which
+    # is one shared value for the whole pool and goes stale the moment two
+    # sequences from different packs/operators sit in that pool together.
+    operator_iata = (seq.get("_pack_opr") or _pbs_meta().get("operator") or "").upper()
     return jsonify(_decorate_sequence(seq, operator_iata))
 
 
@@ -953,7 +986,14 @@ def promote_pack_sequence(opr, base, fleet, seq_number):
         # duplicate, matching /pairings/accept's own fresh-seq-number
         # habit of never silently colliding.
         return jsonify(seq)
-    row.sequences = existing + [seq]
+    # Stamp this copy with the pack it actually came from — PbsImport.meta
+    # is one shared operator/base/fleet for the whole pool, which goes
+    # stale the moment a second promote comes from a *different* pack (the
+    # airline code shown on a generated leg was silently inheriting
+    # whichever pack happened to set row.meta first, not the one this
+    # sequence was actually promoted from).
+    stamped = {**seq, "_pack_opr": opr.upper(), "_pack_base": base.upper(), "_pack_fleet": fleet.upper()}
+    row.sequences = existing + [stamped]
     db.session.commit()
     return jsonify(seq)
 
@@ -974,7 +1014,16 @@ def generate_from_pbs(seq_number):
         return jsonify({"error": "duty_day/leg_index out of range"}), 400
     leg = day["legs"][leg_index]
 
-    fos_leg = pbs_parser.pbs_leg_to_fos_leg(_pbs_meta(), seq, day, leg, position)
+    # Prefer this sequence's own pack stamp (promote_pack_sequence) over
+    # PbsImport.meta — see get_pbs_sequence's identical fix for why a
+    # single pool-wide meta goes stale once sequences from more than one
+    # operator/pack sit in the same active pool.
+    meta = dict(_pbs_meta() or {})
+    if seq.get("_pack_opr"):
+        meta["operator"] = seq["_pack_opr"]
+        meta["base"] = seq.get("_pack_base") or meta.get("base")
+        meta["fleet"] = seq.get("_pack_fleet") or meta.get("fleet")
+    fos_leg = pbs_parser.pbs_leg_to_fos_leg(meta, seq, day, leg, position)
 
     existing = _find(
         fos_leg.get("flight_number"), fos_leg.get("dep_date"),
@@ -1875,6 +1924,36 @@ def clear_bid_shortcut():
     return jsonify({"ok": True})
 
 
+@app.route("/settings/saved-pairings")
+def get_saved_pairings():
+    return jsonify(current_user.saved_pairings or [])
+
+
+@app.route("/settings/saved-pairings/toggle", methods=["POST"])
+def toggle_saved_pairing():
+    """Stars/unstars one pairing from the Library — same toggle-in-place
+    shape as /docs/bookmark. Identity is (opr, base, fleet, seq); returns
+    the updated list so the frontend can re-derive every star's state from
+    one response, the same pattern toggleBookmark already uses."""
+    body = request.get_json(silent=True) or {}
+    opr = (body.get("opr") or "").strip().upper()
+    base = (body.get("base") or "").strip().upper()
+    fleet = (body.get("fleet") or "").strip().upper()
+    seq = (body.get("seq") or "").strip()
+    if not opr or not base or not fleet or not seq:
+        return jsonify({"error": "opr, base, fleet, and seq are all required"}), 400
+    saved = list(current_user.saved_pairings or [])
+    key = {"opr": opr, "base": base, "fleet": fleet, "seq": seq}
+    existing = next((p for p in saved if p["opr"] == opr and p["base"] == base and p["fleet"] == fleet and p["seq"] == seq), None)
+    if existing:
+        saved.remove(existing)
+    else:
+        saved.append(key)
+    current_user.saved_pairings = saved
+    db.session.commit()
+    return jsonify(current_user.saved_pairings)
+
+
 @app.route("/airport-timezone/<icao>")
 def airport_timezone(icao):
     """IANA timezone name for an ICAO airport code — lets the browser
@@ -1890,6 +1969,18 @@ def airport_timezone(icao):
 @app.route("/")
 def index():
     return Response(render_launcher_html(), mimetype="text/html")
+
+
+@app.route("/schedule")
+def schedule_root():
+    """The Schedule tab's own root — reachable from the bottom nav on every
+    page (Home included), independent of any one leg. Reuses render_fos_html
+    with an empty leg (id="") purely as a rendering vehicle: DEFAULT_LEG
+    fills in every field, and the FOS_TEMPLATE JS checks `!LEG_ID` to know
+    it's in this leg-independent mode — defaulting to the Schedule view,
+    hiding the back chevron, and routing every other tab back to Home
+    instead of trying to show some specific leg's Overview."""
+    return Response(render_fos_html({"id": ""}), mimetype="text/html")
 
 
 # ---------------------------------------------------------------------------
@@ -1939,6 +2030,8 @@ def render_launcher_html():
         rows=rows, current_flight_button=current_flight_button, request_data_button=request_data_button,
         username=html.escape(current_user.username), clear_flights_link=clear_flights_link,
         default_simbrief_user=_js_str(current_user.default_simbrief_user),
+        current_leg_id=str(current_leg["id"]) if current_leg else "",
+        current_leg_disabled="" if current_leg else " disabled",
     )
 
 
@@ -2082,7 +2175,13 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
   :root[data-theme="dark"]{ --bg:#000; --card:#1c1c1e; --border:#38383a; --label:#98989d; --value:#f5f5f7; --inactive:#636366; }
   :root[data-theme="light"]{ --bg:#f5f5f7; --card:#fff; --border:#d2d2d7; --label:#6e6e73; --value:#1d1d1f; --inactive:#9aa1ab; }
   html,body{height:100%;overscroll-behavior:none;background:var(--bg);}
-  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;margin:0;padding:24px;color:var(--value);}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;margin:0;padding:24px 24px calc(88px + env(safe-area-inset-bottom));color:var(--value);padding-left:calc(24px + env(safe-area-inset-left));padding-right:calc(24px + env(safe-area-inset-right));}
+  .tabbar{position:fixed;left:env(safe-area-inset-left);right:env(safe-area-inset-right);bottom:0;display:flex;justify-content:center;background:var(--card);border-top:1px solid var(--border);padding:5px 0 calc(5px + env(safe-area-inset-bottom));z-index:20;}
+  .navtab{flex:1;max-width:110px;display:flex;flex-direction:column;align-items:center;gap:3px;background:transparent;border:none;color:var(--label);cursor:pointer;padding:4px 2px;position:relative;margin:0;}
+  .navtab svg{width:22px;height:22px;}
+  .navtab span{font-size:10px;font-weight:600;}
+  .navtab.active{color:var(--blue-dark);}
+  .navtab:disabled{opacity:.4;cursor:default;}
   h1{font-size:18px;color:var(--blue-dark);margin:0 0 16px;}
   label{display:block;font-size:13px;font-weight:600;margin:10px 0 4px;color:var(--value);}
   textarea, select, input[type=text]{width:100%;max-width:640px;font-family:inherit;font-size:13.5px;padding:9px 10px;border:1px solid var(--border);border-radius:5px;box-sizing:border-box;background:var(--card);color:var(--value);}
@@ -2122,17 +2221,9 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
 <div id="home-view" class="sub-view active">
   <h1>MobileCCI</h1>
   <div class="home-tiles">
-    <button class="home-tile" onclick="showHomeView('load-sequence')">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>
-      <div><div class="tile-title">Load New Sequence</div><div class="tile-sub">Import a PBS bid pack, or start a flight manually</div></div>
-    </button>
     <button class="home-tile" onclick="showHomeView('load-sequence');showTab('manual');">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
       <div><div class="tile-title">Create a Flight</div><div class="tile-sub">Skip PBS — just origin, destination, and flight number</div></div>
-    </button>
-    <button class="home-tile" onclick="showHomeView('load-sequence');showTab('generate');">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l19-9-9 19-2-8-8-2z"/></svg>
-      <div><div class="tile-title">Generate a Pairing</div><div class="tile-sub">Search the NAC route network for a legal trip</div></div>
     </button>
     <button class="home-tile" onclick="showHomeView('import-simbrief')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg>
@@ -2222,13 +2313,47 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
   </div>
 </div>
 
+<nav class="tabbar" aria-label="Primary">
+  <button class="navtab active" id="tab-overview" onclick="showHomeView('home')">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0z"/><path d="M9 10l2 2 4-4"/></svg>
+    <span>Overview</span>
+  </button>
+  <button class="navtab" id="tab-schedule" onclick="window.location.href='/schedule'">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18"/><path d="M8 3v4M16 3v4"/></svg>
+    <span>Schedule</span>
+  </button>
+  <button class="navtab"$current_leg_disabled id="tab-messages" onclick="homeNavTab('messages')">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+    <span>Messages</span>
+  </button>
+  <button class="navtab"$current_leg_disabled id="tab-docs" onclick="homeNavTab('doclocker')">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5"/><path d="M9.5 13h5M9.5 16h5"/></svg>
+    <span>Docs</span>
+  </button>
+  <button class="navtab"$current_leg_disabled id="tab-more" onclick="homeNavTab('more')">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>
+    <span>More</span>
+  </button>
+</nav>
+
 <script>
 const SERVER_SIMBRIEF_USER = "$default_simbrief_user";
+const CURRENT_LEG_ID = "$current_leg_id";
+// Home is itself the Overview-equivalent root when no leg is loaded, so
+// its tabbar's Messages/Docs/More jump into the current leg's own page
+// when one exists (mirrors FOS_TEMPLATE's navTab()) — those views have
+// nothing to show without a real leg, so the buttons are server-rendered
+// disabled in that case rather than silently no-op-ing here.
+function homeNavTab(view){
+  if(!CURRENT_LEG_ID) return;
+  window.location.href = '/fos/' + CURRENT_LEG_ID + '?view=' + view;
+}
 function showHomeView(view){
   document.getElementById('home-view').classList.toggle('active', view==='home');
   document.getElementById('load-sequence-view').classList.toggle('active', view==='load-sequence');
   document.getElementById('import-simbrief-view').classList.toggle('active', view==='import-simbrief');
   document.getElementById('pick-leg-view').classList.toggle('active', view==='pick-leg');
+  document.getElementById('tab-overview').classList.toggle('active', view==='home');
 }
 function showTab(tab){
   document.getElementById('tab-pbs').classList.toggle('active', tab==='pbs');
@@ -2492,6 +2617,15 @@ function loadFromSimbrief(){
   if(saved) document.getElementById('sb-user').value = saved;
 })();
 
+// Deep link from Schedule's empty-state ("Load New Sequence" / "Generate
+// a Pairing" now live there, not as Home tiles — see /schedule) straight
+// into this page's own existing load-sequence sub-view/tab, unchanged.
+(function(){
+  const open = new URLSearchParams(window.location.search).get('open');
+  if(open === 'load-sequence'){ showHomeView('load-sequence'); }
+  else if(open === 'generate'){ showHomeView('load-sequence'); showTab('generate'); }
+})();
+
 loadSequences();
 </script>
 </body></html>"""
@@ -2552,11 +2686,12 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .app-shell{display:flex;flex-direction:column;min-height:100vh;min-height:100dvh;width:100%;padding-left:env(safe-area-inset-left);padding-right:env(safe-area-inset-right);}
   .main{flex:1;min-width:0;padding:14px 16px calc(72px + env(safe-area-inset-bottom));}
   .tabbar{position:fixed;left:env(safe-area-inset-left);right:env(safe-area-inset-right);bottom:0;display:flex;justify-content:center;background:var(--card);border-top:1px solid var(--border);padding:5px 0 calc(5px + env(safe-area-inset-bottom));z-index:20;}
-  .tab-btn{flex:1;max-width:110px;display:flex;flex-direction:column;align-items:center;gap:3px;background:transparent;border:none;color:var(--label);cursor:pointer;padding:4px 2px;position:relative;}
-  .tab-btn svg{width:22px;height:22px;}
-  .tab-btn span{font-size:10px;font-weight:600;}
-  .tab-btn.active{color:var(--blue-dark);}
-  .tab-btn .badge{position:absolute;top:0;left:50%;margin-left:6px;width:15px;height:15px;border-radius:50%;background:var(--red);color:#fff;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;}
+  .navtab{flex:1;max-width:110px;display:flex;flex-direction:column;align-items:center;gap:3px;background:transparent;border:none;color:var(--label);cursor:pointer;padding:4px 2px;position:relative;}
+  .navtab svg{width:22px;height:22px;}
+  .navtab span{font-size:10px;font-weight:600;}
+  .navtab.active{color:var(--blue-dark);}
+  .navtab:disabled{opacity:.4;cursor:default;}
+  .navtab .badge{position:absolute;top:0;left:50%;margin-left:6px;width:15px;height:15px;border-radius:50%;background:var(--red);color:#fff;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;}
   .flight-card{display:flex;align-items:stretch;padding:22px 20px 18px;gap:12px;}
   .flight-card .station{flex:1;display:flex;flex-direction:column;gap:4px;min-width:0;}
   .flight-card .station.dest{align-items:flex-end;text-align:right;}
@@ -2667,6 +2802,25 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .doc-row .check.signed{color:var(--blue-dark);}
   .doc-row .actions svg.bookmark-icon.bookmarked{color:var(--blue);fill:var(--blue);}
   .doc-row .actions svg.ext-link{color:var(--blue);}
+  .lib-crumb{padding:0 14px 10px;font-size:12.5px;color:var(--label);display:flex;flex-wrap:wrap;gap:4px;align-items:center;}
+  .lib-crumb a{color:var(--blue);text-decoration:none;}
+  .lib-crumb .current{color:var(--value);font-weight:600;}
+  .section-bar.lib-bar{cursor:default;justify-content:flex-start;gap:9px;}
+  .lib-back{cursor:pointer;display:flex;align-items:center;flex:0 0 auto;padding:2px;margin:-2px;}
+  .lib-back svg{width:10px;height:15px;display:block;}
+  .doc-row.lib-row{cursor:pointer;}
+  .doc-row .code.seq-code{color:var(--blue);}
+  .doc-row .desc.lib-routing{color:var(--value);}
+  .doc-row .desc.lib-routing b{font-weight:700;}
+  .lib-stats{text-align:right;font-size:12px;color:var(--label);flex:0 0 auto;line-height:1.45;white-space:nowrap;}
+  .lib-stats .days{color:var(--value);font-weight:600;font-size:12.5px;}
+  .lib-total{padding:0 14px 10px;font-size:12.5px;color:var(--label);}
+  .fly-row{display:flex;gap:8px;padding:0 14px 12px;}
+  .fly-btn{flex:1;margin:0;background:var(--blue);color:#fff;border:none;padding:11px;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;}
+  .save-btn{flex:0 0 auto;width:46px;margin:0;background:var(--card);border:1px solid var(--border);border-radius:5px;color:var(--inactive);cursor:pointer;display:flex;align-items:center;justify-content:center;}
+  .save-btn svg{width:19px;height:19px;}
+  .save-btn.saved{color:var(--blue);border-color:var(--blue);}
+  .save-btn.saved svg{fill:var(--blue);}
   #sign-pad{touch-action:none;background:#fff;border:1px solid var(--border);border-radius:6px;width:100%;height:220px;}
   .placeholder-note{padding:12px 14px;color:var(--label);font-style:italic;font-size:13px;background:var(--card);}
   .view{display:none;}
@@ -2973,10 +3127,8 @@ FOS_TEMPLATE = """<!DOCTYPE html>
     </section>
     <section id="pairing-view" class="view">
       <div class="topbar">
-        <button class="back-link" onclick="showView('overview')" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
-        <div class="topbar-title">
+        <div class="topbar-title" style="flex:1 1 100%;">
           <h1>Schedule</h1>
-          <p>SEQ $seq — full trip</p>
         </div>
       </div>
       <div class="tabs">
@@ -3181,23 +3333,23 @@ FOS_TEMPLATE = """<!DOCTYPE html>
     </section>
   </main>
   <nav class="tabbar" aria-label="Primary">
-    <button class="tab-btn active" id="tab-overview" onclick="showView('overview')">
+    <button class="navtab active" id="tab-overview" onclick="navTab('overview')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0z"/><path d="M9 10l2 2 4-4"/></svg>
       <span>Overview</span>
     </button>
-    <button class="tab-btn" id="tab-schedule" onclick="showView('pairing')">
+    <button class="navtab" id="tab-schedule" onclick="navTab('pairing')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18"/><path d="M8 3v4M16 3v4"/></svg>
       <span>Schedule</span>
     </button>
-    <button class="tab-btn" id="tab-messages" onclick="showView('messages')">
+    <button class="navtab" id="tab-messages" onclick="navTab('messages')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
       <span>Messages</span>
     </button>
-    <button class="tab-btn" id="tab-docs" onclick="showView('doclocker')">
+    <button class="navtab" id="tab-docs" onclick="navTab('doclocker')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5"/><path d="M9.5 13h5M9.5 16h5"/></svg>
       <span>Docs</span>
     </button>
-    <button class="tab-btn" id="tab-more" onclick="showView('more')">
+    <button class="navtab" id="tab-more" onclick="navTab('more')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>
       <span>More</span>
     </button>
@@ -3256,6 +3408,19 @@ function showView(view){
   if(view === 'pairing') initPairingView();
   if(view === 'overview') initOverviewPills();
   if(view === 'weather' && !_weatherLoaded) loadWeather();
+}
+// Schedule is now a leg-independent root (see /schedule) — its tabbar
+// button always navigates there via a real page load, never an in-page
+// showView() toggle, so its own back chevron never has a specific leg to
+// dump you back into. The other tabs stay in-page IF this page already
+// has a real leg loaded; from the leg-independent /schedule page itself
+// (LEG_ID empty) they fall back to Home, which is schedule-independent
+// and leg-aware (Current Flight tile) — there's nothing sensible for
+// Overview/Messages/Docs to show without a leg.
+function navTab(view){
+  if(view === 'pairing'){ window.location.href = '/schedule'; return; }
+  if(!LEG_ID){ window.location.href = '/'; return; }
+  showView(view);
 }
 function saveSimbriefUser(value){
   const user = value.trim();
@@ -3834,21 +3999,67 @@ function showScheduleTab(tab){
     initLibraryView();
   }
 }
+// My Trip — the pilot's own active sequence pool (PbsImport.sequences),
+// not scoped to whichever leg (if any) this page happened to be reached
+// through. Zero sequences shows the Load/Generate empty-state (relocated
+// here from Home); exactly one goes straight to its full duty-day view
+// (the common case); two or more show a pickable list first, matching the
+// Pairing Library's own Sequences list look.
 async function initPairingView(){
   const body = document.getElementById('pairing-body');
-  if(!LEG_SEQ){
-    body.innerHTML = '<p class="placeholder-note">This leg has no SEQ — it wasn’t generated from a PBS pairing.</p>';
-    return;
-  }
+  // Reached from a real leg (e.g. right after accepting a shift-day patch
+  // or a recovery for THIS leg's own sequence) — jump straight to that
+  // sequence's updated view rather than the whole-pool list below, same
+  // as before Schedule became leg-independent. Only /schedule itself
+  // (LEG_SEQ empty) falls through to the pool-wide list/empty-state.
+  if(LEG_SEQ){ await myTripShowDetail(LEG_SEQ, false); return; }
   body.innerHTML = '<p class="placeholder-note">Loading…</p>';
   try {
-    const r = await fetch('/pbs/sequences/' + encodeURIComponent(LEG_SEQ));
+    const r = await fetch('/pbs/sequences');
+    const seqs = await r.json();
+    if(!r.ok){ body.innerHTML = '<p class="placeholder-note">' + (seqs.error || 'Failed to load') + '</p>'; return; }
+    if(!seqs.length){ renderMyTripEmptyState(body); return; }
+    if(seqs.length === 1){ await myTripShowDetail(seqs[0].seq, false); return; }
+    myTripShowList(seqs);
+  } catch(e) {
+    body.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>';
+  }
+}
+function renderMyTripEmptyState(body){
+  body.innerHTML = '';
+  const wrap = document.createElement('div');
+  wrap.style.cssText = 'padding:14px;';
+  const msg = document.createElement('p');
+  msg.className = 'placeholder-note';
+  msg.style.cssText = 'margin:0 0 12px;padding:0;';
+  msg.textContent = "You don't have a pairing loaded yet.";
+  const loadBtn = document.createElement('button');
+  loadBtn.textContent = 'Load New Sequence';
+  loadBtn.style.cssText = 'width:100%;margin:0 0 10px;background:var(--blue);color:#fff;border:none;padding:11px;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;';
+  loadBtn.onclick = () => { window.location.href = '/?open=load-sequence'; };
+  const genBtn = document.createElement('button');
+  genBtn.textContent = 'Generate a Pairing';
+  genBtn.style.cssText = 'width:100%;margin:0;background:var(--card);color:var(--blue);border:1px solid var(--blue);padding:11px;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;';
+  genBtn.onclick = () => { window.location.href = '/?open=generate'; };
+  wrap.appendChild(msg); wrap.appendChild(loadBtn); wrap.appendChild(genBtn);
+  body.appendChild(wrap);
+}
+function myTripShowList(seqs){
+  const body = document.getElementById('pairing-body');
+  body.innerHTML = '';
+  const {pane, list} = libraryPane('My Trips', null);
+  seqs.forEach(s => list.appendChild(sequenceListRow(s, () => myTripShowDetail(s.seq, true))));
+  body.appendChild(pane);
+}
+async function myTripShowDetail(seqNumber, showBack){
+  const body = document.getElementById('pairing-body');
+  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  try {
+    const r = await fetch('/pbs/sequences/' + encodeURIComponent(seqNumber));
     const data = await r.json();
-    if(!r.ok){
-      body.innerHTML = '<p class="placeholder-note">No pairing data for SEQ ' + LEG_SEQ + ' — re-import the PBS bid pack on Home.</p>';
-      return;
-    }
+    if(!r.ok){ body.innerHTML = '<p class="placeholder-note">' + (data.error || 'Failed to load') + '</p>'; return; }
     renderPairing(data);
+    if(showBack) body.insertBefore(libraryBackLink('Back to My Trips', initPairingView), body.firstChild);
   } catch(e) {
     body.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>';
   }
@@ -3972,50 +4183,196 @@ function renderPairing(seqData){
 // pilot's own active sequence pool (same as accepting a generated
 // pairing), then hands off to the existing Pick-a-Leg flow to start
 // flying it.
+//
+// NOTE: dynamic strings below use concatenation, not JS template
+// literals — Python's string.Template (rendering this whole page) treats
+// bare ${word} as ITS OWN substitution syntax and will silently eat one
+// that happens to match a real template context key (e.g. ${base} was
+// getting replaced with this leg's own base — cost real debugging time to
+// track down). String concatenation sidesteps it entirely.
 let _libraryPath = {opr: null, base: null, fleet: null};
+let _libraryShortcut = null;
+let _savedPairings = [];
+
 async function initLibraryView(){
-  const r = await fetch('/settings/bid-shortcut');
-  const shortcut = r.ok ? await r.json() : null;
-  renderLibraryShortcutBar(shortcut);
+  const [scRes, savedRes] = await Promise.all([
+    fetch('/settings/bid-shortcut'),
+    fetch('/settings/saved-pairings'),
+  ]);
+  _libraryShortcut = scRes.ok ? await scRes.json() : null;
+  _savedPairings = savedRes.ok ? await savedRes.json() : [];
+  renderLibraryShortcutBar();
   await libraryShowOprs();
 }
-function renderLibraryShortcutBar(shortcut){
+function isPairingSaved(opr, base, fleet, seq){
+  return _savedPairings.some(p => p.opr === opr && p.base === base && p.fleet === fleet && p.seq === seq);
+}
+function renderLibraryShortcutBar(){
   const crumb = document.getElementById('library-crumb');
-  if(shortcut){
-    crumb.innerHTML = `<div class="arow"><a class="arow-link" href="#" onclick="libraryJumpToShortcut();return false;">⭐ ${shortcut.label}</a>
-      <button class="arow-del" title="Clear saved bid" onclick="clearBidShortcut()">${TRASH_ICON_SVG}</button></div>`;
-  } else {
-    crumb.innerHTML = '';
+  crumb.innerHTML = '';
+  if(_libraryShortcut){
+    const row = document.createElement('div');
+    row.className = 'arow';
+    row.innerHTML = '<a class="arow-link" href="#">⭐ ' + _libraryShortcut.label + '</a>' +
+      '<button class="arow-del" title="Clear saved bid">' + TRASH_ICON_SVG + '</button>';
+    row.querySelector('.arow-link').onclick = (e) => { e.preventDefault(); libraryJumpToShortcut(); };
+    row.querySelector('.arow-del').onclick = (e) => { e.stopPropagation(); clearBidShortcut(); };
+    crumb.appendChild(row);
+  }
+  if(_savedPairings.length){
+    const label = document.createElement('div');
+    label.textContent = 'SAVED PAIRINGS';
+    label.style.cssText = 'font-size:11px;font-weight:700;color:var(--label);letter-spacing:.04em;padding:2px 14px 6px;';
+    crumb.appendChild(label);
+    _savedPairings.forEach(p => {
+      const row = document.createElement('a');
+      row.className = 'arow'; row.href = '#';
+      row.innerHTML = '<span style="color:var(--blue);font-weight:600;">SEQ ' + p.seq + '</span>' +
+        '<span>' + p.opr + ' ' + p.base + '/' + p.fleet + '</span>';
+      row.onclick = (e) => {
+        e.preventDefault();
+        _libraryPath = {opr: p.opr, base: p.base, fleet: p.fleet};
+        libraryShowSequenceDetail(p.seq);
+      };
+      crumb.appendChild(row);
+    });
   }
 }
 async function libraryJumpToShortcut(){
-  const r = await fetch('/settings/bid-shortcut');
-  const s = r.ok ? await r.json() : null;
-  if(!s) return;
-  _libraryPath = {opr: s.opr, base: s.base, fleet: s.fleet};
+  if(!_libraryShortcut) return;
+  _libraryPath = {opr: _libraryShortcut.opr, base: _libraryShortcut.base, fleet: _libraryShortcut.fleet};
   await libraryShowSequences();
 }
 async function clearBidShortcut(){
   await fetch('/settings/bid-shortcut', {method: 'DELETE'});
-  renderLibraryShortcutBar(null);
+  _libraryShortcut = null;
+  renderLibraryShortcutBar();
 }
-function libraryBreadcrumb(){
+async function saveBidShortcut(opr, base, fleet){
+  const r = await fetch('/settings/bid-shortcut', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({opr, base, fleet}),
+  });
+  const data = await r.json();
+  if(r.ok){ _libraryShortcut = data; renderLibraryShortcutBar(); showToast('Saved as your bid'); }
+}
+async function toggleSavedPairing(opr, base, fleet, seq, btnEl){
+  try {
+    const r = await fetch('/settings/saved-pairings/toggle', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({opr, base, fleet, seq}),
+    });
+    const data = await r.json();
+    if(!r.ok){ showToast(data.error || 'Could not update saved pairings'); return; }
+    _savedPairings = data;
+    const nowSaved = isPairingSaved(opr, base, fleet, seq);
+    if(btnEl) btnEl.classList.toggle('saved', nowSaved);
+    renderLibraryShortcutBar();
+    showToast(nowSaved ? 'Pairing saved' : 'Removed from saved');
+  } catch(e) { showToast('Request failed: ' + e); }
+}
+// Breadcrumb for jumping several levels at once. extraLabel (e.g. "SEQ
+// 149764") is appended as the non-clickable current level, pushing the
+// deepest real path segment (fleet) into a clickable link instead.
+function libraryCrumb(extraLabel){
   const p = _libraryPath;
-  const parts = [{label: 'Operators', fn: 'libraryShowOprs'}];
-  if(p.opr) parts.push({label: p.opr, fn: 'libraryShowBases'});
-  if(p.base) parts.push({label: p.base, fn: 'libraryShowFleets'});
-  if(p.fleet) parts.push({label: p.fleet, fn: 'libraryShowSequences'});
-  return parts.map((part, i) =>
-    i === parts.length - 1
-      ? `<span style="color:var(--value);font-weight:600;">${part.label}</span>`
-      : `<a href="#" style="color:var(--blue);" onclick="${part.fn}();return false;">${part.label}</a>`
-  ).join(' <span style="color:var(--label);">/</span> ');
-}
-function libraryRenderCrumbPath(){
+  const parts = [{label: 'Operators', fn: libraryShowOprs}];
+  if(p.opr) parts.push({label: p.opr, fn: libraryShowBases});
+  if(p.base) parts.push({label: p.base, fn: libraryShowFleets});
+  if(p.fleet) parts.push({label: p.fleet, fn: libraryShowSequences});
   const el = document.createElement('div');
-  el.style.cssText = 'padding:0 14px 10px;font-size:13px;';
-  el.innerHTML = libraryBreadcrumb();
+  el.className = 'lib-crumb';
+  const lastIsCurrent = !extraLabel;
+  parts.forEach((part, i) => {
+    if(i > 0){ const sep = document.createElement('span'); sep.textContent = '/'; el.appendChild(sep); }
+    if(lastIsCurrent && i === parts.length - 1){
+      const cur = document.createElement('span'); cur.className = 'current'; cur.textContent = part.label;
+      el.appendChild(cur);
+    } else {
+      const a = document.createElement('a'); a.href = '#'; a.textContent = part.label;
+      a.onclick = (e) => { e.preventDefault(); part.fn(); };
+      el.appendChild(a);
+    }
+  });
+  if(extraLabel){
+    const sep = document.createElement('span'); sep.textContent = '/'; el.appendChild(sep);
+    const cur = document.createElement('span'); cur.className = 'current'; cur.textContent = extraLabel;
+    el.appendChild(cur);
+  }
   return el;
+}
+// A single, obvious "go up one level" link — the crumb above still lets
+// you jump multiple levels, this is the fast one-tap path back.
+function libraryBackLink(label, fn){
+  const wrap = document.createElement('div');
+  wrap.style.cssText = 'padding:0 14px 8px;';
+  const a = document.createElement('a');
+  a.href = '#';
+  a.style.cssText = 'color:var(--blue);font-size:13px;text-decoration:none;display:inline-flex;align-items:center;gap:4px;';
+  a.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="width:9px;height:13px;"><path d="M15 18l-6-6 6-6"/></svg> ' + label;
+  a.onclick = (e) => { e.preventDefault(); fn(); };
+  wrap.appendChild(a);
+  return wrap;
+}
+function libraryBar(title, backFn){
+  const bar = document.createElement('div');
+  bar.className = 'section-bar lib-bar';
+  if(backFn){
+    const back = document.createElement('span');
+    back.className = 'lib-back';
+    back.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>';
+    back.onclick = (e) => { e.stopPropagation(); backFn(); };
+    bar.appendChild(back);
+  }
+  const label = document.createElement('span');
+  label.textContent = title;
+  bar.appendChild(label);
+  return bar;
+}
+function libraryPane(title, backFn){
+  const pane = document.createElement('div');
+  pane.style.cssText = 'margin:0 14px 14px;border-radius:16px;overflow:hidden;border:1px solid var(--border);';
+  pane.appendChild(libraryBar(title, backFn));
+  const list = document.createElement('div');
+  list.className = 'doc-list';
+  pane.appendChild(list);
+  return {pane, list};
+}
+function libraryDisclosureIcon(){
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '2');
+  svg.setAttribute('stroke-linecap', 'round');
+  svg.setAttribute('stroke-linejoin', 'round');
+  svg.innerHTML = '<path d="M9 18l6-6-6-6"/>';
+  return svg;
+}
+// One "opr" or "base" drill-down row — a plain count + disclosure chevron,
+// plus an optional extra action icon (the fleet level's save-as-bid star).
+function libraryGroupRow(name, count, onClick, extraActionEl){
+  const row = document.createElement('div');
+  row.className = 'doc-row lib-row';
+  const left = document.createElement('div');
+  const code = document.createElement('div'); code.className = 'code'; code.textContent = name;
+  const desc = document.createElement('div'); desc.className = 'desc';
+  desc.textContent = count + ' pairing' + (count === 1 ? '' : 's');
+  left.appendChild(code); left.appendChild(desc);
+  const actions = document.createElement('div'); actions.className = 'actions';
+  if(extraActionEl) actions.appendChild(extraActionEl);
+  actions.appendChild(libraryDisclosureIcon());
+  row.appendChild(left); row.appendChild(actions);
+  row.onclick = onClick;
+  return row;
+}
+// Renders a sequence's station chain with layover stations bolded (where
+// this pairing actually overnights) so it reads at a glance, distinct
+// from stations the pairing only touches down/up at same-day.
+function libraryRoutingHtml(routing, layoverIndices){
+  const layovers = {};
+  (layoverIndices || []).forEach(i => { layovers[i] = true; });
+  return (routing || []).map((sta, i) => layovers[i] ? ('<b>' + sta + '</b>') : sta).join('-');
 }
 async function libraryShowOprs(){
   _libraryPath = {opr: null, base: null, fleet: null};
@@ -4028,25 +4385,17 @@ async function libraryShowOprs(){
     const oprs = {};
     packs.forEach(p => { oprs[p.opr] = (oprs[p.opr] || 0) + p.seq_count; });
     body.innerHTML = '';
-    body.appendChild(libraryRenderCrumbPath());
+    body.appendChild(libraryCrumb());
     const names = Object.keys(oprs).sort();
     if(!names.length){
       body.innerHTML += '<p class="placeholder-note">No pairing packs imported yet.</p>';
       return;
     }
+    const {pane, list} = libraryPane('Operators', null);
     names.forEach(oprName => {
-      const row = document.createElement('a');
-      row.className = 'arow'; row.href = '#';
-      // NOTE: deliberately not a JS template literal here — Python's
-      // string.Template (rendering this whole page) treats bare ${word}
-      // as ITS OWN substitution syntax and will silently eat one that
-      // happens to match a real template context key (e.g. ${base} was
-      // getting replaced with this leg's own base — cost real debugging
-      // time to track down). String concatenation sidesteps it entirely.
-      row.innerHTML = oprName + ' <span>' + oprs[oprName] + ' pairings</span>';
-      row.onclick = (e) => { e.preventDefault(); _libraryPath.opr = oprName; libraryShowBases(); };
-      body.appendChild(row);
+      list.appendChild(libraryGroupRow(oprName, oprs[oprName], () => { _libraryPath.opr = oprName; libraryShowBases(); }));
     });
+    body.appendChild(pane);
   } catch(e) { body.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>'; }
 }
 async function libraryShowBases(){
@@ -4058,14 +4407,12 @@ async function libraryShowBases(){
     const bases = {};
     packs.forEach(p => { bases[p.base] = (bases[p.base] || 0) + p.seq_count; });
     body.innerHTML = '';
-    body.appendChild(libraryRenderCrumbPath());
+    body.appendChild(libraryCrumb());
+    const {pane, list} = libraryPane('Bases', libraryShowOprs);
     Object.keys(bases).sort().forEach(baseName => {
-      const row = document.createElement('a');
-      row.className = 'arow'; row.href = '#';
-      row.innerHTML = baseName + ' <span>' + bases[baseName] + ' pairings</span>';
-      row.onclick = (e) => { e.preventDefault(); _libraryPath.base = baseName; libraryShowFleets(); };
-      body.appendChild(row);
+      list.appendChild(libraryGroupRow(baseName, bases[baseName], () => { _libraryPath.base = baseName; libraryShowFleets(); }));
     });
+    body.appendChild(pane);
   } catch(e) { body.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>'; }
 }
 async function libraryShowFleets(){
@@ -4075,25 +4422,52 @@ async function libraryShowFleets(){
     const r = await fetch('/pbs/packs');
     const packs = (await r.json()).filter(p => p.opr === _libraryPath.opr && p.base === _libraryPath.base);
     body.innerHTML = '';
-    body.appendChild(libraryRenderCrumbPath());
+    body.appendChild(libraryCrumb());
+    const {pane, list} = libraryPane('Fleets', libraryShowBases);
     packs.sort((a,b) => a.fleet.localeCompare(b.fleet)).forEach(p => {
-      const row = document.createElement('div');
-      row.className = 'arow';
-      row.innerHTML = '<a class="arow-link" href="#">' + p.fleet + ' <span>' + p.seq_count + ' pairings</span></a>' +
-        '<button class="arow-del" title="Save as my bid" style="color:var(--blue);">★</button>';
-      row.querySelector('.arow-link').onclick = (e) => { e.preventDefault(); _libraryPath.fleet = p.fleet; libraryShowSequences(); };
-      row.querySelector('.arow-del').onclick = (e) => { e.stopPropagation(); saveBidShortcut(_libraryPath.opr, _libraryPath.base, p.fleet); };
-      body.appendChild(row);
+      const star = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      star.setAttribute('viewBox', '0 0 24 24');
+      star.setAttribute('fill', 'none');
+      star.setAttribute('stroke', 'currentColor');
+      star.setAttribute('stroke-width', '2');
+      star.setAttribute('stroke-linecap', 'round');
+      star.setAttribute('stroke-linejoin', 'round');
+      const titleEl = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+      titleEl.textContent = 'Save as my bid';
+      star.appendChild(titleEl);
+      star.innerHTML += '<path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>';
+      star.style.color = 'var(--blue)';
+      star.onclick = (e) => { e.stopPropagation(); saveBidShortcut(_libraryPath.opr, _libraryPath.base, p.fleet); };
+      list.appendChild(libraryGroupRow(p.fleet, p.seq_count, () => { _libraryPath.fleet = p.fleet; libraryShowSequences(); }, star));
     });
+    body.appendChild(pane);
   } catch(e) { body.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>'; }
 }
-async function saveBidShortcut(opr, base, fleet){
-  const r = await fetch('/settings/bid-shortcut', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({opr, base, fleet}),
-  });
-  const data = await r.json();
-  if(r.ok){ renderLibraryShortcutBar(data); showToast('Saved as your bid'); }
+// Shared by the Pairing Library's Sequences list and My Trip's own list —
+// SEQ in blue, layover stations bold, a plain touched airport in neither,
+// TAFB/TPAY (when known) above the day-count badge.
+function sequenceListRow(s, onClick){
+  const row = document.createElement('div');
+  row.className = 'doc-row lib-row';
+  const left = document.createElement('div');
+  const code = document.createElement('div'); code.className = 'code seq-code';
+  code.textContent = 'SEQ ' + s.seq;
+  const desc = document.createElement('div'); desc.className = 'desc lib-routing';
+  desc.innerHTML = libraryRoutingHtml(s.routing, s.layover_indices);
+  left.appendChild(code); left.appendChild(desc);
+  const stats = document.createElement('div'); stats.className = 'lib-stats';
+  const payBits = [s.tafb ? ('TAFB ' + s.tafb) : '', s.tpay ? ('TPAY ' + s.tpay) : ''].filter(Boolean);
+  if(payBits.length){
+    const payLine = document.createElement('div');
+    payLine.textContent = payBits.join(' · ');
+    stats.appendChild(payLine);
+  }
+  const daysLine = document.createElement('div'); daysLine.className = 'days';
+  daysLine.textContent = s.days + ' day' + (s.days === 1 ? '' : 's');
+  stats.appendChild(daysLine);
+  row.appendChild(left); row.appendChild(stats);
+  row.onclick = onClick;
+  return row;
 }
 async function libraryShowSequences(){
   const {opr, base, fleet} = _libraryPath;
@@ -4104,15 +4478,11 @@ async function libraryShowSequences(){
     const seqs = await r.json();
     if(!r.ok){ body.innerHTML = '<p class="placeholder-note">' + (seqs.error || 'Failed to load') + '</p>'; return; }
     body.innerHTML = '';
-    body.appendChild(libraryRenderCrumbPath());
+    body.appendChild(libraryCrumb());
     if(!seqs.length){ body.innerHTML += '<p class="placeholder-note">No sequences in this pack.</p>'; return; }
-    seqs.forEach(s => {
-      const row = document.createElement('a');
-      row.className = 'arow'; row.href = '#';
-      row.innerHTML = `SEQ ${s.seq} — ${(s.routing||[]).join('-')} <span>${s.days} day(s)</span>`;
-      row.onclick = (e) => { e.preventDefault(); libraryShowSequenceDetail(s.seq); };
-      body.appendChild(row);
-    });
+    const {pane, list} = libraryPane('Sequences', libraryShowFleets);
+    seqs.forEach(s => list.appendChild(sequenceListRow(s, () => libraryShowSequenceDetail(s.seq))));
+    body.appendChild(pane);
   } catch(e) { body.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>'; }
 }
 async function libraryShowSequenceDetail(seqNumber){
@@ -4124,18 +4494,37 @@ async function libraryShowSequenceDetail(seqNumber){
     const seqData = await r.json();
     if(!r.ok){ body.innerHTML = '<p class="placeholder-note">' + (seqData.error || 'Failed to load') + '</p>'; return; }
     body.innerHTML = '';
-    const crumb = libraryRenderCrumbPath();
-    crumb.innerHTML += ' <span style="color:var(--label);">/</span> <span style="color:var(--value);font-weight:600;">SEQ ' + seqNumber + '</span>';
-    body.appendChild(crumb);
+    body.appendChild(libraryCrumb('SEQ ' + seqNumber));
+    body.appendChild(libraryBackLink('Back to Sequences', libraryShowSequences));
 
-    const flyWrap = document.createElement('div');
-    flyWrap.style.cssText = 'padding:0 14px 12px;';
+    const totalBits = [
+      seqData.block ? ('Block ' + seqData.block) : '',
+      seqData.tpay ? ('TPAY ' + seqData.tpay) : '',
+      seqData.tafb ? ('TAFB ' + seqData.tafb) : '',
+      (seqData.positions || []).join('/'),
+    ].filter(Boolean);
+    if(totalBits.length){
+      const totalEl = document.createElement('div');
+      totalEl.className = 'lib-total';
+      totalEl.textContent = totalBits.join(' · ');
+      body.appendChild(totalEl);
+    }
+
+    const flyRow = document.createElement('div');
+    flyRow.className = 'fly-row';
     const flyBtn = document.createElement('button');
+    flyBtn.className = 'fly-btn';
     flyBtn.textContent = 'Fly This Pairing';
-    flyBtn.style.cssText = 'margin:0;width:100%;background:var(--blue);color:#fff;border:none;padding:11px;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;';
     flyBtn.onclick = () => promoteAndFly(opr, base, fleet, seqNumber);
-    flyWrap.appendChild(flyBtn);
-    body.appendChild(flyWrap);
+    const saveBtn = document.createElement('button');
+    saveBtn.className = 'save-btn';
+    saveBtn.title = 'Save this pairing';
+    saveBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>';
+    if(isPairingSaved(opr, base, fleet, seqNumber)) saveBtn.classList.add('saved');
+    saveBtn.onclick = () => toggleSavedPairing(opr, base, fleet, seqNumber, saveBtn);
+    flyRow.appendChild(flyBtn);
+    flyRow.appendChild(saveBtn);
+    body.appendChild(flyRow);
 
     (seqData.duty_days || []).forEach(day => {
       const pane = document.createElement('div');
@@ -4152,14 +4541,33 @@ async function libraryShowSequenceDetail(seqNumber){
         row.className = 'doc-row';
         const codeWrap = document.createElement('div');
         const code = document.createElement('div'); code.className = 'code';
-        code.textContent = leg.flight_number || '—';
+        code.textContent = (leg.flight_number || '—') + (leg.equipment ? ' · ' + leg.equipment : '');
         const desc = document.createElement('div'); desc.className = 'desc';
-        desc.textContent = leg.origin + '→' + leg.destination + ' ' + leg.dep_local + '/' + leg.arr_local;
+        const descBits = [
+          leg.origin + '→' + leg.destination + ' ' + leg.dep_local + '/' + leg.arr_local,
+          leg.block ? ('BLK ' + leg.block) : '',
+          leg.ground ? ('GND ' + leg.ground) : '',
+        ].filter(Boolean);
+        desc.textContent = descBits.join(' · ');
         codeWrap.appendChild(code); codeWrap.appendChild(desc);
         row.appendChild(codeWrap);
         list.appendChild(row);
       });
       pane.appendChild(list);
+      const bits = [
+        day.release ? ('RLS ' + day.release) : '',
+        day.duty ? ('Duty ' + day.duty) : '',
+        day.tpay ? ('TPAY ' + day.tpay) : '',
+        day.tafb ? ('TAFB ' + day.tafb) : '',
+        day.hotel || '',
+      ].filter(Boolean).join(' · ');
+      if(bits){
+        const note = document.createElement('p');
+        note.className = 'placeholder-note';
+        note.style.margin = '0';
+        note.textContent = bits;
+        pane.appendChild(note);
+      }
       body.appendChild(pane);
     });
   } catch(e) { body.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>'; }
@@ -4861,6 +5269,13 @@ function renderWeather(stations){
 }
 
 (function(){
+  if(!LEG_ID){
+    // /schedule — the leg-independent root. Nothing here is scoped to a
+    // real leg, so there's no Overview to default to and no per-leg sync
+    // to start.
+    showView('pairing');
+    return;
+  }
   const params = new URLSearchParams(window.location.search);
   const view = params.get('view');
   if(view === 'pairing' || view === 'release' || view === 'confirm') showView(view);
