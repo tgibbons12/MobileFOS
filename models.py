@@ -35,6 +35,10 @@ class User(UserMixin, db.Model):
     # Replaces fos_last_leg — which leg this pilot was last on, so "Current
     # Flight" / "Request New Data" on Home can be computed server-side.
     current_leg_id = db.Column(db.Integer)
+    # A saved default for the Pairing Library browser — {"opr","base",
+    # "fleet","label"} — so it can open straight to "my bid" instead of
+    # requiring opr->base->fleet to be picked every time.
+    bid_shortcut = db.Column(db.JSON)
     created_at = db.Column(db.DateTime(timezone=True), default=_now)
 
     def set_password(self, password):
@@ -68,6 +72,37 @@ class PbsImport(db.Model):
     # Same "stage it, let the user decide" shape as Leg.data's pending_date_slip.
     pending_edits = db.Column(db.JSON, default=dict)
     updated_at = db.Column(db.DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class PairingPack(db.Model):
+    """One bulk-imported PBS bid-pack file, tagged by operator/base/fleet —
+    the browsable "master library" distinct from PbsImport.sequences (the
+    pilot's own currently active/flown pairings). Browsing is
+    opr -> base -> fleet -> sequence; picking one sequence promotes a copy
+    into PbsImport.sequences (see /pbs/packs/.../promote in server.py),
+    reusing the exact same downstream leg-generation machinery as any other
+    imported sequence.
+
+    A dedicated table rather than a JSON blob on PbsImport deliberately —
+    at bulk-library scale (thousands of sequences per pack, dozens of
+    packs) a "list all packs with counts" query needs to stay cheap without
+    ever deserializing every pack's own (large) `sequences` column; storing
+    `seq_count` as its own column and querying it column-limited
+    (db.session.query(PairingPack.opr, ...)) keeps that listing fast
+    regardless of how big any individual pack's sequences list gets."""
+    __tablename__ = "pairing_packs"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    opr = db.Column(db.String(8), nullable=False, index=True)
+    base = db.Column(db.String(8), nullable=False, index=True)
+    fleet = db.Column(db.String(8), nullable=False, index=True)
+    seq_count = db.Column(db.Integer, nullable=False, default=0)
+    meta = db.Column(db.JSON)
+    sequences = db.Column(db.JSON, default=list)
+    updated_at = db.Column(db.DateTime(timezone=True), default=_now, onupdate=_now)
+    __table_args__ = (
+        db.UniqueConstraint("user_id", "opr", "base", "fleet", name="uq_pack_user_opr_base_fleet"),
+    )
 
 
 class ReleaseCache(db.Model):

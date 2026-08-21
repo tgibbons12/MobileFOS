@@ -37,7 +37,7 @@ import pbs_format
 import pbs_parser
 import release_engine
 from fos_pages import AIRLINE_IATA, synthesize_crew
-from models import db, User, Leg, PbsImport, SignatureLog, ReleaseCache
+from models import db, User, Leg, PbsImport, PairingPack, SignatureLog, ReleaseCache
 import simbrief_ofp
 
 # ICAO -> IANA timezone name (e.g. "America/Phoenix"), used to convert a PBS
@@ -289,6 +289,10 @@ def _ensure_columns():
         with db.engine.begin() as conn:
             conn.execute(sa_text("ALTER TABLE users ADD COLUMN aeroapi_key VARCHAR(255)"))
         LOG.info("Migrated: added users.aeroapi_key")
+    if "bid_shortcut" not in existing:
+        with db.engine.begin() as conn:
+            conn.execute(sa_text("ALTER TABLE users ADD COLUMN bid_shortcut JSON"))
+        LOG.info("Migrated: added users.bid_shortcut")
     existing_pbs = {c["name"] for c in inspector.get_columns("pbs_imports")}
     if "pending_edits" not in existing_pbs:
         with db.engine.begin() as conn:
@@ -769,23 +773,47 @@ def _sequence_routing(seq):
     return stations
 
 
+def _summarize_sequence(s):
+    """The compact {seq, days, routing, ...} shape both /pbs/sequences and
+    the pack-browsing routes list sequences with."""
+    first_day = s["duty_days"][0]
+    last_day = s["duty_days"][-1]
+    first_leg = first_day["legs"][0] if first_day["legs"] else None
+    last_leg = last_day["legs"][-1] if last_day["legs"] else None
+    return {
+        "seq": s["seq"], "days": len(s["duty_days"]),
+        "positions": s["positions"], "ops_per_period": s["ops_per_period"],
+        "report": first_day["report"],
+        "origin": first_leg["origin"] if first_leg else None,
+        "final_destination": last_leg["destination"] if last_leg else None,
+        "routing": _sequence_routing(s),
+    }
+
+
+def _decorate_sequence(seq, operator_iata):
+    """Full sequence detail with ICAO-decorated legs — the shape
+    /pbs/sequences/<seq> and the pack sequence-detail route both return."""
+    out = dict(seq)
+    out["operator"] = _IATA_TO_ICAO.get(operator_iata, operator_iata)
+    out["operator_iata"] = operator_iata
+    out["duty_days"] = [
+        {**day, "legs": [
+            {
+                **leg,
+                "origin_icao": _airport_icao(leg["origin"]),
+                "destination_icao": _airport_icao(leg["destination"]),
+                "fleet_type_icao": _fleet_type_icao(leg.get("equipment", "")),
+            }
+            for leg in day["legs"]
+        ]}
+        for day in seq["duty_days"]
+    ]
+    return out
+
+
 @app.route("/pbs/sequences")
 def list_pbs_sequences():
-    out = []
-    for s in _pbs_sequences():
-        first_day = s["duty_days"][0]
-        last_day = s["duty_days"][-1]
-        first_leg = first_day["legs"][0] if first_day["legs"] else None
-        last_leg = last_day["legs"][-1] if last_day["legs"] else None
-        out.append({
-            "seq": s["seq"], "days": len(s["duty_days"]),
-            "positions": s["positions"], "ops_per_period": s["ops_per_period"],
-            "report": first_day["report"],
-            "origin": first_leg["origin"] if first_leg else None,
-            "final_destination": last_leg["destination"] if last_leg else None,
-            "routing": _sequence_routing(s),
-        })
-    return jsonify(out)
+    return jsonify([_summarize_sequence(s) for s in _pbs_sequences()])
 
 
 @app.route("/pbs/sequences", methods=["DELETE"])
@@ -817,23 +845,117 @@ def get_pbs_sequence(seq_number):
     seq = next((s for s in _pbs_sequences() if s["seq"] == seq_number), None)
     if not seq:
         return jsonify({"error": "not found"}), 404
-    out = dict(seq)
     operator_iata = _pbs_meta().get("operator", "").upper()
-    out["operator"] = _IATA_TO_ICAO.get(operator_iata, operator_iata)
-    out["operator_iata"] = operator_iata
-    out["duty_days"] = [
-        {**day, "legs": [
-            {
-                **leg,
-                "origin_icao": _airport_icao(leg["origin"]),
-                "destination_icao": _airport_icao(leg["destination"]),
-                "fleet_type_icao": _fleet_type_icao(leg.get("equipment", "")),
-            }
-            for leg in day["legs"]
-        ]}
-        for day in seq["duty_days"]
-    ]
-    return jsonify(out)
+    return jsonify(_decorate_sequence(seq, operator_iata))
+
+
+# ---------------------------------------------------------------------------
+# Pairing Library — bulk-imported PBS bid-pack files, browsable
+# opr -> base -> fleet -> sequence, distinct from the pilot's own active
+# PbsImport.sequences (what they're actually flying). Picking one sequence
+# "promotes" a copy into that active pool via the exact same append-based
+# mechanism /pairings/accept already uses, so a promoted sequence is
+# indistinguishable from any other imported/generated one downstream.
+# ---------------------------------------------------------------------------
+def _pack_row(opr, base, fleet):
+    return PairingPack.query.filter_by(
+        user_id=current_user.id, opr=opr.upper(), base=base.upper(), fleet=fleet.upper(),
+    ).first()
+
+
+@app.route("/pbs/packs/import", methods=["POST"])
+def import_pack():
+    """Body: {opr, base, fleet, text}. One bulk-generated bid-pack file at
+    a time — re-importing the same opr/base/fleet replaces just that pack,
+    leaving every other pack untouched (unlike /import-pbs, which replaces
+    the pilot's whole active sequence list)."""
+    body = request.get_json(silent=True) or {}
+    opr = (body.get("opr") or "").strip().upper()
+    base = (body.get("base") or "").strip().upper()
+    fleet = (body.get("fleet") or "").strip().upper()
+    text = body.get("text") or ""
+    if not opr or not base or not fleet:
+        return jsonify({"error": "opr, base, and fleet are all required"}), 400
+    if not text.strip():
+        return jsonify({"error": "empty text — nothing to import"}), 400
+
+    meta = pbs_parser.parse_pbs_meta(text)
+    sequences = pbs_parser.parse_pbs(text)
+    if not sequences:
+        return jsonify({"error": "no sequences found in that text"}), 400
+
+    row = _pack_row(opr, base, fleet)
+    if not row:
+        row = PairingPack(user_id=current_user.id, opr=opr, base=base, fleet=fleet)
+        db.session.add(row)
+    row.meta = meta
+    row.sequences = sequences
+    row.seq_count = len(sequences)
+    db.session.commit()
+    return jsonify({
+        "opr": opr, "base": base, "fleet": fleet,
+        "sequences_parsed": len(sequences),
+        "legs_parsed": sum(len(d["legs"]) for s in sequences for d in s["duty_days"]),
+    })
+
+
+@app.route("/pbs/packs")
+def list_packs():
+    """Column-limited on purpose — never touches any pack's own (large)
+    `sequences` JSON column just to list opr/base/fleet/count."""
+    rows = (
+        db.session.query(PairingPack.opr, PairingPack.base, PairingPack.fleet, PairingPack.seq_count)
+        .filter_by(user_id=current_user.id)
+        .order_by(PairingPack.opr, PairingPack.base, PairingPack.fleet)
+        .all()
+    )
+    return jsonify([{"opr": r[0], "base": r[1], "fleet": r[2], "seq_count": r[3]} for r in rows])
+
+
+@app.route("/pbs/packs/<opr>/<base>/<fleet>/sequences")
+def list_pack_sequences(opr, base, fleet):
+    row = _pack_row(opr, base, fleet)
+    if not row:
+        return jsonify({"error": "pack not found"}), 404
+    return jsonify([_summarize_sequence(s) for s in (row.sequences or [])])
+
+
+@app.route("/pbs/packs/<opr>/<base>/<fleet>/sequences/<seq_number>")
+def get_pack_sequence(opr, base, fleet, seq_number):
+    row = _pack_row(opr, base, fleet)
+    if not row:
+        return jsonify({"error": "pack not found"}), 404
+    seq = next((s for s in (row.sequences or []) if s["seq"] == seq_number), None)
+    if not seq:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(_decorate_sequence(seq, opr.upper()))
+
+
+@app.route("/pbs/packs/<opr>/<base>/<fleet>/sequences/<seq_number>/promote", methods=["POST"])
+def promote_pack_sequence(opr, base, fleet, seq_number):
+    pack = _pack_row(opr, base, fleet)
+    if not pack:
+        return jsonify({"error": "pack not found"}), 404
+    seq = next((s for s in (pack.sequences or []) if s["seq"] == seq_number), None)
+    if not seq:
+        return jsonify({"error": "not found"}), 404
+
+    row = _pbs_row()
+    if not row:
+        row = PbsImport(user_id=current_user.id, meta={"operator": opr.upper(), "base": base.upper()})
+        db.session.add(row)
+    elif not row.meta:
+        row.meta = {"operator": opr.upper(), "base": base.upper()}
+
+    existing = row.sequences or []
+    if any(s["seq"] == seq_number for s in existing):
+        # already promoted — treat as a no-op success rather than a
+        # duplicate, matching /pairings/accept's own fresh-seq-number
+        # habit of never silently colliding.
+        return jsonify(seq)
+    row.sequences = existing + [seq]
+    db.session.commit()
+    return jsonify(seq)
 
 
 @app.route("/pbs/sequences/<seq_number>/generate", methods=["POST"])
@@ -1725,6 +1847,34 @@ def set_aeroapi_key():
     return jsonify({"ok": True})
 
 
+@app.route("/settings/bid-shortcut")
+def get_bid_shortcut():
+    return jsonify(current_user.bid_shortcut or None)
+
+
+@app.route("/settings/bid-shortcut", methods=["POST"])
+def set_bid_shortcut():
+    """Saves a default opr/base/fleet for the Pairing Library to jump
+    straight to — e.g. "LGA 320/I". DELETE clears it back to no default."""
+    body = request.get_json(silent=True) or {}
+    opr = (body.get("opr") or "").strip().upper()
+    base = (body.get("base") or "").strip().upper()
+    fleet = (body.get("fleet") or "").strip().upper()
+    if not opr or not base or not fleet:
+        return jsonify({"error": "opr, base, and fleet are all required"}), 400
+    label = (body.get("label") or "").strip() or f"{base} {fleet}"
+    current_user.bid_shortcut = {"opr": opr, "base": base, "fleet": fleet, "label": label}
+    db.session.commit()
+    return jsonify(current_user.bid_shortcut)
+
+
+@app.route("/settings/bid-shortcut", methods=["DELETE"])
+def clear_bid_shortcut():
+    current_user.bid_shortcut = None
+    db.session.commit()
+    return jsonify({"ok": True})
+
+
 @app.route("/airport-timezone/<icao>")
 def airport_timezone(icao):
     """IANA timezone name for an ICAO airport code — lets the browser
@@ -2501,7 +2651,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .arow-del svg{width:16px;height:16px;}
   .arow-del:hover{color:var(--red);}
   .arow span{color:var(--label);}
-  .arow button{margin-top:10px;background:var(--blue);color:#fff;border:none;padding:10px 18px;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;width:100%;}
+  .arow button:not(.arow-del){margin-top:10px;background:var(--blue);color:#fff;border:none;padding:10px 18px;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;width:100%;}
   .section-bar{display:flex;align-items:center;justify-content:space-between;background:var(--blue);color:#fff;padding:10px 14px;font-size:14px;font-weight:600;cursor:pointer;border:none;width:100%;text-align:left;}
   .section-bar svg{width:16px;height:16px;transition:transform .15s ease;}
   .section-bar.collapsed svg.chevron{transform:rotate(180deg);}
@@ -2825,11 +2975,21 @@ FOS_TEMPLATE = """<!DOCTYPE html>
       <div class="topbar">
         <button class="back-link" onclick="showView('overview')" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
         <div class="topbar-title">
-          <h1>Pairing</h1>
+          <h1>Schedule</h1>
           <p>SEQ $seq — full trip</p>
         </div>
       </div>
-      <div id="pairing-body"><p class="placeholder-note">Loading…</p></div>
+      <div class="tabs">
+        <button class="tab-btn active" id="tab-mytrip-btn" onclick="showScheduleTab('mytrip')">My Trip</button>
+        <button class="tab-btn" id="tab-library-btn" onclick="showScheduleTab('library')">Pairing Library</button>
+      </div>
+      <div id="tab-mytrip" class="tab-panel active">
+        <div id="pairing-body"><p class="placeholder-note">Loading…</p></div>
+      </div>
+      <div id="tab-library" class="tab-panel">
+        <div id="library-crumb" style="padding:10px 14px;font-size:12.5px;color:var(--label);"></div>
+        <div id="library-body"><p class="placeholder-note">Loading…</p></div>
+      </div>
     </section>
     <section id="recovery-view" class="view">
       <div class="topbar">
@@ -3662,6 +3822,18 @@ if(!LEG_SEQ){
   const btn = document.getElementById('pairing-btn');
   if(btn) btn.style.display = 'none';
 }
+const TRASH_ICON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg>';
+let _libraryLoaded = false;
+function showScheduleTab(tab){
+  document.getElementById('tab-mytrip').classList.toggle('active', tab==='mytrip');
+  document.getElementById('tab-library').classList.toggle('active', tab==='library');
+  document.getElementById('tab-mytrip-btn').classList.toggle('active', tab==='mytrip');
+  document.getElementById('tab-library-btn').classList.toggle('active', tab==='library');
+  if(tab === 'library' && !_libraryLoaded){
+    _libraryLoaded = true;
+    initLibraryView();
+  }
+}
 async function initPairingView(){
   const body = document.getElementById('pairing-body');
   if(!LEG_SEQ){
@@ -3794,6 +3966,224 @@ function renderPairing(seqData){
     body.innerHTML = '<p class="placeholder-note">No duty days on this sequence.</p>';
   }
 }
+
+// Pairing Library — bulk-imported bid-pack files, browsed
+// opr -> base -> fleet -> sequence. Picking one promotes it into this
+// pilot's own active sequence pool (same as accepting a generated
+// pairing), then hands off to the existing Pick-a-Leg flow to start
+// flying it.
+let _libraryPath = {opr: null, base: null, fleet: null};
+async function initLibraryView(){
+  const r = await fetch('/settings/bid-shortcut');
+  const shortcut = r.ok ? await r.json() : null;
+  renderLibraryShortcutBar(shortcut);
+  await libraryShowOprs();
+}
+function renderLibraryShortcutBar(shortcut){
+  const crumb = document.getElementById('library-crumb');
+  if(shortcut){
+    crumb.innerHTML = `<div class="arow"><a class="arow-link" href="#" onclick="libraryJumpToShortcut();return false;">⭐ ${shortcut.label}</a>
+      <button class="arow-del" title="Clear saved bid" onclick="clearBidShortcut()">${TRASH_ICON_SVG}</button></div>`;
+  } else {
+    crumb.innerHTML = '';
+  }
+}
+async function libraryJumpToShortcut(){
+  const r = await fetch('/settings/bid-shortcut');
+  const s = r.ok ? await r.json() : null;
+  if(!s) return;
+  _libraryPath = {opr: s.opr, base: s.base, fleet: s.fleet};
+  await libraryShowSequences();
+}
+async function clearBidShortcut(){
+  await fetch('/settings/bid-shortcut', {method: 'DELETE'});
+  renderLibraryShortcutBar(null);
+}
+function libraryBreadcrumb(){
+  const p = _libraryPath;
+  const parts = [{label: 'Operators', fn: 'libraryShowOprs'}];
+  if(p.opr) parts.push({label: p.opr, fn: 'libraryShowBases'});
+  if(p.base) parts.push({label: p.base, fn: 'libraryShowFleets'});
+  if(p.fleet) parts.push({label: p.fleet, fn: 'libraryShowSequences'});
+  return parts.map((part, i) =>
+    i === parts.length - 1
+      ? `<span style="color:var(--value);font-weight:600;">${part.label}</span>`
+      : `<a href="#" style="color:var(--blue);" onclick="${part.fn}();return false;">${part.label}</a>`
+  ).join(' <span style="color:var(--label);">/</span> ');
+}
+function libraryRenderCrumbPath(){
+  const el = document.createElement('div');
+  el.style.cssText = 'padding:0 14px 10px;font-size:13px;';
+  el.innerHTML = libraryBreadcrumb();
+  return el;
+}
+async function libraryShowOprs(){
+  _libraryPath = {opr: null, base: null, fleet: null};
+  const body = document.getElementById('library-body');
+  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  try {
+    const r = await fetch('/pbs/packs');
+    const packs = await r.json();
+    if(!r.ok){ body.innerHTML = '<p class="placeholder-note">' + (packs.error || 'Failed to load') + '</p>'; return; }
+    const oprs = {};
+    packs.forEach(p => { oprs[p.opr] = (oprs[p.opr] || 0) + p.seq_count; });
+    body.innerHTML = '';
+    body.appendChild(libraryRenderCrumbPath());
+    const names = Object.keys(oprs).sort();
+    if(!names.length){
+      body.innerHTML += '<p class="placeholder-note">No pairing packs imported yet.</p>';
+      return;
+    }
+    names.forEach(oprName => {
+      const row = document.createElement('a');
+      row.className = 'arow'; row.href = '#';
+      // NOTE: deliberately not a JS template literal here — Python's
+      // string.Template (rendering this whole page) treats bare ${word}
+      // as ITS OWN substitution syntax and will silently eat one that
+      // happens to match a real template context key (e.g. ${base} was
+      // getting replaced with this leg's own base — cost real debugging
+      // time to track down). String concatenation sidesteps it entirely.
+      row.innerHTML = oprName + ' <span>' + oprs[oprName] + ' pairings</span>';
+      row.onclick = (e) => { e.preventDefault(); _libraryPath.opr = oprName; libraryShowBases(); };
+      body.appendChild(row);
+    });
+  } catch(e) { body.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>'; }
+}
+async function libraryShowBases(){
+  const body = document.getElementById('library-body');
+  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  try {
+    const r = await fetch('/pbs/packs');
+    const packs = (await r.json()).filter(p => p.opr === _libraryPath.opr);
+    const bases = {};
+    packs.forEach(p => { bases[p.base] = (bases[p.base] || 0) + p.seq_count; });
+    body.innerHTML = '';
+    body.appendChild(libraryRenderCrumbPath());
+    Object.keys(bases).sort().forEach(baseName => {
+      const row = document.createElement('a');
+      row.className = 'arow'; row.href = '#';
+      row.innerHTML = baseName + ' <span>' + bases[baseName] + ' pairings</span>';
+      row.onclick = (e) => { e.preventDefault(); _libraryPath.base = baseName; libraryShowFleets(); };
+      body.appendChild(row);
+    });
+  } catch(e) { body.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>'; }
+}
+async function libraryShowFleets(){
+  const body = document.getElementById('library-body');
+  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  try {
+    const r = await fetch('/pbs/packs');
+    const packs = (await r.json()).filter(p => p.opr === _libraryPath.opr && p.base === _libraryPath.base);
+    body.innerHTML = '';
+    body.appendChild(libraryRenderCrumbPath());
+    packs.sort((a,b) => a.fleet.localeCompare(b.fleet)).forEach(p => {
+      const row = document.createElement('div');
+      row.className = 'arow';
+      row.innerHTML = '<a class="arow-link" href="#">' + p.fleet + ' <span>' + p.seq_count + ' pairings</span></a>' +
+        '<button class="arow-del" title="Save as my bid" style="color:var(--blue);">★</button>';
+      row.querySelector('.arow-link').onclick = (e) => { e.preventDefault(); _libraryPath.fleet = p.fleet; libraryShowSequences(); };
+      row.querySelector('.arow-del').onclick = (e) => { e.stopPropagation(); saveBidShortcut(_libraryPath.opr, _libraryPath.base, p.fleet); };
+      body.appendChild(row);
+    });
+  } catch(e) { body.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>'; }
+}
+async function saveBidShortcut(opr, base, fleet){
+  const r = await fetch('/settings/bid-shortcut', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({opr, base, fleet}),
+  });
+  const data = await r.json();
+  if(r.ok){ renderLibraryShortcutBar(data); showToast('Saved as your bid'); }
+}
+async function libraryShowSequences(){
+  const {opr, base, fleet} = _libraryPath;
+  const body = document.getElementById('library-body');
+  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  try {
+    const r = await fetch('/pbs/packs/' + opr + '/' + base + '/' + fleet + '/sequences');
+    const seqs = await r.json();
+    if(!r.ok){ body.innerHTML = '<p class="placeholder-note">' + (seqs.error || 'Failed to load') + '</p>'; return; }
+    body.innerHTML = '';
+    body.appendChild(libraryRenderCrumbPath());
+    if(!seqs.length){ body.innerHTML += '<p class="placeholder-note">No sequences in this pack.</p>'; return; }
+    seqs.forEach(s => {
+      const row = document.createElement('a');
+      row.className = 'arow'; row.href = '#';
+      row.innerHTML = `SEQ ${s.seq} — ${(s.routing||[]).join('-')} <span>${s.days} day(s)</span>`;
+      row.onclick = (e) => { e.preventDefault(); libraryShowSequenceDetail(s.seq); };
+      body.appendChild(row);
+    });
+  } catch(e) { body.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>'; }
+}
+async function libraryShowSequenceDetail(seqNumber){
+  const {opr, base, fleet} = _libraryPath;
+  const body = document.getElementById('library-body');
+  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  try {
+    const r = await fetch('/pbs/packs/' + opr + '/' + base + '/' + fleet + '/sequences/' + encodeURIComponent(seqNumber));
+    const seqData = await r.json();
+    if(!r.ok){ body.innerHTML = '<p class="placeholder-note">' + (seqData.error || 'Failed to load') + '</p>'; return; }
+    body.innerHTML = '';
+    const crumb = libraryRenderCrumbPath();
+    crumb.innerHTML += ' <span style="color:var(--label);">/</span> <span style="color:var(--value);font-weight:600;">SEQ ' + seqNumber + '</span>';
+    body.appendChild(crumb);
+
+    const flyWrap = document.createElement('div');
+    flyWrap.style.cssText = 'padding:0 14px 12px;';
+    const flyBtn = document.createElement('button');
+    flyBtn.textContent = 'Fly This Pairing';
+    flyBtn.style.cssText = 'margin:0;width:100%;background:var(--blue);color:#fff;border:none;padding:11px;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;';
+    flyBtn.onclick = () => promoteAndFly(opr, base, fleet, seqNumber);
+    flyWrap.appendChild(flyBtn);
+    body.appendChild(flyWrap);
+
+    (seqData.duty_days || []).forEach(day => {
+      const pane = document.createElement('div');
+      pane.style.cssText = 'margin:0 14px 14px;border-radius:16px;overflow:hidden;border:1px solid var(--border);';
+      const bar = document.createElement('div');
+      bar.className = 'section-bar';
+      bar.style.cssText = 'background:var(--navy);cursor:default;';
+      bar.textContent = 'Day ' + day.duty_day + ' — RPT ' + (day.report || '');
+      pane.appendChild(bar);
+      const list = document.createElement('div');
+      list.className = 'doc-list';
+      (day.legs || []).forEach(leg => {
+        const row = document.createElement('div');
+        row.className = 'doc-row';
+        const codeWrap = document.createElement('div');
+        const code = document.createElement('div'); code.className = 'code';
+        code.textContent = leg.flight_number || '—';
+        const desc = document.createElement('div'); desc.className = 'desc';
+        desc.textContent = leg.origin + '→' + leg.destination + ' ' + leg.dep_local + '/' + leg.arr_local;
+        codeWrap.appendChild(code); codeWrap.appendChild(desc);
+        row.appendChild(codeWrap);
+        list.appendChild(row);
+      });
+      pane.appendChild(list);
+      body.appendChild(pane);
+    });
+  } catch(e) { body.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>'; }
+}
+async function promoteAndFly(opr, base, fleet, seqNumber){
+  // FOS_TEMPLATE has no leg-picker UI of its own (that lives on Home) — so
+  // rather than promote-then-redirect-to-Home-then-pick-a-leg, promote and
+  // immediately generate day 1 leg 0, landing straight on its FOS page,
+  // the same way tapping a leg in renderPairing's own duty-day cards does.
+  try {
+    const r = await fetch('/pbs/packs/' + opr + '/' + base + '/' + fleet + '/sequences/' + encodeURIComponent(seqNumber) + '/promote', {method: 'POST'});
+    const seqData = await r.json();
+    if(!r.ok){ showToast(seqData.error || 'Could not promote this pairing'); return; }
+    const position = (seqData.positions && seqData.positions[0]) || '';
+    const genR = await fetch('/pbs/sequences/' + encodeURIComponent(seqNumber) + '/generate', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({duty_day: 1, leg_index: 0, position}),
+    });
+    const genData = await genR.json();
+    if(!genR.ok){ showToast(genData.error || 'Promoted, but could not start flying it'); return; }
+    window.location.href = genData.fos_url + '?view=release';
+  } catch(e) { showToast('Request failed: ' + e); }
+}
+
 async function generatePairingLeg(seq, dutyDay, legIndex, position, view){
   try {
     const r = await fetch('/pbs/sequences/' + encodeURIComponent(seq) + '/generate', {
