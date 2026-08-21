@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import copy
 
+import pairing_engine
 import pbs_build
 import pbs_format
 import pbs_parser
@@ -208,6 +209,190 @@ def apply_leg_edit(seq, dom, ap, legs, duty_day, leg_index,
         "truncated_days": len(days) - day_idx - 1,
     }
     return new_seq, violations, meta
+
+
+def anchor_arrival(ap, disrupted_leg, actual_destination, actual_arrival_local):
+    """A bare HHMM arrival time has no day component, so it can land
+    numerically *before* the departure it followed (dep 23:00, arr 01:30 the
+    next day) — anchor it forward off the real departure instead of trusting
+    it as an absolute instant on its own. Returns
+    (original_dep_utc, actual_arrival_utc, actual_leg_block), all mutually
+    consistent (arrival = departure + block, block >= 0). Shared by
+    recover_from_disruption, apply_recovery, and server.py's re-verification
+    of an accepted candidate before splicing it in."""
+    original_dep_utc = _hhmm_to_dec(disrupted_leg["dep_local"]) - ap.off(disrupted_leg["origin"])
+    raw_arrival_utc = _hhmm_to_dec(actual_arrival_local) - ap.off(actual_destination)
+    actual_leg_block = raw_arrival_utc - original_dep_utc
+    if actual_leg_block < 0:
+        actual_leg_block += 24
+    return original_dep_utc, original_dep_utc + actual_leg_block, actual_leg_block
+
+
+def recover_from_disruption(seq, dom, ap, legs, duty_day, leg_index,
+                             actual_destination, actual_arrival_local, budget=8.0,
+                             max_extra_days=2):
+    """The leg at (duty_day, leg_index) is the one that diverted/overran —
+    actual_destination/actual_arrival_local (HHMM local at that station) is
+    where the pilot really ended up and when. Unlike apply_leg_edit, this
+    doesn't validate a single hypothetical replacement leg — it treats the
+    disruption as an established fact, then searches FORWARD from that real
+    point in space/time for a legal multi-leg path back to `dom`.
+
+    Widens the target total-duty-period count one day at a time (up to
+    max_extra_days beyond the original pairing's own length) if the
+    original length yields nothing — a disruption can legitimately cost an
+    extra day to recover from.
+
+    Returns (candidates, violations). Every candidate is already
+    verify_from()-clean by construction — there's no illegal-but-
+    confirmable state here the way a manual leg edit can produce, so callers
+    don't need a confirm/reject step, just "pick one." candidates carry the
+    seed state (day_number/dlegs_today/dblk_today/duty_report_utc/
+    total_days) needed later by apply_recovery to correctly splice/render
+    whichever one gets accepted.
+    """
+    days = seq.get("duty_days") or []
+    day_idx = next((i for i, d in enumerate(days) if d["duty_day"] == duty_day), None)
+    if day_idx is None:
+        return [], ["duty_day not found"]
+    day = days[day_idx]
+    legs_this_day = day.get("legs") or []
+    if leg_index < 0 or leg_index >= len(legs_this_day):
+        return [], ["leg_index out of range"]
+
+    actual_destination = (actual_destination or "").strip().upper()
+    if not actual_destination or not ap.known(actual_destination):
+        return [], [f"unknown station: {actual_destination!r}"]
+
+    disrupted_leg = legs_this_day[leg_index]
+    kept_legs = legs_this_day[:leg_index]
+    try:
+        original_dep_utc, actual_arrival_utc, actual_leg_block = anchor_arrival(
+            ap, disrupted_leg, actual_destination, actual_arrival_local,
+        )
+    except (ValueError, KeyError) as e:
+        return [], [f"invalid disruption data: {e}"]
+
+    if kept_legs:
+        first = kept_legs[0]
+        rpt_utc = _hhmm_to_dec(first["dep_local"]) - ap.off(first["origin"]) - Rules.BRIEF
+    else:
+        rpt_utc = original_dep_utc - Rules.BRIEF
+
+    dblk_so_far = sum(_bid_or_hhmm_span_to_dec(l) for l in kept_legs) + actual_leg_block
+    dlegs_so_far = len(kept_legs) + 1
+    day_number = duty_day
+    original_total_days = days[-1]["duty_day"] if days else duty_day
+    floor_days = max(original_total_days, duty_day)
+
+    candidates, tried = [], []
+    for total_days in range(floor_days, floor_days + max_extra_days + 1):
+        tried.append(total_days)
+        search = pairing_engine.Search(legs, ap, total_days, budget)
+        chains = search.run_from(actual_destination, actual_arrival_utc, dom, day_number,
+                                  dlegs_so_far, dblk_so_far, rpt_utc, total_days)
+        for chain in chains:
+            bad = pairing_engine.verify_from(
+                legs, ap, chain, dom, actual_destination, actual_arrival_utc,
+                day_number, dlegs_so_far, dblk_so_far, rpt_utc, total_days,
+            )
+            if bad:
+                continue
+            steps, _ = pairing_engine.walk_from(
+                legs, ap, chain, actual_destination, actual_arrival_utc,
+                day_number, dlegs_so_far, dblk_so_far, rpt_utc,
+            )
+            block = sum(legs[i]["blk"] for i in chain)
+            lpd = pairing_engine.legs_per_day(steps)
+            candidates.append({
+                "chain": list(chain), "block": round(block, 2),
+                "dacv": round(block / total_days, 3) if total_days else 0,
+                "legs_per_day": lpd,
+                "routing": [actual_destination] + [legs[i]["d"] for i in chain],
+                "total_days": total_days, "day_number": day_number,
+                "dlegs_today": dlegs_so_far, "dblk_today": dblk_so_far,
+                "duty_report_utc": rpt_utc,
+            })
+        if candidates:
+            break
+
+    if not candidates:
+        return [], [
+            f"no legal way back to {dom} found from {actual_destination} within "
+            f"{'/'.join(map(str, tried))} total duty period(s)"
+        ]
+    candidates.sort(key=lambda c: -c["dacv"])
+    return candidates, []
+
+
+def apply_recovery(seq, dom, ap, legs, duty_day, leg_index, actual_destination,
+                    actual_arrival_local, chain, day_number, dlegs_today, dblk_today,
+                    duty_report_utc, total_days):
+    """Splices an accepted recover_from_disruption() candidate onto the
+    sequence: the disrupted leg is rewritten to its real outcome, everything
+    after it that same day is dropped (same truncation apply_leg_edit
+    already does), and the chosen continuation chain replaces it — spanning
+    however many new duty days it needs, not just one."""
+    days = seq.get("duty_days") or []
+    day_idx = next((i for i, d in enumerate(days) if d["duty_day"] == duty_day), None)
+    if day_idx is None:
+        return None, ["duty_day not found"]
+    day = days[day_idx]
+    legs_this_day = day.get("legs") or []
+    if leg_index < 0 or leg_index >= len(legs_this_day):
+        return None, ["leg_index out of range"]
+
+    disrupted_leg = legs_this_day[leg_index]
+    kept_legs = legs_this_day[:leg_index]
+    actual_destination = (actual_destination or "").strip().upper()
+
+    try:
+        original_dep_utc, actual_arrival_utc, actual_leg_block = anchor_arrival(
+            ap, disrupted_leg, actual_destination, actual_arrival_local,
+        )
+    except (ValueError, KeyError) as e:
+        return None, [f"invalid disruption data: {e}"]
+
+    prefix_steps = []
+    for l in kept_legs:
+        prefix_steps.append(dict(
+            day=duty_day,
+            leg=dict(f=l["flight_number"], o=l["origin"], d=l["destination"],
+                      blk=_bid_or_hhmm_span_to_dec(l), fleet=l.get("equipment", "")),
+            dep=_hhmm_to_dec(l["dep_local"]) - ap.off(l["origin"]),
+            arr=_hhmm_to_dec(l["arr_local"]) - ap.off(l["destination"]),
+        ))
+    prefix_steps.append(dict(
+        day=duty_day,
+        leg=dict(f=disrupted_leg.get("flight_number", ""), o=disrupted_leg["origin"],
+                  d=actual_destination, blk=actual_leg_block,
+                  fleet=disrupted_leg.get("equipment", "")),
+        dep=original_dep_utc, arr=actual_arrival_utc,
+    ))
+
+    continuation_steps, continuation_rests = pairing_engine.walk_from(
+        legs, ap, chain, actual_destination, actual_arrival_utc,
+        day_number, dlegs_today, dblk_today, duty_report_utc,
+    )
+    if not continuation_steps:
+        return None, ["empty recovery chain"]
+
+    all_steps = prefix_steps + continuation_steps
+    true_day_numbers = sorted({s["day"] for s in all_steps})
+    rendered_days = pbs_build.days_from_steps(ap, all_steps, continuation_rests, dom)
+
+    lines = pbs_format.sequence_lines(9999, rendered_days, 1, [])
+    text = "\n".join(lines) + "\n"
+    reparsed = pbs_parser.parse_pbs(text)
+    if not reparsed or not reparsed[0]["duty_days"]:
+        return None, ["internal error: could not reconstruct the recovered days"]
+    new_days = reparsed[0]["duty_days"]
+    for true_dn, rday in zip(true_day_numbers, new_days):
+        rday["duty_day"] = true_dn
+
+    new_seq = copy.deepcopy(seq)
+    new_seq["duty_days"] = days[:day_idx] + new_days
+    return new_seq, []
 
 
 def _bid_or_hhmm_span_to_dec(leg):

@@ -224,13 +224,46 @@ class Search:
             self.by[k].sort(key=lambda i: legs[i]["dep"])
 
     def run(self, dom, must_touch=None, exact_days=True):
-        legs, ap, R = self.legs, self.ap, Rules
+        """Fresh trip: seeds the search from every domicile departure,
+        duty-period 1."""
         need = set(must_touch or ())
+        seeds = []
+        hbt = self.ap.off(dom)
+        for i in self.by.get(dom, ()):
+            g = self.legs[i]
+            rep = g["dep"] - Rules.BRIEF
+            if g["blk"] <= min(Rules.MAX_DUTY_BLOCK, table_a(rep + hbt)):
+                seeds.append(dict(stn=g["d"], t=g["arr"], used={i}, day=1, dlegs=1,
+                                   dblk=g["blk"], rep=rep, chain=[i],
+                                   hit=(not need) or g["d"] in need))
+        return self._search(dom, need, exact_days, seeds)
+
+    def run_from(self, station, earliest_utc, dom, day_number, dlegs_today, dblk_today,
+                 duty_report_utc, remaining_days, must_touch=None):
+        """Resume the search mid-trip — e.g. recovering from a disruption.
+        `station`/`earliest_utc` is where the trip actually stands right now;
+        `day_number`/`dlegs_today`/`dblk_today`/`duty_report_utc` describe the
+        duty period already in progress at that point (dlegs_today=0,
+        dblk_today=0 if the disruption starts a fresh duty period after a
+        rest). `remaining_days` is measured the same way `run()`'s own
+        `self.days` is — total duty periods from trip start, so it's
+        typically the original pairing's own day count, unchanged."""
+        need = set(must_touch or ())
+        seed = dict(stn=station, t=earliest_utc, used=set(), day=day_number,
+                     dlegs=dlegs_today, dblk=dblk_today, rep=duty_report_utc,
+                     chain=[], hit=not need)
+        self.days = remaining_days
+        return self._search(dom, need, True, [seed])
+
+    def _search(self, dom, need, exact_days, seeds):
+        legs, ap, R = self.legs, self.ap, Rules
         hbt = ap.off(dom)
         out, t0 = [], time.time()
+        self.truncated = False
 
         def dfs(stn, t, used, day, dlegs, dblk, rep, chain, hit):
             if time.time() - t0 > self.budget:
+                self.truncated = True
                 return
             if stn == dom and chain and hit:
                 if (not exact_days and day <= self.days) or day == self.days:
@@ -267,12 +300,9 @@ class Search:
                                 dfs(g["d"], arr, used | {i}, day + 1, 1, g["blk"], nrep,
                                     chain + [i], hit or g["d"] in need)
 
-        for i in self.by.get(dom, ()):
-            g = legs[i]
-            rep = g["dep"] - Rules.BRIEF
-            if g["blk"] <= min(Rules.MAX_DUTY_BLOCK, table_a(rep + hbt)):
-                dfs(g["d"], g["arr"], {i}, 1, 1, g["blk"], rep, [i],
-                    (not need) or g["d"] in need)
+        for seed in seeds:
+            dfs(seed["stn"], seed["t"], seed["used"], seed["day"], seed["dlegs"],
+                seed["dblk"], seed["rep"], seed["chain"], seed["hit"])
         return list(dict.fromkeys(out))
 
 
@@ -327,6 +357,85 @@ def verify(legs, ap, chain, dom, days):
             bad.append(f"day {dn} FDP {fdp:.2f} > Table B {table_b(rep, len(ss))}")
         if len(ss) > Rules.MAX_LEGS_DAY:
             bad.append(f"day {dn} {len(ss)} legs")
+    if len(set(chain)) != len(chain):
+        bad.append("duplicate leg")
+    return bad
+
+
+def walk_from(legs, ap, chain, station, earliest_utc, day_number, dlegs_today,
+              dblk_today, duty_report_utc):
+    """walk()'s equivalent for a chain produced by Search.run_from — seeded
+    from a mid-trip disruption point instead of a fresh domicile departure.
+    The first leg's MCT check uses `station` itself as the previous-origin
+    stand-in (the same fallback Search._search's own dfs uses for an empty
+    seed chain), since the leg that actually got the pilot to `station`
+    isn't part of `chain` — a minor approximation (it can only under- rather
+    than over-estimate required connect time) that matches what the search
+    itself already assumed when finding this chain."""
+    steps, rests = [], []
+    day, t, prev_o = day_number, earliest_utc, station
+    dlegs, dblk, rep = dlegs_today, dblk_today, duty_report_utc
+    for i in chain:
+        g = legs[i]
+        dep = g["dep"]
+        m = mct_after_arrival(ap, prev_o, g["o"])
+        while dep < t + m:
+            dep += 24
+        if dep - t > max_sit_at(ap, g["o"]):
+            dep = g["dep"]
+            while (dep - Rules.BRIEF) - (t + Rules.DEBRIEF) < Rules.MIN_REST:
+                dep += 24
+            rests.append((dep - Rules.BRIEF) - (t + Rules.DEBRIEF))
+            day += 1
+            dlegs, dblk, rep = 0, 0.0, dep - Rules.BRIEF
+        arr = dep + g["blk"]
+        dlegs += 1
+        dblk += g["blk"]
+        steps.append(dict(day=day, leg=g, dep=dep, arr=arr))
+        t, prev_o = arr, g["o"]
+    return steps, rests
+
+
+def verify_from(legs, ap, chain, dom, station, earliest_utc, day_number, dlegs_today,
+                 dblk_today, duty_report_utc, total_days):
+    """verify()'s equivalent for a resumed/continuation chain: no "starts at
+    base" check (it deliberately doesn't), and day numbering continues from
+    the seed's own day_number instead of restarting at 1 the way a plain
+    walk(chain) would."""
+    if not chain:
+        return ["empty continuation"]
+    steps, rests = walk_from(legs, ap, chain, station, earliest_utc, day_number,
+                              dlegs_today, dblk_today, duty_report_utc)
+    bad = []
+    if steps[-1]["leg"]["d"] != dom:
+        bad.append("does not end at base")
+    if steps[-1]["day"] != total_days:
+        bad.append(f"{steps[-1]['day']} days, wanted {total_days}")
+    for r in rests:
+        if r < Rules.MIN_REST - 1e-6:
+            bad.append(f"rest {r:.2f}h < {Rules.MIN_REST}")
+    byday = defaultdict(list)
+    for s in steps:
+        byday[s["day"]].append(s)
+    for dn, ss in byday.items():
+        if dn == day_number:
+            # the duty period already in progress at the seed — its report/
+            # leg-count/block carry forward from the seed, not just this day's ss.
+            rep = duty_report_utc + ap.off(dom)
+            blk = dblk_today + sum(s["leg"]["blk"] for s in ss)
+            fdp = (ss[-1]["arr"] + Rules.DEBRIEF) - duty_report_utc
+            nlegs = dlegs_today + len(ss)
+        else:
+            rep = ss[0]["dep"] - Rules.BRIEF + ap.off(dom)
+            blk = sum(s["leg"]["blk"] for s in ss)
+            fdp = (ss[-1]["arr"] + Rules.DEBRIEF) - (ss[0]["dep"] - Rules.BRIEF)
+            nlegs = len(ss)
+        if blk > min(Rules.MAX_DUTY_BLOCK, table_a(rep)) + 1e-6:
+            bad.append(f"day {dn} block {blk:.2f} > Table A {table_a(rep)}")
+        if fdp > table_b(rep, nlegs) + 1e-6:
+            bad.append(f"day {dn} FDP {fdp:.2f} > Table B {table_b(rep, nlegs)}")
+        if nlegs > Rules.MAX_LEGS_DAY:
+            bad.append(f"day {dn} {nlegs} legs")
     if len(set(chain)) != len(chain):
         bad.append("duplicate leg")
     return bad

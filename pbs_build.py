@@ -24,10 +24,12 @@ def meal_code(dep_local):
     return "M"
 
 
-def to_pbs(legs, ap, chain, dom, seq_no, start_dow, period, eq_of=None):
-    """One pairing -> the dict shape pbs_format.sequence_lines wants.
-    Returns (sequence_text_lines, ops_count)."""
-    steps, rests = walk(legs, ap, chain)
+def days_from_steps(ap, steps, rests, dom, eq_of=None):
+    """Groups a (steps, rests) pair — from either walk() or walk_from() —
+    into the day-dict list pbs_format.sequence_lines() wants. Extracted out
+    of to_pbs() so a spliced prefix+continuation step list (mid-trip
+    recovery, pairing_edit.apply_recovery) can go through the exact same
+    rendering path a fresh chain does, instead of duplicating it."""
     L = lambda utc, stn: utc + ap.off(stn)
     byday = defaultdict(list)
     for s in steps:
@@ -75,5 +77,13 @@ def to_pbs(legs, ap, chain, dom, seq_no, start_dow, period, eq_of=None):
             d["rest"] = rests[di]
         days.append(d)
     days[-1]["tafb"] = (steps[-1]["arr"] + Rules.DEBRIEF) - first_rpt
+    return days
+
+
+def to_pbs(legs, ap, chain, dom, seq_no, start_dow, period, eq_of=None):
+    """One pairing -> the dict shape pbs_format.sequence_lines wants.
+    Returns (sequence_text_lines, ops_count)."""
+    steps, rests = walk(legs, ap, chain)
+    days = days_from_steps(ap, steps, rests, dom, eq_of)
     cal, ops = F.calendar_rows(start_dow, period)
     return F.sequence_lines(seq_no, days, ops, cal), ops

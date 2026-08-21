@@ -1180,6 +1180,137 @@ def resolve_date_slip(leg_id):
     return jsonify({"id": data["id"], "pairing_sched_out": data.get("pairing_sched_out"), "pairing_sched_in": data.get("pairing_sched_in")})
 
 
+# ---------------------------------------------------------------------------
+# Mid-trip recovery — the leg currently being viewed diverted/overran and the
+# rest of its pairing is no longer trustworthy. Finds a legal way back to
+# base from wherever the pilot actually ended up (pairing_edit.py, built on
+# pairing_engine.Search.run_from), instead of the only previous option —
+# hand-editing the raw PBS text and re-importing it.
+# ---------------------------------------------------------------------------
+def _duty_day_for_leg(seq, leg_row):
+    """Which (duty_day, leg_index) in `seq` this flown Leg row came from —
+    matched the same ICAO-normalized way _find()/carry_from already compare
+    a PBS-pairing leg's raw station codes against a SimBrief-enriched leg's
+    OFP codes, since Leg rows don't carry their duty_day/leg_index directly."""
+    flight_number = (leg_row.data.get("flight_number") or "").strip()
+    origin_icao = _airport_icao(leg_row.data.get("origin", ""))
+    dest_icao = _airport_icao(leg_row.data.get("destination", ""))
+    for day in seq.get("duty_days") or []:
+        for i, leg in enumerate(day.get("legs") or []):
+            if (
+                leg.get("flight_number") == flight_number
+                and _airport_icao(leg.get("origin", "")) == origin_icao
+                and _airport_icao(leg.get("destination", "")) == dest_icao
+            ):
+                return day["duty_day"], i
+    return None, None
+
+
+@app.route("/fos/<int:leg_id>/recover", methods=["POST"])
+def recover_leg(leg_id):
+    row = _get_leg_row(leg_id)
+    if not row:
+        return jsonify({"error": "not found"}), 404
+    seq_number = row.data.get("seq")
+    if not seq_number:
+        return jsonify({"error": "this leg has no SEQ — nothing to recover into"}), 400
+    seq = next((s for s in _pbs_sequences() if s["seq"] == seq_number), None)
+    if not seq:
+        return jsonify({"error": "sequence not found — it may have been deleted"}), 404
+
+    body = request.get_json(silent=True) or {}
+    actual_destination = (body.get("actual_destination") or "").strip().upper()
+    actual_arrival_local = body.get("actual_arrival_local")
+    if not actual_destination or not actual_arrival_local:
+        return jsonify({"error": "actual_destination and actual_arrival_local are required"}), 400
+
+    duty_day, leg_index = _duty_day_for_leg(seq, row)
+    if duty_day is None:
+        return jsonify({"error": "couldn't match this flight to a leg in its own sequence"}), 400
+
+    first_day = seq["duty_days"][0] if seq["duty_days"] else None
+    dom = first_day["legs"][0]["origin"] if first_day and first_day["legs"] else ""
+    if not dom:
+        return jsonify({"error": "sequence has no origin to recover back to"}), 400
+
+    legs, ap = pairing_engine.get_route_data()
+    try:
+        budget = min(float(body.get("budget", 8)), 10.0)
+    except (TypeError, ValueError):
+        budget = 8.0
+    candidates, violations = pairing_edit.recover_from_disruption(
+        seq, dom, ap, legs, duty_day, leg_index, actual_destination, actual_arrival_local, budget=budget,
+    )
+    if not candidates:
+        return jsonify({"error": "; ".join(violations) or "no legal recovery found"}), 400
+    return jsonify({
+        "seq": seq_number, "duty_day": duty_day, "leg_index": leg_index,
+        "actual_destination": actual_destination, "actual_arrival_local": actual_arrival_local,
+        "candidates": candidates,
+    })
+
+
+@app.route("/fos/<int:leg_id>/recover/accept", methods=["POST"])
+def recover_leg_accept(leg_id):
+    row = _get_leg_row(leg_id)
+    if not row:
+        return jsonify({"error": "not found"}), 404
+    seq_number = row.data.get("seq")
+    pbs_row = _pbs_row()
+    seq = next((s for s in (pbs_row.sequences if pbs_row else []) if s["seq"] == seq_number), None)
+    if not seq:
+        return jsonify({"error": "sequence not found"}), 404
+
+    body = request.get_json(silent=True) or {}
+    required = ("actual_destination", "actual_arrival_local", "chain", "day_number",
+                "dlegs_today", "dblk_today", "duty_report_utc", "total_days")
+    if any(body.get(k) is None for k in required):
+        return jsonify({"error": f"missing one of: {', '.join(required)}"}), 400
+
+    duty_day, leg_index = _duty_day_for_leg(seq, row)
+    if duty_day is None:
+        return jsonify({"error": "couldn't match this flight to a leg in its own sequence"}), 400
+
+    legs, ap = pairing_engine.get_route_data()
+    first_day = seq["duty_days"][0] if seq["duty_days"] else None
+    dom = first_day["legs"][0]["origin"] if first_day and first_day["legs"] else ""
+    day = next((d for d in seq["duty_days"] if d["duty_day"] == duty_day), None)
+    disrupted_leg = day["legs"][leg_index] if day else None
+    actual_destination = (body.get("actual_destination") or "").strip().upper()
+    chain = [int(i) for i in body["chain"]]
+
+    # Defense in depth: re-verify the chosen chain before splicing it in —
+    # same reasoning as /pairings/accept re-verifying a freshly generated
+    # candidate — the client only sent back seed data from a prior stateless
+    # /recover response, don't trust it blindly.
+    try:
+        _, actual_arrival_utc, _ = pairing_edit.anchor_arrival(
+            ap, disrupted_leg, actual_destination, body["actual_arrival_local"],
+        )
+    except (ValueError, KeyError, TypeError) as e:
+        return jsonify({"error": f"invalid disruption data: {e}"}), 400
+    problems = pairing_engine.verify_from(
+        legs, ap, chain, dom, actual_destination, actual_arrival_utc,
+        int(body["day_number"]), int(body["dlegs_today"]), float(body["dblk_today"]),
+        float(body["duty_report_utc"]), int(body["total_days"]),
+    )
+    if problems:
+        return jsonify({"error": "candidate failed re-verification: " + "; ".join(problems)}), 400
+
+    new_seq, errs = pairing_edit.apply_recovery(
+        seq, dom, ap, legs, duty_day, leg_index,
+        actual_destination, body["actual_arrival_local"],
+        chain, int(body["day_number"]), int(body["dlegs_today"]),
+        float(body["dblk_today"]), float(body["duty_report_utc"]), int(body["total_days"]),
+    )
+    if new_seq is None:
+        return jsonify({"error": "; ".join(errs) or "could not apply recovery"}), 400
+
+    pbs_row.sequences = [new_seq if s["seq"] == seq_number else s for s in pbs_row.sequences]
+    db.session.commit()
+    return jsonify(new_seq)
+
+
 @app.route("/fos/<int:leg_id>/prefile")
 def get_prefile_links(leg_id):
     """VATSIM/IVAO prefile forms straight from the pilot's current SimBrief
@@ -2321,6 +2452,16 @@ FOS_TEMPLATE = """<!DOCTYPE html>
             </div>
           </div>
           <div class="panel-card">
+            <div class="panel-card-hdr">Trip Recovery</div>
+            <div class="doc-row" style="border-bottom:none;cursor:pointer;" onclick="showView('recovery')">
+              <div style="display:flex;align-items:center;gap:10px;">
+                <svg class="lead-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v5"/><path d="M12 16h.01"/></svg>
+                <div><div class="code">Report a Disruption</div><div class="desc">Diverted or timed out? Find a legal way back.</div></div>
+              </div>
+              <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></div>
+            </div>
+          </div>
+          <div class="panel-card">
             <div class="panel-card-hdr">External Apps</div>
             <div class="doc-row" style="cursor:pointer;" onclick="showView('release')">
               <div><div class="code">SimBrief</div><div class="desc">Send to Dispatch</div></div>
@@ -2518,6 +2659,25 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         </div>
       </div>
       <div id="pairing-body"><p class="placeholder-note">Loading…</p></div>
+    </section>
+    <section id="recovery-view" class="view">
+      <div class="topbar">
+        <button class="back-link" onclick="showView('overview')" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
+        <div class="topbar-title">
+          <h1>Report a Disruption</h1>
+          <p>Find a legal way back to base</p>
+        </div>
+      </div>
+      <div class="panel">
+        <div style="font-size:13px;color:var(--label);margin-bottom:4px;">Enter where this flight actually ended up. Everything after it in the pairing will be replaced with a legal way back to base.</div>
+        <label for="rec-dest">Actual Destination</label>
+        <input id="rec-dest" type="text" placeholder="Station code">
+        <label for="rec-arrival">Actual Arrival (local time, HHMM)</label>
+        <input id="rec-arrival" type="text" placeholder="e.g. 0300">
+        <br><button onclick="submitRecovery()">Find Recovery Options</button>
+        <div id="recovery-msg" class="msg"></div>
+      </div>
+      <div id="recovery-candidates" style="margin-top:4px;"></div>
     </section>
     <section id="release-view" class="view">
       <div class="topbar">
@@ -2724,6 +2884,7 @@ function showView(view){
   document.getElementById('pdf-view').classList.toggle('active', view==='pdf');
   document.getElementById('sign-view').classList.toggle('active', view==='sign');
   document.getElementById('pairing-view').classList.toggle('active', view==='pairing');
+  document.getElementById('recovery-view').classList.toggle('active', view==='recovery');
   document.getElementById('weather-view').classList.toggle('active', view==='weather');
   document.getElementById('doclocker-view').classList.toggle('active', view==='doclocker');
   document.getElementById('saveddocs-view').classList.toggle('active', view==='saveddocs');
@@ -3547,6 +3708,73 @@ async function resolveLegEdit(seq, action){
   if(_legEditFormOpen){ _legEditFormOpen.remove(); _legEditFormOpen = null; }
   showToast(action === 'confirm' ? 'Leg updated' : 'Edit discarded');
   initPairingView();
+}
+
+// Mid-trip recovery — the currently-viewed leg diverted/overran. Every
+// candidate /fos/<id>/recover returns is already legal by construction
+// (pairing_edit.recover_from_disruption only returns verify_from()-clean
+// continuations), so — unlike leg editing — there's no illegal-but-
+// confirmable state and no confirm/reject modal needed here, just pick one.
+let _recoveryContext = null;
+async function submitRecovery(){
+  const el = document.getElementById('recovery-msg');
+  const list = document.getElementById('recovery-candidates');
+  list.innerHTML = '';
+  const dest = document.getElementById('rec-dest').value.trim().toUpperCase();
+  const arrival = document.getElementById('rec-arrival').value.trim();
+  if(!dest || !arrival){ el.textContent = 'Actual destination and arrival time are both required.'; el.style.color = 'var(--red)'; return; }
+  el.textContent = 'Searching for a legal way back…';
+  el.style.color = '';
+  try {
+    const r = await fetch('/fos/' + LEG_ID + '/recover', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({actual_destination: dest, actual_arrival_local: arrival}),
+    });
+    const data = await r.json();
+    if(!r.ok){ el.textContent = data.error || 'No recovery found'; el.style.color = 'var(--red)'; return; }
+    _recoveryContext = {actual_destination: dest, actual_arrival_local: arrival};
+    el.textContent = `Found ${data.candidates.length} legal option(s).`;
+    el.style.color = 'var(--green)';
+    list.innerHTML = data.candidates.map((c, i) => `<div class="arow" style="flex-direction:column;align-items:stretch;">
+      <div style="display:flex;justify-content:space-between;font-size:13.5px;color:var(--value);">
+        <span>${c.routing.join('-')}</span><span>${c.block.toFixed(2)}h block</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--label);margin-top:2px;">
+        <span>${c.legs_per_day.join('-')} legs/day</span><span>${c.total_days} total duty period(s)</span>
+      </div>
+      <button onclick="acceptRecovery(${i})" style="margin-top:8px;">Accept &amp; Recover</button>
+    </div>`).join('');
+    window._recoveryCandidates = data.candidates;
+  } catch(e) {
+    el.textContent = 'Request failed: ' + e;
+    el.style.color = 'var(--red)';
+  }
+}
+async function acceptRecovery(i){
+  const el = document.getElementById('recovery-msg');
+  const c = (window._recoveryCandidates || [])[i];
+  if(!c || !_recoveryContext){ el.textContent = 'That option is no longer available — search again.'; el.style.color = 'var(--red)'; return; }
+  el.textContent = 'Applying recovery…';
+  el.style.color = '';
+  try {
+    const r = await fetch('/fos/' + LEG_ID + '/recover/accept', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        actual_destination: _recoveryContext.actual_destination,
+        actual_arrival_local: _recoveryContext.actual_arrival_local,
+        chain: c.chain, day_number: c.day_number, dlegs_today: c.dlegs_today,
+        dblk_today: c.dblk_today, duty_report_utc: c.duty_report_utc, total_days: c.total_days,
+      }),
+    });
+    const data = await r.json();
+    if(!r.ok){ el.textContent = data.error || 'Recovery failed'; el.style.color = 'var(--red)'; return; }
+    document.getElementById('recovery-candidates').innerHTML = '';
+    showToast('Recovered — pairing updated');
+    showView('pairing');
+  } catch(e) {
+    el.textContent = 'Request failed: ' + e;
+    el.style.color = 'var(--red)';
+  }
 }
 
 const _DDMMMYY_MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
