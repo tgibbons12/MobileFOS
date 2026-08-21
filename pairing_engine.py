@@ -236,10 +236,10 @@ class Search:
                 seeds.append(dict(stn=g["d"], t=g["arr"], used={i}, day=1, dlegs=1,
                                    dblk=g["blk"], rep=rep, chain=[i],
                                    hit=(not need) or g["d"] in need))
-        return self._search(dom, need, exact_days, seeds)
+        return self._search(dom, need, exact_days, seeds, target=dom)
 
     def run_from(self, station, earliest_utc, dom, day_number, dlegs_today, dblk_today,
-                 duty_report_utc, remaining_days, must_touch=None):
+                 duty_report_utc, remaining_days, must_touch=None, target=None):
         """Resume the search mid-trip — e.g. recovering from a disruption.
         `station`/`earliest_utc` is where the trip actually stands right now;
         `day_number`/`dlegs_today`/`dblk_today`/`duty_report_utc` describe the
@@ -247,16 +247,25 @@ class Search:
         dblk_today=0 if the disruption starts a fresh duty period after a
         rest). `remaining_days` is measured the same way `run()`'s own
         `self.days` is — total duty periods from trip start, so it's
-        typically the original pairing's own day count, unchanged."""
+        typically the original pairing's own day count, unchanged.
+
+        `target` is where a chain must END to be accepted — defaults to
+        `dom` (get back to base), but can be any station, e.g. a day-scoped
+        recovery search that just needs to reach the original pairing's
+        planned overnight city rather than the whole way home. `dom` itself
+        is always used for the home-base-time legality math (table_a/
+        table_b) and for "am I sitting at base" checks, regardless of what
+        `target` is — those are real crew-rest rules, not search goals."""
         need = set(must_touch or ())
         seed = dict(stn=station, t=earliest_utc, used=set(), day=day_number,
                      dlegs=dlegs_today, dblk=dblk_today, rep=duty_report_utc,
                      chain=[], hit=not need)
         self.days = remaining_days
-        return self._search(dom, need, True, [seed])
+        return self._search(dom, need, True, [seed], target=target or dom)
 
-    def _search(self, dom, need, exact_days, seeds):
+    def _search(self, dom, need, exact_days, seeds, target=None):
         legs, ap, R = self.legs, self.ap, Rules
+        target = target or dom
         hbt = ap.off(dom)
         out, t0 = [], time.time()
         self.truncated = False
@@ -265,7 +274,7 @@ class Search:
             if time.time() - t0 > self.budget:
                 self.truncated = True
                 return
-            if stn == dom and chain and hit:
+            if stn == target and chain and hit:
                 if (not exact_days and day <= self.days) or day == self.days:
                     out.append(tuple(chain))
             if day >= self.days:

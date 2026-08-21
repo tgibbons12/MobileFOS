@@ -395,6 +395,408 @@ def apply_recovery(seq, dom, ap, legs, duty_day, leg_index, actual_destination,
     return new_seq, []
 
 
+def find_network_leg_after(legs, origin, destination, earliest_utc, flight_number=None):
+    """Like find_network_leg, but only considers a departure at/after
+    earliest_utc — wrapping the leg's own dep forward by 24h as many times
+    as needed, since a leg's dep is a bare hour-of-day with no day
+    component of its own. Returns (leg, wrapped_dep_utc) or (None, None)."""
+    origin = (origin or "").strip().upper()
+    destination = (destination or "").strip().upper()
+    candidates = [l for l in legs if l["o"] == origin and l["d"] == destination]
+    if flight_number:
+        fn = str(flight_number).strip()
+        exact = [l for l in candidates if l["f"] == fn]
+        if exact:
+            candidates = exact
+    if not candidates:
+        return None, None
+    best_leg, best_dep = None, None
+    for l in candidates:
+        dep = l["dep"]
+        while dep < earliest_utc:
+            dep += 24
+        if best_dep is None or dep < best_dep:
+            best_leg, best_dep = l, dep
+    return best_leg, best_dep
+
+
+def _prefix_rest_state(days, day_idx, duty_day, leg_index, ap, rest_start_local):
+    """Shared setup for retry_shifted_plan/day_scoped_recovery/
+    apply_day_patch: this day's still-valid legs before leg_index, and the
+    earliest legal report time for whatever comes next, anchored off
+    rest_start_local (when duty actually ended) wrapped forward to be no
+    earlier than the last thing that actually flew before it."""
+    day = days[day_idx]
+    legs_this_day = day.get("legs") or []
+    kept_legs = legs_this_day[:leg_index]
+    if kept_legs:
+        last = kept_legs[-1]
+        rest_station = last["destination"]
+        last_arr_utc = _hhmm_to_dec(last["arr_local"]) - ap.off(last["destination"])
+    elif day_idx > 0 and (days[day_idx - 1].get("legs") or []):
+        prev_last = days[day_idx - 1]["legs"][-1]
+        rest_station = prev_last["destination"]
+        last_arr_utc = _hhmm_to_dec(prev_last["arr_local"]) - ap.off(prev_last["destination"])
+    else:
+        pending0 = legs_this_day[leg_index]
+        rest_station = pending0["origin"]
+        last_arr_utc = _hhmm_to_dec(pending0["dep_local"]) - ap.off(pending0["origin"])
+
+    raw_rest_start_utc = _hhmm_to_dec(rest_start_local) - ap.off(rest_station)
+    rest_start_utc = raw_rest_start_utc
+    while rest_start_utc < last_arr_utc:
+        rest_start_utc += 24
+    earliest_report_utc = rest_start_utc + Rules.MIN_REST
+    return kept_legs, rest_station, earliest_report_utc
+
+
+def _step_matched_leg(ap, legs, pl, t, prev_origin, dlegs, dblk, rep, hbt):
+    """Try to place originally-planned leg `pl` next in a shifted replay,
+    given engine state (t=prev arrival UTC, prev_origin, and the current
+    duty period's dlegs/dblk/rep). Prefers a same-day continuation at the
+    leg's next real occurrence; falls back to overnight if the same-day
+    connection doesn't fit legally — mirrors Search._search's own dfs
+    branch logic, just picking a real leg via find_network_leg_after
+    instead of exploring every candidate.
+
+    Returns (net_leg, dep, arr, new_dlegs, new_dblk, new_rep, is_overnight)
+    or None if no legal placement exists at all."""
+    if dlegs < Rules.MAX_LEGS_DAY:
+        m = mct_after_arrival(ap, prev_origin, pl["origin"])
+        net_leg, dep = find_network_leg_after(legs, pl["origin"], pl["destination"], t + m, pl.get("flight_number"))
+        if net_leg is not None and dep - t <= max_sit_at(ap, pl["origin"]):
+            nb = dblk + net_leg["blk"]
+            if nb <= min(Rules.MAX_DUTY_BLOCK, table_a(rep + hbt)):
+                arr = dep + net_leg["blk"]
+                if (arr + Rules.DEBRIEF) - rep <= table_b(rep + hbt, dlegs + 1):
+                    return net_leg, dep, arr, dlegs + 1, nb, rep, False
+    net_leg, dep = find_network_leg_after(
+        legs, pl["origin"], pl["destination"],
+        t + Rules.DEBRIEF + Rules.MIN_REST + Rules.BRIEF, pl.get("flight_number"),
+    )
+    if net_leg is None:
+        return None
+    nrep = dep - Rules.BRIEF
+    if net_leg["blk"] > min(Rules.MAX_DUTY_BLOCK, table_a(nrep + hbt)):
+        return None
+    arr = dep + net_leg["blk"]
+    if (arr + Rules.DEBRIEF) - nrep > table_b(nrep + hbt, 1):
+        return None
+    return net_leg, dep, arr, 1, net_leg["blk"], nrep, True
+
+
+def retry_shifted_plan(seq, dom, ap, legs, duty_day, leg_index, rest_start_local):
+    """The pilot's disruption is: everything from (duty_day, leg_index)
+    onward didn't fly as planned — duty ended instead, at rest_start_local.
+    Tries to replay the ENTIRE remainder of the original sequence — every
+    still-pending leg, on this day and every day after it — using the SAME
+    flight numbers, each found at its next real legal occurrence, chained
+    through the same day/overnight legality checks the original plan
+    itself implied. This is the cheap, most-likely-correct fix: same plan,
+    just later — matching the real-world pattern of a delayed flight timing
+    out into rest, then flying the same flight number's next scheduled
+    occurrence the following day.
+
+    Returns (new_seq, None) on full success — every remaining leg matched
+    and reconnected legally.
+    Returns (None, failure) if some leg couldn't be matched or wouldn't
+    connect legally, where failure = {"duty_day", "leg_index",
+    "target_station"} — target_station is that ORIGINAL day's own final
+    destination, for day_scoped_recovery to aim at instead.
+    """
+    days = seq.get("duty_days") or []
+    day_idx = next((i for i, d in enumerate(days) if d["duty_day"] == duty_day), None)
+    if day_idx is None:
+        return None, {"duty_day": duty_day, "leg_index": leg_index, "target_station": None}
+    day = days[day_idx]
+    legs_this_day = day.get("legs") or []
+    if leg_index < 0 or leg_index >= len(legs_this_day):
+        return None, {"duty_day": duty_day, "leg_index": leg_index, "target_station": None}
+
+    try:
+        kept_legs, _rest_station, earliest_report_utc = _prefix_rest_state(
+            days, day_idx, duty_day, leg_index, ap, rest_start_local,
+        )
+    except (ValueError, KeyError):
+        return None, {"duty_day": duty_day, "leg_index": leg_index, "target_station": None}
+
+    day_end_station = {duty_day: legs_this_day[-1]["destination"]}
+    pending = [(duty_day, i, l) for i, l in enumerate(legs_this_day) if i >= leg_index]
+    for d in days[day_idx + 1:]:
+        dl = d.get("legs") or []
+        if dl:
+            day_end_station[d["duty_day"]] = dl[-1]["destination"]
+        pending += [(d["duty_day"], i, l) for i, l in enumerate(dl)]
+    if not pending:
+        return None, {"duty_day": duty_day, "leg_index": leg_index, "target_station": None}
+
+    hbt = ap.off(dom)
+    matched = []
+    t = prev_origin = None
+    dlegs, dblk, rep = 0, 0.0, earliest_report_utc
+
+    for orig_day, orig_idx, pl in pending:
+        target_station = day_end_station.get(orig_day)
+        if t is None:
+            net_leg, dep = find_network_leg_after(
+                legs, pl["origin"], pl["destination"], earliest_report_utc + Rules.BRIEF, pl.get("flight_number"),
+            )
+            if net_leg is None:
+                return None, {"duty_day": orig_day, "leg_index": orig_idx, "target_station": target_station}
+            arr = dep + net_leg["blk"]
+            dlegs, dblk, rep = 1, net_leg["blk"], earliest_report_utc
+            overnight = False
+        else:
+            step = _step_matched_leg(ap, legs, pl, t, prev_origin, dlegs, dblk, rep, hbt)
+            if step is None:
+                return None, {"duty_day": orig_day, "leg_index": orig_idx, "target_station": target_station}
+            net_leg, dep, arr, dlegs, dblk, rep, overnight = step
+        matched.append(dict(leg=net_leg, dep=dep, arr=arr, overnight=overnight))
+        t, prev_origin = arr, pl["origin"]
+
+    # ---- render the fully-matched replay, then reparse through pbs_parser
+    # so it lands in exactly the format a real generate/edit would produce ----
+    kept_last_arr_utc = None
+    if kept_legs:
+        last = kept_legs[-1]
+        kept_last_arr_utc = _hhmm_to_dec(last["arr_local"]) - ap.off(last["destination"])
+    elif day_idx > 0 and (days[day_idx - 1].get("legs") or []):
+        prev_last = days[day_idx - 1]["legs"][-1]
+        kept_last_arr_utc = _hhmm_to_dec(prev_last["arr_local"]) - ap.off(prev_last["destination"])
+
+    steps, rests, day_ctr = [], [], duty_day + 1
+    for idx, m in enumerate(matched):
+        if idx == 0:
+            if kept_last_arr_utc is not None:
+                rests.append((m["dep"] - Rules.BRIEF) - (kept_last_arr_utc + Rules.DEBRIEF))
+        elif m["overnight"]:
+            day_ctr += 1
+            rests.append((m["dep"] - Rules.BRIEF) - (steps[-1]["arr"] + Rules.DEBRIEF))
+        steps.append(dict(day=day_ctr, leg=m["leg"], dep=m["dep"], arr=m["arr"]))
+
+    prefix_steps = []
+    for l in kept_legs:
+        prefix_steps.append(dict(
+            day=duty_day,
+            leg=dict(f=l["flight_number"], o=l["origin"], d=l["destination"],
+                      blk=_bid_or_hhmm_span_to_dec(l), fleet=l.get("equipment", "")),
+            dep=_hhmm_to_dec(l["dep_local"]) - ap.off(l["origin"]),
+            arr=_hhmm_to_dec(l["arr_local"]) - ap.off(l["destination"]),
+        ))
+    all_steps = prefix_steps + steps
+    true_day_numbers = sorted({s["day"] for s in all_steps})
+    rendered_days = pbs_build.days_from_steps(ap, all_steps, rests, dom)
+
+    lines = pbs_format.sequence_lines(9999, rendered_days, 1, [])
+    text = "\n".join(lines) + "\n"
+    reparsed = pbs_parser.parse_pbs(text)
+    if not reparsed or not reparsed[0]["duty_days"]:
+        return None, {"duty_day": duty_day, "leg_index": leg_index, "target_station": None}
+    new_days = reparsed[0]["duty_days"]
+    for true_dn, rday in zip(true_day_numbers, new_days):
+        rday["duty_day"] = true_dn
+
+    new_seq = copy.deepcopy(seq)
+    new_seq["duty_days"] = days[:day_idx] + new_days
+    return new_seq, None
+
+
+def day_scoped_recovery(seq, dom, ap, legs, duty_day, leg_index, rest_start_local,
+                         budget=8.0, max_extra_days=1):
+    """When retry_shifted_plan() fails on the SAME day the disruption itself
+    happened on (the common case — the very next leg after the disruption
+    can't be flown as planned), this searches for a legal way to reach that
+    day's ORIGINAL final destination instead of replaying the exact plan —
+    a narrower goal than recover_from_disruption (which searches all the
+    way back to `dom`), so the rest of the original trip can still be
+    reattached unchanged via apply_day_patch. Falls back to targeting `dom`
+    itself if the original destination genuinely isn't reachable that day —
+    landing somewhere sensible beats no answer at all.
+
+    NOTE: scoped to duty_day == the original disruption day. If
+    retry_shifted_plan instead fails on a LATER day (a rarer case — the
+    shifted plan worked for a while, then broke further downstream), the
+    caller should fall back to recover_from_disruption/apply_recovery (the
+    whole-trip search) rather than calling this — reattaching "the rest of
+    the trip unchanged" only makes sense when nothing after this exact day
+    needed to shift in the first place.
+
+    Returns (candidates, target_station, reached_target).
+    """
+    days = seq.get("duty_days") or []
+    day_idx = next((i for i, d in enumerate(days) if d["duty_day"] == duty_day), None)
+    if day_idx is None:
+        return [], None, False
+    day = days[day_idx]
+    legs_this_day = day.get("legs") or []
+    if leg_index < 0 or leg_index >= len(legs_this_day) or not legs_this_day:
+        return [], None, False
+    target_station = legs_this_day[-1]["destination"]
+
+    try:
+        _kept_legs, _rest_station, earliest_report_utc = _prefix_rest_state(
+            days, day_idx, duty_day, leg_index, ap, rest_start_local,
+        )
+    except (ValueError, KeyError):
+        return [], target_station, False
+
+    pending0 = legs_this_day[leg_index]
+    day_number = duty_day + 1
+    dlegs_today, dblk_today, duty_report_utc = 0, 0.0, earliest_report_utc
+    resume_station = pending0["origin"]
+    resume_utc = earliest_report_utc + Rules.BRIEF
+
+    def _search_for(target, total_days):
+        search = pairing_engine.Search(legs, ap, total_days, budget)
+        chains = search.run_from(resume_station, resume_utc, dom, day_number,
+                                  dlegs_today, dblk_today, duty_report_utc,
+                                  total_days, target=target)
+        out = []
+        for chain in chains:
+            bad = pairing_engine.verify_from(
+                legs, ap, chain, target, resume_station, resume_utc,
+                day_number, dlegs_today, dblk_today, duty_report_utc, total_days,
+            )
+            if bad:
+                continue
+            steps, _ = pairing_engine.walk_from(
+                legs, ap, chain, resume_station, resume_utc,
+                day_number, dlegs_today, dblk_today, duty_report_utc,
+            )
+            block = sum(legs[i]["blk"] for i in chain)
+            lpd = pairing_engine.legs_per_day(steps)
+            out.append({
+                "chain": list(chain), "block": round(block, 2),
+                "dacv": round(block / total_days, 3) if total_days else 0,
+                "legs_per_day": lpd,
+                "routing": [resume_station] + [legs[i]["d"] for i in chain],
+                "total_days": total_days, "day_number": day_number,
+                "dlegs_today": dlegs_today, "dblk_today": dblk_today,
+                "duty_report_utc": duty_report_utc,
+            })
+        out.sort(key=lambda c: -c["dacv"])
+        return out
+
+    for extra in range(max_extra_days + 1):
+        candidates = _search_for(target_station, day_number + extra)
+        if candidates:
+            return candidates, target_station, True
+
+    for extra in range(max_extra_days + 2):
+        candidates = _search_for(dom, day_number + extra)
+        if candidates:
+            return candidates, dom, False
+
+    return [], target_station, False
+
+
+def apply_day_patch(seq, dom, ap, legs, duty_day, leg_index, rest_start_local,
+                     chain, day_number, dlegs_today, dblk_today, duty_report_utc, total_days,
+                     reattach=True):
+    """Splices an accepted day_scoped_recovery() candidate onto the
+    sequence for just the disrupted day. When `reattach` is True (pass
+    day_scoped_recovery's own `reached_target` here — only reattach when
+    the patch actually made it to that day's original planned destination),
+    every ORIGINAL day after it comes along unchanged, renumbered to stay
+    contiguous — unlike apply_recovery, which discards the rest of the
+    trip. When `reached_target` was False (the search had to settle for
+    `dom` instead), reattaching is skipped — the original later days
+    assumed starting from a city we never actually reached, so there's
+    nothing legitimate left to preserve; the patched trip just ends here,
+    same as apply_recovery's whole-trip behavior.
+
+    Even when reattach=True, this re-checks that the first reattached
+    day's own report time still leaves legal rest after the patch's new
+    (later) release — a day-scoped patch can shift the release later than
+    the original plan assumed, which can retroactively break the very
+    connection it's trying to preserve. Returns (None, [...]) rather than
+    silently splicing in an illegal connection if so — the caller should
+    fall back to the whole-trip recovery search instead."""
+    days = seq.get("duty_days") or []
+    day_idx = next((i for i, d in enumerate(days) if d["duty_day"] == duty_day), None)
+    if day_idx is None:
+        return None, ["duty_day not found"]
+    day = days[day_idx]
+    legs_this_day = day.get("legs") or []
+    if leg_index < 0 or leg_index >= len(legs_this_day):
+        return None, ["leg_index out of range"]
+
+    try:
+        kept_legs, _rest_station, earliest_report_utc = _prefix_rest_state(
+            days, day_idx, duty_day, leg_index, ap, rest_start_local,
+        )
+    except (ValueError, KeyError) as e:
+        return None, [f"invalid disruption data: {e}"]
+
+    pending0 = legs_this_day[leg_index]
+    resume_station = pending0["origin"]
+    resume_utc = earliest_report_utc + Rules.BRIEF
+
+    prefix_steps = []
+    for l in kept_legs:
+        prefix_steps.append(dict(
+            day=duty_day,
+            leg=dict(f=l["flight_number"], o=l["origin"], d=l["destination"],
+                      blk=_bid_or_hhmm_span_to_dec(l), fleet=l.get("equipment", "")),
+            dep=_hhmm_to_dec(l["dep_local"]) - ap.off(l["origin"]),
+            arr=_hhmm_to_dec(l["arr_local"]) - ap.off(l["destination"]),
+        ))
+
+    patch_steps, patch_rests = pairing_engine.walk_from(
+        legs, ap, chain, resume_station, resume_utc,
+        day_number, dlegs_today, dblk_today, duty_report_utc,
+    )
+    if not patch_steps:
+        return None, ["empty patch chain"]
+
+    all_steps = prefix_steps + patch_steps
+    true_day_numbers = sorted({s["day"] for s in all_steps})
+    rendered_days = pbs_build.days_from_steps(ap, all_steps, patch_rests, dom)
+
+    lines = pbs_format.sequence_lines(9999, rendered_days, 1, [])
+    text = "\n".join(lines) + "\n"
+    reparsed = pbs_parser.parse_pbs(text)
+    if not reparsed or not reparsed[0]["duty_days"]:
+        return None, ["internal error: could not reconstruct the patched day(s)"]
+    new_days = reparsed[0]["duty_days"]
+    for true_dn, rday in zip(true_day_numbers, new_days):
+        rday["duty_day"] = true_dn
+
+    patched_last_day = true_day_numbers[-1]
+    day_shift = patched_last_day - duty_day
+    reattached = []
+    if reattach:
+        remaining_original = days[day_idx + 1:]
+        if remaining_original:
+            patch_release_utc = patch_steps[-1]["arr"] + Rules.DEBRIEF
+            first_next = remaining_original[0]
+            first_next_legs = first_next.get("legs") or []
+            if first_next_legs:
+                origin0 = first_next_legs[0]["origin"]
+                try:
+                    report_utc = _hhmm_to_dec(first_next["report"]) - ap.off(origin0)
+                except (ValueError, KeyError, TypeError):
+                    report_utc = None
+                if report_utc is not None:
+                    while report_utc < patch_release_utc:
+                        report_utc += 24
+                    rest = report_utc - patch_release_utc
+                    if rest < Rules.MIN_REST - 1e-6:
+                        return None, [
+                            f"reattaching the rest of the original trip would leave only "
+                            f"{rest:.2f}h rest before day {first_next['duty_day']} (min {Rules.MIN_REST}h) — "
+                            f"the patch pushed the release too late for it to still connect legally"
+                        ]
+        for d in remaining_original:
+            rd = copy.deepcopy(d)
+            rd["duty_day"] = d["duty_day"] + day_shift
+            reattached.append(rd)
+
+    new_seq = copy.deepcopy(seq)
+    new_seq["duty_days"] = days[:day_idx] + new_days + reattached
+    return new_seq, []
+
+
 def _bid_or_hhmm_span_to_dec(leg):
     """A kept (already-stored) leg's block field is a PBS bid-format string
     ("H.MM", e.g. "4.06" = 4h06m) written by pbs_format.bid(). Falls back to

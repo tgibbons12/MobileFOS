@@ -1311,6 +1311,160 @@ def recover_leg_accept(leg_id):
     return jsonify(new_seq)
 
 
+# ---------------------------------------------------------------------------
+# "Timed out into rest" — the other common disruption shape: nothing
+# diverted, a delay just pushed the rest of a duty day past legal limits, so
+# the remainder gets pushed to the next day instead. Distinct from
+# /recover above (which is for "ended up somewhere different"): this only
+# needs to know when duty actually ended, not a different destination.
+# Tries the cheapest fix first (replay the exact original plan, just
+# later); falls back to a day-scoped search that still tries to reach the
+# original day's own planned destination, preserving every day after it.
+# ---------------------------------------------------------------------------
+@app.route("/fos/<int:leg_id>/shift-day", methods=["POST"])
+def shift_day(leg_id):
+    row = _get_leg_row(leg_id)
+    if not row:
+        return jsonify({"error": "not found"}), 404
+    seq_number = row.data.get("seq")
+    if not seq_number:
+        return jsonify({"error": "this leg has no SEQ — nothing to shift"}), 400
+    seq = next((s for s in _pbs_sequences() if s["seq"] == seq_number), None)
+    if not seq:
+        return jsonify({"error": "sequence not found — it may have been deleted"}), 404
+
+    body = request.get_json(silent=True) or {}
+    rest_start_local = body.get("rest_start_local")
+    if not rest_start_local:
+        return jsonify({"error": "rest_start_local is required"}), 400
+
+    duty_day, leg_index = _duty_day_for_leg(seq, row)
+    if duty_day is None:
+        return jsonify({"error": "couldn't match this flight to a leg in its own sequence"}), 400
+
+    first_day = seq["duty_days"][0] if seq["duty_days"] else None
+    dom = first_day["legs"][0]["origin"] if first_day and first_day["legs"] else ""
+    if not dom:
+        return jsonify({"error": "sequence has no origin to recover back to"}), 400
+
+    legs, ap = pairing_engine.get_route_data()
+    new_seq, failure = pairing_edit.retry_shifted_plan(seq, dom, ap, legs, duty_day, leg_index, rest_start_local)
+    if new_seq is not None:
+        return jsonify({"mode": "shifted", "seq": seq_number, "duty_day": duty_day,
+                        "leg_index": leg_index, "rest_start_local": rest_start_local, "preview": new_seq})
+
+    try:
+        budget = min(float(body.get("budget", 8)), 10.0)
+    except (TypeError, ValueError):
+        budget = 8.0
+    candidates, target_station, reached_target = pairing_edit.day_scoped_recovery(
+        seq, dom, ap, legs, duty_day, leg_index, rest_start_local, budget=budget,
+    )
+    if not candidates:
+        return jsonify({"error": "no legal way to continue from there, even settling for base"}), 400
+    return jsonify({
+        "mode": "day_patch", "seq": seq_number, "duty_day": duty_day, "leg_index": leg_index,
+        "rest_start_local": rest_start_local, "target_station": target_station,
+        "reached_target": reached_target, "candidates": candidates,
+    })
+
+
+@app.route("/fos/<int:leg_id>/shift-day/accept-shift", methods=["POST"])
+def shift_day_accept_shift(leg_id):
+    """Commits retry_shifted_plan's own (single, deterministic) result —
+    re-run rather than trusting a client-cached copy, since it's cheap and
+    the sequence may have changed since /shift-day was called."""
+    row = _get_leg_row(leg_id)
+    if not row:
+        return jsonify({"error": "not found"}), 404
+    seq_number = row.data.get("seq")
+    pbs_row = _pbs_row()
+    seq = next((s for s in (pbs_row.sequences if pbs_row else []) if s["seq"] == seq_number), None)
+    if not seq:
+        return jsonify({"error": "sequence not found"}), 404
+
+    body = request.get_json(silent=True) or {}
+    rest_start_local = body.get("rest_start_local")
+    if not rest_start_local:
+        return jsonify({"error": "rest_start_local is required"}), 400
+
+    duty_day, leg_index = _duty_day_for_leg(seq, row)
+    if duty_day is None:
+        return jsonify({"error": "couldn't match this flight to a leg in its own sequence"}), 400
+    first_day = seq["duty_days"][0] if seq["duty_days"] else None
+    dom = first_day["legs"][0]["origin"] if first_day and first_day["legs"] else ""
+
+    legs, ap = pairing_engine.get_route_data()
+    new_seq, failure = pairing_edit.retry_shifted_plan(seq, dom, ap, legs, duty_day, leg_index, rest_start_local)
+    if new_seq is None:
+        return jsonify({"error": "the shifted plan is no longer valid — search again"}), 400
+
+    pbs_row.sequences = [new_seq if s["seq"] == seq_number else s for s in pbs_row.sequences]
+    db.session.commit()
+    return jsonify(new_seq)
+
+
+@app.route("/fos/<int:leg_id>/shift-day/accept-patch", methods=["POST"])
+def shift_day_accept_patch(leg_id):
+    row = _get_leg_row(leg_id)
+    if not row:
+        return jsonify({"error": "not found"}), 404
+    seq_number = row.data.get("seq")
+    pbs_row = _pbs_row()
+    seq = next((s for s in (pbs_row.sequences if pbs_row else []) if s["seq"] == seq_number), None)
+    if not seq:
+        return jsonify({"error": "sequence not found"}), 404
+
+    body = request.get_json(silent=True) or {}
+    required = ("rest_start_local", "chain", "day_number", "dlegs_today",
+                "dblk_today", "duty_report_utc", "total_days", "target_station")
+    if any(body.get(k) is None for k in required):
+        return jsonify({"error": f"missing one of: {', '.join(required)}"}), 400
+    reached_target = bool(body.get("reached_target"))
+
+    duty_day, leg_index = _duty_day_for_leg(seq, row)
+    if duty_day is None:
+        return jsonify({"error": "couldn't match this flight to a leg in its own sequence"}), 400
+    first_day = seq["duty_days"][0] if seq["duty_days"] else None
+    dom = first_day["legs"][0]["origin"] if first_day and first_day["legs"] else ""
+
+    legs, ap = pairing_engine.get_route_data()
+    chain = [int(i) for i in body["chain"]]
+
+    # Defense in depth, same reasoning as /recover/accept — the client only
+    # sent back seed data from a prior stateless /shift-day response, don't
+    # trust it blindly. Re-derive the resume point the same way
+    # day_scoped_recovery itself did and re-verify against it.
+    try:
+        day_idx = next(i for i, d in enumerate(seq["duty_days"]) if d["duty_day"] == duty_day)
+        _kept, resume_station, earliest_report_utc = pairing_edit._prefix_rest_state(
+            seq["duty_days"], day_idx, duty_day, leg_index, ap, body["rest_start_local"],
+        )
+    except (ValueError, KeyError, StopIteration) as e:
+        return jsonify({"error": f"invalid disruption data: {e}"}), 400
+    resume_utc = earliest_report_utc + pairing_engine.Rules.BRIEF
+    problems = pairing_engine.verify_from(
+        legs, ap, chain, body["target_station"], resume_station, resume_utc,
+        int(body["day_number"]), int(body["dlegs_today"]), float(body["dblk_today"]),
+        float(body["duty_report_utc"]), int(body["total_days"]),
+    )
+    if problems:
+        return jsonify({"error": "candidate failed re-verification: " + "; ".join(problems)}), 400
+
+    new_seq, errs = pairing_edit.apply_day_patch(
+        seq, dom, ap, legs, duty_day, leg_index, body["rest_start_local"],
+        chain, int(body["day_number"]), int(body["dlegs_today"]),
+        float(body["dblk_today"]), float(body["duty_report_utc"]), int(body["total_days"]),
+        reattach=reached_target,
+    )
+    if new_seq is None:
+        return jsonify({"error": "; ".join(errs) or "could not apply patch"}), 400
+
+    pbs_row.sequences = [new_seq if s["seq"] == seq_number else s for s in pbs_row.sequences]
+    db.session.commit()
+    return jsonify(new_seq)
+
+
 @app.route("/fos/<int:leg_id>/prefile")
 def get_prefile_links(leg_id):
     """VATSIM/IVAO prefile forms straight from the pilot's current SimBrief
@@ -2331,6 +2485,11 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .search-block input,.search-block select{width:100%;padding:9px 10px;border:1px solid var(--border);border-radius:5px;font-size:13.5px;background:var(--card);color:var(--value);}
   .search-row{display:flex;gap:10px;background:var(--card);padding:12px 14px;border-bottom:1px solid var(--border);}
   .search-row .search-block{flex:1;border-bottom:none;padding:0;background:none;}
+  .tabs{display:flex;gap:8px;padding:0 14px;border-bottom:1px solid var(--border);margin-bottom:10px;}
+  .tab-btn{margin:0;background:none;color:var(--label);border:none;border-bottom:2px solid transparent;border-radius:0;padding:10px 4px;font-size:14px;font-weight:600;cursor:pointer;}
+  .tab-btn.active{color:var(--blue-dark);border-bottom-color:var(--blue);}
+  .tab-panel{display:none;}
+  .tab-panel.active{display:block;}
   .section-bar{display:flex;align-items:center;justify-content:space-between;background:var(--blue);color:#fff;padding:10px 14px;font-size:14px;font-weight:600;cursor:pointer;border:none;width:100%;text-align:left;}
   .section-bar svg{width:16px;height:16px;transition:transform .15s ease;}
   .section-bar.collapsed svg.chevron{transform:rotate(180deg);}
@@ -2665,19 +2824,35 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         <button class="back-link" onclick="showView('overview')" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
         <div class="topbar-title">
           <h1>Report a Disruption</h1>
-          <p>Find a legal way back to base</p>
+          <p>Find a legal way back on track</p>
         </div>
       </div>
-      <div class="panel">
-        <div style="font-size:13px;color:var(--label);margin-bottom:4px;">Enter where this flight actually ended up. Everything after it in the pairing will be replaced with a legal way back to base.</div>
-        <label for="rec-dest">Actual Destination</label>
-        <input id="rec-dest" type="text" placeholder="Station code">
-        <label for="rec-arrival">Actual Arrival (local time, HHMM)</label>
-        <input id="rec-arrival" type="text" placeholder="e.g. 0300">
-        <br><button onclick="submitRecovery()">Find Recovery Options</button>
-        <div id="recovery-msg" class="msg"></div>
+      <div class="tabs">
+        <button class="tab-btn active" id="tab-shift-btn" onclick="showRecoveryTab('shift')">Delayed / Timed Out</button>
+        <button class="tab-btn" id="tab-divert-btn" onclick="showRecoveryTab('divert')">Diverted</button>
       </div>
-      <div id="recovery-candidates" style="margin-top:4px;"></div>
+      <div id="tab-shift" class="tab-panel active">
+        <div class="panel">
+          <div style="font-size:13px;color:var(--label);margin-bottom:4px;">Same destination, just later — a delay pushed you into rest instead of continuing as planned. Enter when duty actually ended; this first tries the exact original plan shifted to the next legal day, then falls back to an alternate routing if that doesn't fit.</div>
+          <label for="shift-rest-start">Rest Started (local time, HHMM)</label>
+          <input id="shift-rest-start" type="text" placeholder="e.g. 0100">
+          <br><button onclick="submitShiftDay()">Find a Way Forward</button>
+          <div id="shift-msg" class="msg"></div>
+        </div>
+        <div id="shift-candidates" style="margin-top:4px;"></div>
+      </div>
+      <div id="tab-divert" class="tab-panel">
+        <div class="panel">
+          <div style="font-size:13px;color:var(--label);margin-bottom:4px;">Enter where this flight actually ended up. Everything after it in the pairing will be replaced with a legal way back to base.</div>
+          <label for="rec-dest">Actual Destination</label>
+          <input id="rec-dest" type="text" placeholder="Station code">
+          <label for="rec-arrival">Actual Arrival (local time, HHMM)</label>
+          <input id="rec-arrival" type="text" placeholder="e.g. 0300">
+          <br><button onclick="submitRecovery()">Find Recovery Options</button>
+          <div id="recovery-msg" class="msg"></div>
+        </div>
+        <div id="recovery-candidates" style="margin-top:4px;"></div>
+      </div>
     </section>
     <section id="release-view" class="view">
       <div class="topbar">
@@ -3708,6 +3883,107 @@ async function resolveLegEdit(seq, action){
   if(_legEditFormOpen){ _legEditFormOpen.remove(); _legEditFormOpen = null; }
   showToast(action === 'confirm' ? 'Leg updated' : 'Edit discarded');
   initPairingView();
+}
+
+function showRecoveryTab(tab){
+  document.getElementById('tab-shift').classList.toggle('active', tab==='shift');
+  document.getElementById('tab-divert').classList.toggle('active', tab==='divert');
+  document.getElementById('tab-shift-btn').classList.toggle('active', tab==='shift');
+  document.getElementById('tab-divert-btn').classList.toggle('active', tab==='divert');
+}
+
+// "Timed out into rest" — same destination, just later. Tries the exact
+// original plan shifted first (mode:"shifted", a single deterministic
+// preview to confirm); falls back to a day-scoped alternate-routing search
+// (mode:"day_patch", pick one of several legal options) if the shifted
+// plan doesn't fit.
+let _shiftRestStart = null;
+async function submitShiftDay(){
+  const el = document.getElementById('shift-msg');
+  const list = document.getElementById('shift-candidates');
+  list.innerHTML = '';
+  const restStart = document.getElementById('shift-rest-start').value.trim();
+  if(!restStart){ el.textContent = 'Rest start time is required.'; el.style.color = 'var(--red)'; return; }
+  el.textContent = 'Checking the original plan, shifted…';
+  el.style.color = '';
+  try {
+    const r = await fetch('/fos/' + LEG_ID + '/shift-day', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({rest_start_local: restStart}),
+    });
+    const data = await r.json();
+    if(!r.ok){ el.textContent = data.error || 'No way forward found'; el.style.color = 'var(--red)'; return; }
+    _shiftRestStart = restStart;
+    if(data.mode === 'shifted'){
+      el.textContent = 'The original plan still works, just a day later.';
+      el.style.color = 'var(--green)';
+      const days = data.preview.duty_days.map(d => `Day ${d.duty_day}: ` +
+        d.legs.map(l => `${l.flight_number} ${l.origin}→${l.destination} ${l.dep_local}/${l.arr_local}`).join(', ')
+      ).join('<br>');
+      list.innerHTML = `<div class="arow" style="flex-direction:column;align-items:stretch;">
+        <div style="font-size:12.5px;color:var(--value);line-height:1.6;">${days}</div>
+        <button onclick="acceptShiftedPlan()" style="margin-top:8px;">Accept Shifted Plan</button>
+      </div>`;
+    } else if(data.mode === 'day_patch'){
+      window._shiftPatch = {target_station: data.target_station, reached_target: data.reached_target};
+      el.textContent = data.reached_target
+        ? `Original plan didn't fit — found ${data.candidates.length} way(s) to still reach ${data.target_station} on time.`
+        : `Couldn't reach ${data.target_station} — found ${data.candidates.length} legal way(s) back to base instead.`;
+      el.style.color = data.reached_target ? 'var(--green)' : '#c98a1f';
+      list.innerHTML = data.candidates.map((c, i) => `<div class="arow" style="flex-direction:column;align-items:stretch;">
+        <div style="display:flex;justify-content:space-between;font-size:13.5px;color:var(--value);">
+          <span>${c.routing.join('-')}</span><span>${c.block.toFixed(2)}h block</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--label);margin-top:2px;">
+          <span>${c.legs_per_day.join('-')} legs/day</span><span>${c.total_days} total duty period(s)</span>
+        </div>
+        <button onclick="acceptDayPatch(${i})" style="margin-top:8px;">Accept</button>
+      </div>`).join('');
+      window._shiftCandidates = data.candidates;
+    }
+  } catch(e) {
+    el.textContent = 'Request failed: ' + e;
+    el.style.color = 'var(--red)';
+  }
+}
+async function acceptShiftedPlan(){
+  const el = document.getElementById('shift-msg');
+  el.textContent = 'Applying…';
+  el.style.color = '';
+  try {
+    const r = await fetch('/fos/' + LEG_ID + '/shift-day/accept-shift', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({rest_start_local: _shiftRestStart}),
+    });
+    const data = await r.json();
+    if(!r.ok){ el.textContent = data.error || 'Failed to apply'; el.style.color = 'var(--red)'; return; }
+    document.getElementById('shift-candidates').innerHTML = '';
+    showToast('Pairing shifted to the next day');
+    showView('pairing');
+  } catch(e) { el.textContent = 'Request failed: ' + e; el.style.color = 'var(--red)'; }
+}
+async function acceptDayPatch(i){
+  const el = document.getElementById('shift-msg');
+  const c = (window._shiftCandidates || [])[i];
+  const ctx = window._shiftPatch;
+  if(!c || !ctx || !_shiftRestStart){ el.textContent = 'That option is no longer available — search again.'; el.style.color = 'var(--red)'; return; }
+  el.textContent = 'Applying…';
+  el.style.color = '';
+  try {
+    const r = await fetch('/fos/' + LEG_ID + '/shift-day/accept-patch', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        rest_start_local: _shiftRestStart, target_station: ctx.target_station, reached_target: ctx.reached_target,
+        chain: c.chain, day_number: c.day_number, dlegs_today: c.dlegs_today,
+        dblk_today: c.dblk_today, duty_report_utc: c.duty_report_utc, total_days: c.total_days,
+      }),
+    });
+    const data = await r.json();
+    if(!r.ok){ el.textContent = data.error || 'Failed to apply'; el.style.color = 'var(--red)'; return; }
+    document.getElementById('shift-candidates').innerHTML = '';
+    showToast('Pairing patched');
+    showView('pairing');
+  } catch(e) { el.textContent = 'Request failed: ' + e; el.style.color = 'var(--red)'; }
 }
 
 // Mid-trip recovery — the currently-viewed leg diverted/overran. Every
