@@ -889,10 +889,16 @@ def get_pbs_sequence(seq_number):
 # "promotes" a copy into that active pool via the exact same append-based
 # mechanism /pairings/accept already uses, so a promoted sequence is
 # indistinguishable from any other imported/generated one downstream.
+#
+# Packs are shared across every pilot on this instance, not siloed per
+# account — one admin (via bulk_import_packs.py) uploads the airline's bid
+# packs once and every pilot's Pairing Library sees the same browsable
+# set. `user_id` on the row records who uploaded it (audit trail only);
+# nothing here filters by it.
 # ---------------------------------------------------------------------------
 def _pack_row(opr, base, fleet):
     return PairingPack.query.filter_by(
-        user_id=current_user.id, opr=opr.upper(), base=base.upper(), fleet=fleet.upper(),
+        opr=opr.upper(), base=base.upper(), fleet=fleet.upper(),
     ).first()
 
 
@@ -934,11 +940,12 @@ def import_pack():
 
 @app.route("/pbs/packs")
 def list_packs():
-    """Column-limited on purpose — never touches any pack's own (large)
-    `sequences` JSON column just to list opr/base/fleet/count."""
+    """Every pack on the instance, not just this pilot's own uploads —
+    see the note above _pack_row. Column-limited on purpose — never
+    touches any pack's own (large) `sequences` JSON column just to list
+    opr/base/fleet/count."""
     rows = (
         db.session.query(PairingPack.opr, PairingPack.base, PairingPack.fleet, PairingPack.seq_count)
-        .filter_by(user_id=current_user.id)
         .order_by(PairingPack.opr, PairingPack.base, PairingPack.fleet)
         .all()
     )
