@@ -2861,6 +2861,13 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   */
   .dd-card{--dd-fs:14.5px;border-radius:12px;overflow:hidden;border:1px solid var(--border);background:var(--card);margin-bottom:2px;}
   .dd-hdr{padding:10px 14px 8px;font-size:17px;font-weight:700;color:var(--value);}
+  /* Real iPhone widths clip this table (SF Pro's real metrics run wider
+     than whatever this was last measured against) — .dd-card's own
+     overflow:hidden was silently cropping the Blk/Gnd column off-screen
+     with no way to reach it. This wrapper scrolls internally instead, and
+     the narrow-viewport rule below shrinks things enough that scrolling
+     usually isn't even needed. */
+  .dd-table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;}
   table.dd-table{width:100%;border-collapse:collapse;font-size:var(--dd-fs);font-variant-numeric:tabular-nums;}
   table.dd-table th{
     font-size:var(--dd-fs);font-weight:600;color:var(--label);text-align:left;line-height:1.3;
@@ -2869,6 +2876,12 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   table.dd-table th:first-child, table.dd-table td:first-child{padding-left:14px;}
   table.dd-table th:last-child, table.dd-table td:last-child{padding-right:14px;text-align:right;}
   table.dd-table td{padding:6px 5px;white-space:nowrap;vertical-align:top;position:relative;}
+  @media (max-width: 400px){
+    .dd-card{--dd-fs:13px;}
+    table.dd-table th:first-child, table.dd-table td:first-child{padding-left:10px;}
+    table.dd-table th:last-child, table.dd-table td:last-child{padding-right:10px;}
+    table.dd-table th, table.dd-table td{padding-left:3px;padding-right:3px;}
+  }
   table.dd-table tbody tr:first-child td{padding-top:8px;}
   table.dd-table tbody tr:last-child td{padding-bottom:8px;}
   table.dd-table .dp-cell{display:flex;align-items:center;gap:4px;color:var(--label);}
@@ -4193,10 +4206,10 @@ function dutyDayCardHtml(day, flightPrefix, withEditIcons){
   ].filter(Boolean).join(' &middot; ');
   return '<div class="dd-card">' +
     '<div class="dd-hdr">Day ' + day.duty_day + '</div>' +
-    '<table class="dd-table"><thead><tr>' +
+    '<div class="dd-table-wrap"><table class="dd-table"><thead><tr>' +
       '<th>Dp</th><th>D&#8260;A</th><th>Flt&#8260;Eq</th>' +
       '<th>STA<br>DLCL&#8260;DHBT</th><th>STA<br>ALCL&#8260;AHBT</th><th>Blk&#8260;Gnd</th>' +
-    '</tr></thead><tbody>' + rows + '</tbody></table>' +
+    '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
     (summaryBits ? ('<div class="dd-summary">' + summaryBits + '</div>') : '') +
     '</div>';
 }
