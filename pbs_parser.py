@@ -20,7 +20,7 @@ RLS_RE = re.compile(
     r'(?P<block>[\d.]+)\s+(?P<grnd>[\d.]+)\s+(?P<tpay>[\d.]+)\s+'
     r'(?P<duty>[\d.]+)(?:\s+(?P<fdp>[\d.]+))?\s+(?P<tafb>[\d.]+)'
 )
-HOTEL_RE = re.compile(r'^\s*(?P<sta>[A-Z]{3})\s+HOTEL\s+(?P<hotel>\S+)')
+HOTEL_RE = re.compile(r'^\s*(?P<sta>[A-Z]{3})\s+HOTEL\s+(?P<hotel>\S+)(?:\s+(?P<rest>[\d.]+))?')
 # The pairing-total row — same four columns as RLS (block/ground/tpay/tafb)
 # but cumulative for the whole sequence, no duty/fdp column. Previously
 # just detected-and-skipped; now captured so the library can show a
@@ -40,6 +40,8 @@ def _parse_leg_line(line):
         return None
     if not re.match(r'^\d+$', toks[0]) or '/' not in toks[1]:
         return None  # not "DP D/A ..." — not a leg line
+    da = toks[1]  # duty-day/calendar-day, e.g. "1/1" — differs ("3/4") when
+    # a leg spills into the next calendar day (a red-eye).
 
     i = 2
     if i >= len(toks):
@@ -87,7 +89,7 @@ def _parse_leg_line(line):
     ground = toks[i] if i < len(toks) and dur_re.match(toks[i]) else ''
 
     return {
-        "equipment": eq, "flight_number": flt,
+        "equipment": eq, "flight_number": flt, "da": da,
         "origin": sta1, "dep_local": dep_local, "dep_z": dep_z, "meal": meal,
         "destination": sta2, "arr_local": arr_local, "arr_z": arr_z,
         "block": block, "ground": ground,
@@ -138,7 +140,7 @@ def parse_pbs(text):
                     "duty_day": duty_day_num,
                     "report": m.group("out"),
                     "legs": [],
-                    "release": None, "hotel": None,
+                    "release": None, "hotel": None, "hotel_rest": None,
                     "block": None, "duty": None, "tpay": None, "tafb": None,
                 }
                 seq["duty_days"].append(current_day)
@@ -154,6 +156,7 @@ def parse_pbs(text):
             m = HOTEL_RE.match(line)
             if m and current_day is not None:
                 current_day["hotel"] = f'{m.group("sta")} {m.group("hotel")}'
+                current_day["hotel_rest"] = m.group("rest")
                 continue
             m = TTL_RE.match(line)
             if m:

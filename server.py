@@ -2828,6 +2828,40 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .save-btn svg{width:19px;height:19px;}
   .save-btn.saved{color:var(--blue);border-color:var(--blue);}
   .save-btn.saved svg{fill:var(--blue);}
+
+  /* Duty-day card — reads like a web version of the bid pack's own leg
+     table (DP/D-A/Flt·Eq/Dep/Arr/Blk·Gnd), not a list of app rows. One
+     font size throughout (--dd-fs) — weight and color carry the
+     hierarchy, not size. RPT lives stacked inside the first leg's own Dep
+     cell, RLS inside the last leg's own Arr cell — both genuinely part of
+     that leg's row, not a separate banner. HOTEL/rest sits outside the
+     card entirely, between one day and the next, like an actual layover.
+  */
+  .dd-card{--dd-fs:14.5px;border-radius:12px;overflow:hidden;border:1px solid var(--border);background:var(--card);margin-bottom:2px;}
+  .dd-hdr{padding:10px 14px 8px;font-size:17px;font-weight:700;color:var(--value);}
+  table.dd-table{width:100%;border-collapse:collapse;font-size:var(--dd-fs);font-variant-numeric:tabular-nums;}
+  table.dd-table th{
+    font-size:var(--dd-fs);font-weight:600;color:var(--label);text-align:left;line-height:1.3;
+    padding:4px 5px;border-bottom:1px solid var(--border);white-space:nowrap;
+  }
+  table.dd-table th:first-child, table.dd-table td:first-child{padding-left:14px;}
+  table.dd-table th:last-child, table.dd-table td:last-child{padding-right:14px;text-align:right;}
+  table.dd-table td{padding:6px 5px;white-space:nowrap;vertical-align:top;position:relative;}
+  table.dd-table tbody tr:first-child td{padding-top:8px;}
+  table.dd-table tbody tr:last-child td{padding-bottom:8px;}
+  table.dd-table .dp-cell{display:flex;align-items:center;gap:4px;color:var(--label);}
+  table.dd-table .edit-icon{width:13px;height:13px;color:var(--inactive);cursor:pointer;flex:0 0 auto;}
+  table.dd-table .flt{font-weight:700;color:var(--value);}
+  table.dd-table .sta{font-weight:700;color:var(--value);}
+  table.dd-table .sub{color:var(--label);margin-top:1px;}
+  table.dd-table .blk{font-weight:600;color:var(--value);}
+  table.dd-table .rpt-line, table.dd-table .rls-line{color:var(--label);font-weight:600;}
+  table.dd-table .rpt-line b, table.dd-table .rls-line b{color:var(--value);font-weight:700;}
+  .dd-summary{display:flex;justify-content:flex-end;gap:6px;padding:7px 14px 9px;font-size:var(--dd-fs);color:var(--label);border-top:1px solid var(--border);}
+  .dd-summary b{color:var(--value);font-weight:700;}
+  .layover{display:flex;justify-content:space-between;padding:7px 14px;font-size:var(--dd-fs, 14.5px);color:var(--label);}
+  .layover b{color:var(--value);font-weight:600;}
+  .layover .rest{font-variant-numeric:tabular-nums;}
   #sign-pad{touch-action:none;background:#fff;border:1px solid var(--border);border-radius:6px;width:100%;height:220px;}
   .placeholder-note{padding:12px 14px;color:var(--label);font-style:italic;font-size:13px;background:var(--card);}
   .view{display:none;}
@@ -4071,6 +4105,89 @@ async function myTripShowDetail(seqNumber, showBack){
     body.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>';
   }
 }
+// Duty-day card — shared by My Trip (renderPairing, interactive: tap a
+// leg to fly it, pencil icon to edit it) and the Pairing Library's
+// sequence detail (read-only preview of a not-yet-promoted pairing).
+// Renders as a real <table> mirroring the bid pack's own column grid —
+// DP / D-A / Flt·Eq / Dep / Arr / Blk·Gnd — not a list of app rows. RPT
+// and RLS are stacked inside the first leg's Dep cell and the last leg's
+// Arr cell respectively, same as they sit inline in the source document;
+// HOTEL/rest renders separately, between two day cards, never inside one.
+//
+// NOTE: string concatenation throughout, not template literals — see the
+// Pairing Library comment above initLibraryView for why (Python's
+// string.Template silently eats a bare ${identifier} that collides with a
+// real template context key).
+function dutyDayCardHtml(day, flightPrefix, withEditIcons){
+  const legs = day.legs || [];
+  let rows = '';
+  legs.forEach((leg, i) => {
+    const isFirst = i === 0;
+    const isLast = i === legs.length - 1;
+    const rptLine = (isFirst && day.report) ? ('<div class="rpt-line">RPT <b>' + day.report + '</b></div>') : '';
+    const rlsLine = (isLast && day.release) ? ('<div class="rls-line">RLS <b>' + day.release + '</b></div>') : '';
+    const gndLine = leg.ground ? ('<div class="sub">' + leg.ground + '</div>') : '';
+    const fltText = leg.flight_number ? ((flightPrefix ? flightPrefix + ' ' : '') + leg.flight_number) : '—';
+    const editIcon = withEditIcons
+      ? '<svg class="edit-icon" data-leg-index="' + i + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><title>Edit this leg</title><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>'
+      : '';
+    rows += '<tr data-leg-index="' + i + '">' +
+      '<td><div class="dp-cell">' + (i + 1) + editIcon + '</div></td>' +
+      '<td>' + (leg.da || '') + '</td>' +
+      '<td><div class="flt">' + fltText + '</div><div class="sub">' + (leg.equipment || '') + '</div></td>' +
+      '<td>' + rptLine + '<div class="sta">' + leg.origin + '</div><div class="sub">' + leg.dep_local + '/' + leg.dep_z + '</div></td>' +
+      '<td><div class="sta">' + leg.destination + '</div><div class="sub">' + leg.arr_local + '/' + leg.arr_z + '</div>' + rlsLine + '</td>' +
+      '<td><div class="blk">' + (leg.block || '') + '</div>' + gndLine + '</td>' +
+      '</tr>';
+  });
+  const summaryBits = [
+    day.block ? ('Blk <b>' + day.block + '</b>') : '',
+    day.duty ? ('Duty <b>' + day.duty + '</b>') : '',
+    day.tafb ? ('TAFB <b>' + day.tafb + '</b>') : '',
+  ].filter(Boolean).join(' &middot; ');
+  return '<div class="dd-card">' +
+    '<div class="dd-hdr">Day ' + day.duty_day + '</div>' +
+    '<table class="dd-table"><thead><tr>' +
+      '<th>Dp</th><th>D&#8260;A</th><th>Flt&#8260;Eq</th>' +
+      '<th>STA<br>DLCL&#8260;DHBT</th><th>STA<br>ALCL&#8260;AHBT</th><th>Blk&#8260;Gnd</th>' +
+    '</tr></thead><tbody>' + rows + '</tbody></table>' +
+    (summaryBits ? ('<div class="dd-summary">' + summaryBits + '</div>') : '') +
+    '</div>';
+}
+function layoverHtml(day){
+  if(!day.hotel) return '';
+  const spaceIdx = day.hotel.indexOf(' ');
+  const sta = spaceIdx === -1 ? day.hotel : day.hotel.slice(0, spaceIdx);
+  const name = spaceIdx === -1 ? '' : day.hotel.slice(spaceIdx + 1);
+  return '<div class="layover"><span><b>' + sta + '</b> ' + name + '</span>' +
+    (day.hotel_rest ? ('<span class="rest">Rest ' + day.hotel_rest + '</span>') : '') + '</div>';
+}
+// opts: {flightPrefix, interactive, onRowClick(day,legIndex,leg), onEditClick(row,day,legIndex,leg)}
+function renderDutyDayCards(container, seqData, opts){
+  opts = opts || {};
+  const dutyDays = seqData.duty_days || [];
+  dutyDays.forEach(day => {
+    const wrap = document.createElement('div');
+    wrap.innerHTML = dutyDayCardHtml(day, opts.flightPrefix || '', !!opts.interactive);
+    const cardEl = wrap.firstElementChild;
+    if(opts.interactive){
+      cardEl.querySelectorAll('tbody tr').forEach((row, i) => {
+        const leg = (day.legs || [])[i];
+        row.style.cursor = 'pointer';
+        row.onclick = () => opts.onRowClick(day, i, leg);
+        const editIcon = row.querySelector('.edit-icon');
+        if(editIcon) editIcon.onclick = (e) => { e.stopPropagation(); opts.onEditClick(row, day, i, leg); };
+      });
+    }
+    container.appendChild(cardEl);
+    const layoverWrap = document.createElement('div');
+    layoverWrap.innerHTML = layoverHtml(day);
+    if(layoverWrap.firstElementChild) container.appendChild(layoverWrap.firstElementChild);
+  });
+  if(!dutyDays.length){
+    container.innerHTML = '<p class="placeholder-note">No duty days on this sequence.</p>';
+  }
+}
 function renderPairing(seqData){
   const body = document.getElementById('pairing-body');
   body.innerHTML = '';
@@ -4106,83 +4223,15 @@ function renderPairing(seqData){
   cacheWrap.appendChild(cacheMsg);
   body.appendChild(cacheWrap);
 
-  // Each day is one clickable pane — tapping anywhere in it (except the
-  // paper-plane "send via SimBrief" icon, which stops propagation) is the
-  // only way into Overview from here now; individual leg rows are no
-  // longer their own nav target, just information + that one action.
-  (seqData.duty_days || []).forEach(day => {
-    const pane = document.createElement('div');
-    pane.style.cssText = 'margin-bottom:14px;border-radius:16px;overflow:hidden;border:1px solid var(--border);cursor:pointer;';
-    pane.onclick = () => generatePairingLeg(seqData.seq, day.duty_day, 0, position);
-
-    const bar = document.createElement('div');
-    bar.className = 'section-bar';
-    bar.style.cssText = 'background:var(--navy);cursor:pointer;';
-    bar.textContent = 'Day ' + day.duty_day + ' — RPT ' + (day.report || '');
-    pane.appendChild(bar);
-
-    const list = document.createElement('div');
-    list.className = 'doc-list';
-    (day.legs || []).forEach((leg, i) => {
-      const row = document.createElement('div');
-      row.className = 'doc-row';
-      const left = document.createElement('div');
-      const code = document.createElement('div');
-      code.className = 'code';
-      code.textContent = leg.flight_number ? (flightPrefix ? flightPrefix + ' ' : '') + leg.flight_number : '—';
-      const desc = document.createElement('div');
-      desc.className = 'desc';
-      desc.textContent = leg.origin + '→' + leg.destination + ' ' + leg.dep_local + '/' + leg.arr_local;
-      left.appendChild(code);
-      left.appendChild(desc);
-      const actions = document.createElement('div');
-      actions.className = 'actions';
-      const editIcon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-      editIcon.setAttribute('viewBox', '0 0 24 24');
-      editIcon.setAttribute('fill', 'none');
-      editIcon.setAttribute('stroke', 'currentColor');
-      editIcon.setAttribute('stroke-width', '2');
-      editIcon.setAttribute('stroke-linecap', 'round');
-      editIcon.setAttribute('stroke-linejoin', 'round');
-      editIcon.setAttribute('title', 'Edit this leg');
-      editIcon.innerHTML = '<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/>';
-      editIcon.onclick = (e) => { e.stopPropagation(); toggleLegEditForm(row, seqData.seq, day.duty_day, i, leg); };
-      const sbIcon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-      sbIcon.setAttribute('viewBox', '0 0 24 24');
-      sbIcon.setAttribute('fill', 'none');
-      sbIcon.setAttribute('stroke', 'currentColor');
-      sbIcon.setAttribute('stroke-width', '2');
-      sbIcon.setAttribute('stroke-linecap', 'round');
-      sbIcon.setAttribute('stroke-linejoin', 'round');
-      sbIcon.setAttribute('title', 'Generate via SimBrief');
-      sbIcon.innerHTML = '<path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/>';
-      sbIcon.onclick = (e) => { e.stopPropagation(); generatePairingLeg(seqData.seq, day.duty_day, i, position, 'release'); };
-      actions.appendChild(editIcon);
-      actions.appendChild(sbIcon);
-      row.appendChild(left);
-      row.appendChild(actions);
-      list.appendChild(row);
-    });
-    pane.appendChild(list);
-
-    const bits = [
-      day.release ? ('RLS ' + day.release) : '',
-      day.duty ? ('Duty ' + day.duty) : '',
-      day.tafb ? ('TAFB ' + day.tafb) : '',
-      day.hotel || '',
-    ].filter(Boolean).join(' · ');
-    if(bits){
-      const note = document.createElement('p');
-      note.className = 'placeholder-note';
-      note.style.margin = '0';
-      note.textContent = bits;
-      pane.appendChild(note);
-    }
-    body.appendChild(pane);
+  const cardsWrap = document.createElement('div');
+  cardsWrap.style.cssText = 'padding:0 14px 14px;';
+  renderDutyDayCards(cardsWrap, seqData, {
+    flightPrefix,
+    interactive: true,
+    onRowClick: (day, i, leg) => generatePairingLeg(seqData.seq, day.duty_day, i, position),
+    onEditClick: (row, day, i, leg) => toggleLegEditForm(row, seqData.seq, day.duty_day, i, leg),
   });
-  if(!body.children.length){
-    body.innerHTML = '<p class="placeholder-note">No duty days on this sequence.</p>';
-  }
+  body.appendChild(cardsWrap);
 }
 
 // Pairing Library — bulk-imported bid-pack files, browsed
@@ -4533,50 +4582,10 @@ async function libraryShowSequenceDetail(seqNumber){
     flyRow.appendChild(saveBtn);
     body.appendChild(flyRow);
 
-    (seqData.duty_days || []).forEach(day => {
-      const pane = document.createElement('div');
-      pane.style.cssText = 'margin:0 14px 14px;border-radius:16px;overflow:hidden;border:1px solid var(--border);';
-      const bar = document.createElement('div');
-      bar.className = 'section-bar';
-      bar.style.cssText = 'background:var(--navy);cursor:default;';
-      bar.textContent = 'Day ' + day.duty_day + ' — RPT ' + (day.report || '');
-      pane.appendChild(bar);
-      const list = document.createElement('div');
-      list.className = 'doc-list';
-      (day.legs || []).forEach(leg => {
-        const row = document.createElement('div');
-        row.className = 'doc-row';
-        const codeWrap = document.createElement('div');
-        const code = document.createElement('div'); code.className = 'code';
-        code.textContent = (leg.flight_number || '—') + (leg.equipment ? ' · ' + leg.equipment : '');
-        const desc = document.createElement('div'); desc.className = 'desc';
-        const descBits = [
-          leg.origin + '→' + leg.destination + ' ' + leg.dep_local + '/' + leg.arr_local,
-          leg.block ? ('BLK ' + leg.block) : '',
-          leg.ground ? ('GND ' + leg.ground) : '',
-        ].filter(Boolean);
-        desc.textContent = descBits.join(' · ');
-        codeWrap.appendChild(code); codeWrap.appendChild(desc);
-        row.appendChild(codeWrap);
-        list.appendChild(row);
-      });
-      pane.appendChild(list);
-      const bits = [
-        day.release ? ('RLS ' + day.release) : '',
-        day.duty ? ('Duty ' + day.duty) : '',
-        day.tpay ? ('TPAY ' + day.tpay) : '',
-        day.tafb ? ('TAFB ' + day.tafb) : '',
-        day.hotel || '',
-      ].filter(Boolean).join(' · ');
-      if(bits){
-        const note = document.createElement('p');
-        note.className = 'placeholder-note';
-        note.style.margin = '0';
-        note.textContent = bits;
-        pane.appendChild(note);
-      }
-      body.appendChild(pane);
-    });
+    const cardsWrap = document.createElement('div');
+    cardsWrap.style.cssText = 'padding:0 14px 14px;';
+    renderDutyDayCards(cardsWrap, seqData, {flightPrefix: opr, interactive: false});
+    body.appendChild(cardsWrap);
   } catch(e) { body.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>'; }
 }
 async function promoteAndFly(opr, base, fleet, seqNumber){
@@ -4665,8 +4674,21 @@ function toggleLegEditForm(row, seq, dutyDay, legIndex, leg){
     if(!dest){ form.querySelector('.le-msg').textContent = 'Destination is required.'; return; }
     proposeLegEdit(seq, dutyDay, legIndex, dest, flt, form.querySelector('.le-msg'));
   };
-  row.insertAdjacentElement('afterend', form);
-  _legEditFormOpen = form;
+  if(row.tagName === 'TR'){
+    // row is a duty-day-card leg row (dutyDayCardHtml) — a bare <div>
+    // can't sit between <tr>s, so wrap the form in its own full-width row.
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = row.children.length;
+    td.style.padding = '0';
+    td.appendChild(form);
+    tr.appendChild(td);
+    row.insertAdjacentElement('afterend', tr);
+    _legEditFormOpen = tr;
+  } else {
+    row.insertAdjacentElement('afterend', form);
+    _legEditFormOpen = form;
+  }
 }
 async function proposeLegEdit(seq, dutyDay, legIndex, newDestination, flightNumber, msgEl){
   msgEl.textContent = 'Checking…';
