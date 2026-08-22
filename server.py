@@ -2189,6 +2189,11 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
   .navtab span{font-size:10px;font-weight:600;}
   .navtab.active{color:var(--blue-dark);}
   .navtab:disabled{opacity:.4;cursor:default;}
+  /* Same fixed gear as FOS_TEMPLATE (see its own .settings-fab comment) —
+     Home has no topbar of its own to hang a per-page icon off of. */
+  .settings-fab{position:fixed;top:calc(env(safe-area-inset-top) + 10px);right:calc(env(safe-area-inset-right) + 16px);z-index:25;background:var(--card);border:1px solid var(--border);border-radius:50%;width:34px;height:34px;display:flex;align-items:center;justify-content:center;color:var(--label);cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.12);}
+  .settings-fab svg{width:18px;height:18px;flex-shrink:0;}
+  @media (min-width: 768px){ .settings-fab{top:calc(env(safe-area-inset-top) + 38px);} }
   h1{font-size:18px;color:var(--blue-dark);margin:0 0 16px;}
   label{display:block;font-size:13px;font-weight:600;margin:10px 0 4px;color:var(--value);}
   textarea, select, input[type=text]{width:100%;max-width:640px;font-family:inherit;font-size:13.5px;padding:9px 10px;border:1px solid var(--border);border-radius:5px;box-sizing:border-box;background:var(--card);color:var(--value);}
@@ -2225,6 +2230,9 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
   .home-tile .tile-sub{font-size:12.5px;color:var(--label);margin-top:2px;}
 </style></head><body>
 
+<button class="settings-fab" title="Settings" onclick="window.location.href='/schedule?view=settings'">
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.34 1.87l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.7 1.7 0 00-1.87-.34 1.7 1.7 0 00-1 1.55V21a2 2 0 11-4 0v-.09A1.7 1.7 0 009 19.4a1.7 1.7 0 00-1.87.34l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.7 1.7 0 004.6 15a1.7 1.7 0 00-1.55-1H3a2 2 0 110-4h.09A1.7 1.7 0 004.6 9a1.7 1.7 0 00-.34-1.87l-.06-.06a2 2 0 112.83-2.83l.06.06A1.7 1.7 0 009 4.6a1.7 1.7 0 001-1.55V3a2 2 0 114 0v.09a1.7 1.7 0 001 1.55 1.7 1.7 0 001.87-.34l.06-.06a2 2 0 112.83 2.83l-.06.06A1.7 1.7 0 0019.4 9a1.7 1.7 0 001.55 1H21a2 2 0 110 4h-.09a1.7 1.7 0 00-1.55 1z"/></svg>
+</button>
 <div id="home-view" class="sub-view active">
   <h1>MobileCCI</h1>
   <div class="home-tiles">
@@ -2744,8 +2752,15 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .weight-grid .wg-lbl{font-size:10.5px;color:var(--label);text-transform:uppercase;letter-spacing:.03em;}
   .weight-grid .wg-val{font-size:13.5px;font-weight:700;color:var(--value);font-variant-numeric:tabular-nums;}
   .topbar{display:flex;flex-wrap:wrap;align-items:center;margin-bottom:10px;position:sticky;top:0;z-index:10;background:var(--bg);padding-top:calc(env(safe-area-inset-top) + 6px);margin-top:-6px;margin-left:-16px;margin-right:-16px;padding-left:16px;padding-right:16px;}
+  /* Tablet-width browsers (iPadOS Safari's tabbed mode among them) draw
+     their own chrome — tab-strip controls, a floating "stoplight" cluster
+     — over the top-left/top-right of the page that safe-area-inset can't
+     account for (it only reports hardware notch/home-indicator, not
+     browser UI). Extra clearance here is a defensive guess, not measured
+     against a real device — right height still needs confirming there. */
+  @media (min-width: 768px){ .topbar{padding-top:calc(env(safe-area-inset-top) + 34px);} }
   .back-link{order:1;display:flex;align-items:center;color:var(--value);background:none;border:none;cursor:pointer;padding:6px 4px;text-decoration:none;}
-  .topbar-actions{order:2;margin-left:auto;display:flex;align-items:center;gap:14px;}
+  .topbar-actions{order:2;margin-left:auto;display:flex;align-items:center;gap:14px;padding-right:38px;}
   .topbar-title{order:3;flex:1 1 100%;text-align:center;margin-top:2px;}
   .topbar-title h1{font-size:19px;margin:0;font-weight:600;color:var(--blue-dark);}
   .topbar-title p{font-size:12px;margin:2px 0 0;color:var(--label);}
@@ -2753,6 +2768,13 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .icon-btn svg{width:19px;height:19px;}
   .icon-btn.syncing svg{animation:spin .8s linear infinite;}
   @keyframes spin{to{transform:rotate(360deg);}}
+  /* One settings gear, fixed above every view (not per-topbar) — the only
+     way to guarantee it's on every single page without duplicating it
+     into all 14 view sections. Sits clear of the topbar's own
+     actions/title since it's positioned independently. */
+  .settings-fab{position:fixed;top:calc(env(safe-area-inset-top) + 10px);right:calc(env(safe-area-inset-right) + 16px);z-index:25;background:var(--card);border:1px solid var(--border);border-radius:50%;width:34px;height:34px;display:flex;align-items:center;justify-content:center;color:var(--label);cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.12);}
+  .settings-fab svg{width:18px;height:18px;flex-shrink:0;}
+  @media (min-width: 768px){ .settings-fab{top:calc(env(safe-area-inset-top) + 38px);} }
   .status-bar{background:var(--navy);color:#fff;display:flex;align-items:center;justify-content:space-between;padding:8px 14px;border-radius:var(--radius) var(--radius) 0 0;font-size:13px;font-weight:600;}
   .flight-summary{background:var(--card);display:flex;align-items:center;padding:12px 14px;border-bottom:1px solid var(--border);font-size:13px;gap:18px;flex-wrap:wrap;}
   .flight-summary .fnum{font-size:15px;font-weight:700;}
@@ -2901,6 +2923,9 @@ FOS_TEMPLATE = """<!DOCTYPE html>
     </div>
   </div>
 </div>
+<button class="settings-fab" title="Settings" onclick="showView('settings')">
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.34 1.87l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.7 1.7 0 00-1.87-.34 1.7 1.7 0 00-1 1.55V21a2 2 0 11-4 0v-.09A1.7 1.7 0 009 19.4a1.7 1.7 0 00-1.87.34l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.7 1.7 0 004.6 15a1.7 1.7 0 00-1.55-1H3a2 2 0 110-4h.09A1.7 1.7 0 004.6 9a1.7 1.7 0 00-.34-1.87l-.06-.06a2 2 0 112.83-2.83l.06.06A1.7 1.7 0 009 4.6a1.7 1.7 0 001-1.55V3a2 2 0 114 0v.09a1.7 1.7 0 001 1.55 1.7 1.7 0 001.87-.34l.06-.06a2 2 0 112.83 2.83l-.06.06A1.7 1.7 0 0019.4 9a1.7 1.7 0 001.55 1H21a2 2 0 110 4h-.09a1.7 1.7 0 00-1.55 1z"/></svg>
+</button>
 <div class="app-shell">
   <main class="main">
     <section id="overview-view" class="view active">
@@ -2909,9 +2934,6 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         <div class="topbar-actions">
           <button class="icon-btn" id="sync-btn" title="Sync from SimBrief" onclick="syncFromSimbrief(false)">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-          </button>
-          <button class="icon-btn" title="Settings" onclick="showView('settings')">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.34 1.87l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.7 1.7 0 00-1.87-.34 1.7 1.7 0 00-1 1.55V21a2 2 0 11-4 0v-.09A1.7 1.7 0 009 19.4a1.7 1.7 0 00-1.87.34l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.7 1.7 0 004.6 15a1.7 1.7 0 00-1.55-1H3a2 2 0 110-4h.09A1.7 1.7 0 004.6 9a1.7 1.7 0 00-.34-1.87l-.06-.06a2 2 0 112.83-2.83l.06.06A1.7 1.7 0 009 4.6a1.7 1.7 0 001-1.55V3a2 2 0 114 0v.09a1.7 1.7 0 001 1.55 1.7 1.7 0 001.87-.34l.06-.06a2 2 0 112.83 2.83l-.06.06A1.7 1.7 0 0019.4 9a1.7 1.7 0 001.55 1H21a2 2 0 110 4h-.09a1.7 1.7 0 00-1.55 1z"/></svg>
           </button>
         </div>
         <div class="topbar-title">
@@ -3289,7 +3311,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
     </section>
     <section id="settings-view" class="view">
       <div class="topbar">
-        <button class="back-link" onclick="showView('overview')" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
+        <button class="back-link" onclick="navTab('overview')" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
         <div class="topbar-title">
           <h1>Settings</h1>
           <p>Applies to every flight on this account</p>
@@ -5298,16 +5320,18 @@ function renderWeather(stations){
 }
 
 (function(){
+  const params = new URLSearchParams(window.location.search);
+  const view = params.get('view');
   if(!LEG_ID){
     // /schedule — the leg-independent root. Nothing here is scoped to a
     // real leg, so there's no Overview to default to and no per-leg sync
-    // to start.
-    showView('pairing');
+    // to start. Still honor an explicit ?view= (e.g. the global settings
+    // gear links here as /schedule?view=settings) — only default to
+    // Schedule itself when nothing was asked for.
+    showView(view || 'pairing');
     return;
   }
-  const params = new URLSearchParams(window.location.search);
-  const view = params.get('view');
-  if(view === 'pairing' || view === 'release' || view === 'confirm') showView(view);
+  if(view === 'pairing' || view === 'release' || view === 'confirm' || view === 'settings') showView(view);
   else initOverviewPills();
   showDateSlipModalIfPending();
   startAutoSync();
