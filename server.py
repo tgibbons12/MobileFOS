@@ -876,6 +876,31 @@ def clear_pbs_sequences():
     return jsonify({"ok": True})
 
 
+@app.route("/pbs/sequences/tidy", methods=["POST"])
+def tidy_pbs_sequences():
+    """Bulk-declutters 'My Trips' — drops every promoted/pasted sequence
+    from the active pool EXCEPT ones bookmarked in the Pairing Library
+    (User.saved_pairings) or already flown at least one leg of (a real Leg
+    row stamped with that seq number — "cached" via Generate/Generate &
+    Cache All Legs). Leaves in-progress and saved-for-later trips alone,
+    clears everything else a pilot promoted-then-forgot-about."""
+    row = _pbs_row()
+    if not row or not row.sequences:
+        return jsonify({"ok": True, "removed": 0, "kept": 0})
+
+    saved_seqs = {p.get("seq") for p in (current_user.saved_pairings or [])}
+    cached_seqs = {
+        leg.data.get("seq") for leg in Leg.query.filter_by(user_id=current_user.id).all()
+        if leg.data.get("seq")
+    }
+    keep_seqs = saved_seqs | cached_seqs
+
+    before = len(row.sequences)
+    row.sequences = [s for s in row.sequences if s["seq"] in keep_seqs]
+    db.session.commit()
+    return jsonify({"ok": True, "removed": before - len(row.sequences), "kept": len(row.sequences)})
+
+
 @app.route("/pbs/sequences/<seq_number>", methods=["DELETE"])
 def delete_pbs_sequence(seq_number):
     row = _pbs_row()
@@ -4183,9 +4208,28 @@ function renderMyTripEmptyState(body){
 function myTripShowList(seqs){
   const body = document.getElementById('pairing-body');
   body.innerHTML = '';
+  const tidyWrap = document.createElement('div');
+  tidyWrap.style.cssText = 'padding:0 14px 6px;text-align:right;';
+  const tidyBtn = document.createElement('button');
+  tidyBtn.className = 'clear-all-link';
+  tidyBtn.textContent = 'Tidy Up';
+  tidyBtn.title = 'Remove every trip you promoted but never flew or saved';
+  tidyBtn.onclick = () => tidyMyTrips();
+  tidyWrap.appendChild(tidyBtn);
+  body.appendChild(tidyWrap);
   const {pane, list} = libraryPane('My Trips', null);
   seqs.forEach(s => list.appendChild(sequenceListRow(s, () => myTripShowDetail(s.seq, true))));
   body.appendChild(pane);
+}
+async function tidyMyTrips(){
+  if(!confirm('Remove every trip in My Trips that you haven\'t flown a leg of or saved? Saved and in-progress trips are kept.')) return;
+  try {
+    const r = await fetch('/pbs/sequences/tidy', {method: 'POST'});
+    const data = await r.json();
+    if(!r.ok){ showToast(data.error || 'Tidy failed'); return; }
+    showToast(data.removed ? `Removed ${data.removed} trip${data.removed === 1 ? '' : 's'}` : 'Nothing to remove');
+    initPairingView();
+  } catch(e) { showToast('Request failed: ' + e); }
 }
 async function myTripShowDetail(seqNumber, showBack){
   const body = document.getElementById('pairing-body');
