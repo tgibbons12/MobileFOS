@@ -150,3 +150,18 @@ class SignatureLog(db.Model):
     flight_number = db.Column(db.String(16))
     dep_date = db.Column(db.String(16))
     signed_at = db.Column(db.String(64))
+
+
+class TripCheckIn(db.Model):
+    """A separate signature audit trail for picking up a trip (Schedule >
+    My Trip's Pick Up button) — distinct from SignatureLog's per-LEG FFD/
+    eFlight-Plan signatures, since a trip check-in is scoped to a sequence
+    number, not any one leg. A brand-new table rather than loosening
+    SignatureLog.leg_id's NOT NULL constraint, which would need a
+    Postgres-vs-SQLite-aware ALTER COLUMN migration for no real benefit."""
+    __tablename__ = "trip_checkins"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    seq = db.Column(db.String(32), nullable=False, index=True)
+    signature = db.Column(db.Text)
+    signed_at = db.Column(db.String(64))

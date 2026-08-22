@@ -38,7 +38,7 @@ import pbs_format
 import pbs_parser
 import release_engine
 from fos_pages import AIRLINE_IATA, synthesize_crew
-from models import db, User, Leg, PbsImport, PairingPack, SignatureLog, ReleaseCache
+from models import db, User, Leg, PbsImport, PairingPack, SignatureLog, ReleaseCache, TripCheckIn
 import simbrief_ofp
 
 # ICAO -> IANA timezone name (e.g. "America/Phoenix"), used to convert a PBS
@@ -1070,7 +1070,10 @@ def list_bid_layer_pairings(layer_id):
 
 @app.route("/pbs/sequences")
 def list_pbs_sequences():
-    return jsonify([_summarize_sequence(s) for s in _pbs_sequences()])
+    return jsonify([
+        {**_summarize_sequence(s), "active": s["seq"] == current_user.active_seq}
+        for s in _pbs_sequences()
+    ])
 
 
 @app.route("/pbs/sequences", methods=["DELETE"])
@@ -1080,6 +1083,7 @@ def clear_pbs_sequences():
     row = _pbs_row()
     if row:
         db.session.delete(row)
+        current_user.active_seq = None
         db.session.commit()
     return jsonify({"ok": True})
 
@@ -1097,6 +1101,8 @@ def tidy_pbs_sequences():
         return jsonify({"ok": True, "removed": 0, "kept": 0})
 
     saved_seqs = {p.get("seq") for p in (current_user.saved_pairings or [])}
+    if current_user.active_seq:
+        saved_seqs.add(current_user.active_seq)
     cached_seqs = {
         leg.data.get("seq") for leg in Leg.query.filter_by(user_id=current_user.id).all()
         if leg.data.get("seq")
@@ -1118,6 +1124,8 @@ def delete_pbs_sequence(seq_number):
     if len(remaining) == len(row.sequences or []):
         return jsonify({"error": "not found"}), 404
     row.sequences = remaining
+    if current_user.active_seq == seq_number:
+        current_user.active_seq = None
     db.session.commit()
     return jsonify({"ok": True})
 
@@ -1132,7 +1140,42 @@ def get_pbs_sequence(seq_number):
     # is one shared value for the whole pool and goes stale the moment two
     # sequences from different packs/operators sit in that pool together.
     operator_iata = (seq.get("_pack_opr") or _pbs_meta().get("operator") or "").upper()
-    return jsonify(_decorate_sequence(seq, operator_iata))
+    out = _decorate_sequence(seq, operator_iata)
+    out["active"] = (seq_number == current_user.active_seq)
+    return jsonify(out)
+
+
+@app.route("/pbs/sequences/<seq_number>/pick-up", methods=["POST"])
+def pick_up_sequence(seq_number):
+    """Marks this sequence as the pilot's one active trip — requires a
+    Trip Check-In signature first (separate from per-leg FFD), and refuses
+    to pick up a second trip while one's already active."""
+    seq = next((s for s in _pbs_sequences() if s["seq"] == seq_number), None)
+    if not seq:
+        return jsonify({"error": "sequence not found"}), 404
+    if current_user.active_seq and current_user.active_seq != seq_number:
+        return jsonify({"error": f"Close SEQ {current_user.active_seq} before picking up a new trip"}), 400
+
+    body = request.get_json(silent=True) or {}
+    signature = body.get("signature")
+    if not signature or not signature.startswith("data:image/"):
+        return jsonify({"error": "trip check-in signature required"}), 400
+
+    signed_at = datetime.now(timezone.utc).isoformat()
+    db.session.add(TripCheckIn(user_id=current_user.id, seq=seq_number, signature=signature, signed_at=signed_at))
+    current_user.active_seq = seq_number
+    db.session.commit()
+    LOG.info(f"TRIP CHECK-IN seq={seq_number} user={current_user.id} at={signed_at}")
+    return jsonify({"ok": True, "active_seq": seq_number, "signed_at": signed_at})
+
+
+@app.route("/pbs/sequences/<seq_number>/close", methods=["POST"])
+def close_sequence(seq_number):
+    if current_user.active_seq != seq_number:
+        return jsonify({"error": "this isn't your active trip"}), 400
+    current_user.active_seq = None
+    db.session.commit()
+    return jsonify({"ok": True})
 
 
 # ---------------------------------------------------------------------------
@@ -4354,12 +4397,22 @@ function closePdfView(){
 // effect (fit_for_duty=True server-side, see sign_leg) this particular
 // signing session is for.
 let _signKind = 'eflightplan';
+// Trip Check-In (Pick Up) reuses this same pad but isn't leg-scoped —
+// _signTripSeq/_signTripCallback carry the sequence number and the
+// "now actually run the pick-up side-effects" callback through the
+// generic submitSignature() flow below.
+let _signTripSeq = null, _signTripCallback = null;
 const _SIGN_KIND_COPY = {
   ffd: {title: 'Sign Fit for Duty Declaration', line: 'Attests you are fit for duty on this flight'},
   eflightplan: {title: 'Sign eFlight Plan', line: 'Acknowledges receipt of the current release'},
+  tripcheckin: {title: 'Trip Check-In', line: 'Confirms you are checking in for this trip'},
 };
-function openSignPad(kind){
+function openSignPad(kind, opts){
   _signKind = kind || 'eflightplan';
+  if(_signKind === 'tripcheckin'){
+    _signTripSeq = opts && opts.seq;
+    _signTripCallback = (opts && opts.onSuccess) || null;
+  }
   const copy = _SIGN_KIND_COPY[_signKind] || _SIGN_KIND_COPY.eflightplan;
   document.getElementById('sign-title').textContent = copy.title;
   document.getElementById('sign-status-line').textContent = copy.line;
@@ -4417,6 +4470,23 @@ async function submitSignature(){
   el.textContent = 'Submitting…';
   el.style.color = '';
   const dataUrl = document.getElementById('sign-pad').toDataURL('image/png');
+  if(_signKind === 'tripcheckin'){
+    try {
+      const r = await fetch('/pbs/sequences/' + encodeURIComponent(_signTripSeq) + '/pick-up', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({signature: dataUrl}),
+      });
+      const data = await r.json();
+      btn.disabled = false;
+      if(!r.ok){ el.textContent = data.error || 'Check-in failed'; el.style.color = '#c0392b'; return; }
+      showToast('Trip picked up');
+      if(_signTripCallback) _signTripCallback();
+    } catch(e) {
+      btn.disabled = false;
+      el.textContent = 'Request failed: ' + e;
+      el.style.color = '#c0392b';
+    }
+    return;
+  }
   try {
     const r = await fetch('/fos/' + LEG_ID + '/sign', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({signature: dataUrl, kind: _signKind})});
     const data = await r.json();
@@ -4667,6 +4737,7 @@ function renderPairing(seqData){
     totalLegs + ' leg' + (totalLegs === 1 ? '' : 's'),
     (seqData.positions || []).join('/'),
   ];
+  if(seqData.active) summaryBits.unshift('● ACTIVE');
   if(firstLeg && lastLeg) summaryBits.unshift(firstLeg.origin + ' → ' + lastLeg.destination);
   if(flightPrefix) summaryBits.unshift(flightPrefix);
   summary.textContent = summaryBits.filter(Boolean).join('  ·  ');
@@ -4675,11 +4746,28 @@ function renderPairing(seqData){
   const cacheWrap = document.createElement('div');
   cacheWrap.style.cssText = 'padding:11px 14px;background:var(--card);border-bottom:1px solid var(--border);';
   const cacheBtn = document.createElement('button');
-  cacheBtn.textContent = 'Generate & Cache All Legs in Sequence';
-  cacheBtn.style.cssText = 'margin:0;width:100%;background:var(--blue);color:#fff;border:none;padding:10px;border-radius:5px;font-size:13.5px;font-weight:600;cursor:pointer;';
-  cacheBtn.onclick = () => cacheAllPairingLegs(seqData, position, cacheMsg);
   const cacheMsg = document.createElement('div');
   cacheMsg.style.cssText = 'margin-top:8px;font-size:12.5px;color:var(--label);';
+  if(seqData.active){
+    cacheBtn.textContent = 'Close Trip';
+    cacheBtn.style.cssText = 'margin:0;width:100%;background:var(--label);color:#fff;border:none;padding:10px;border-radius:5px;font-size:13.5px;font-weight:600;cursor:pointer;';
+    cacheBtn.onclick = () => closeTrip(seqData.seq);
+  } else {
+    cacheBtn.textContent = 'Pick Up';
+    cacheBtn.style.cssText = 'margin:0;width:100%;background:var(--blue);color:#fff;border:none;padding:10px;border-radius:5px;font-size:13.5px;font-weight:600;cursor:pointer;';
+    // Picking up a trip requires a Trip Check-In signature first — the
+    // sign pad opens, and only on a successful submit does the legacy
+    // "generate & cache every leg" side effect run, followed by a
+    // re-render so the button flips to Close Trip.
+    cacheBtn.onclick = () => openSignPad('tripcheckin', {
+      seq: seqData.seq,
+      onSuccess: async () => {
+        showView('pairing');
+        await cacheAllPairingLegs(seqData, position, cacheMsg);
+        myTripShowDetail(seqData.seq, true);
+      },
+    });
+  }
   cacheWrap.appendChild(cacheBtn);
   cacheWrap.appendChild(cacheMsg);
   body.appendChild(cacheWrap);
@@ -4710,6 +4798,16 @@ async function dropTrip(seq){
     if(!r.ok){ showToast(data.error || 'Could not drop this trip'); return; }
     showToast('Trip dropped');
     initPairingView();
+  } catch(e) { showToast('Request failed: ' + e); }
+}
+async function closeTrip(seq){
+  if(!confirm('Close SEQ ' + seq + '? You can pick it back up later, or pick up a different trip once it’s closed.')) return;
+  try {
+    const r = await fetch('/pbs/sequences/' + encodeURIComponent(seq) + '/close', {method: 'POST'});
+    const data = await r.json();
+    if(!r.ok){ showToast(data.error || 'Could not close this trip'); return; }
+    showToast('Trip closed');
+    myTripShowDetail(seq, true);
   } catch(e) { showToast('Request failed: ' + e); }
 }
 
@@ -4990,7 +5088,7 @@ function sequenceListRow(s, onClick){
   row.className = 'doc-row lib-row';
   const left = document.createElement('div');
   const code = document.createElement('div'); code.className = 'code seq-code';
-  code.textContent = 'SEQ ' + s.seq;
+  code.textContent = (s.active ? '● ' : '') + 'SEQ ' + s.seq + (s.active ? ' (ACTIVE — picked up)' : '');
   const desc = document.createElement('div'); desc.className = 'desc lib-routing';
   desc.innerHTML = libraryRoutingHtml(s.routing, s.layover_indices);
   left.appendChild(code); left.appendChild(desc);
