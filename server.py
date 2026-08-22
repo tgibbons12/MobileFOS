@@ -4232,8 +4232,8 @@ function dutyDayCardHtml(day, withEditIcons){
   return '<div class="dd-card">' +
     '<div class="dd-hdr">Day ' + day.duty_day + '</div>' +
     '<div class="dd-table-wrap"><table class="dd-table"><thead><tr>' +
-      '<th>Dp</th><th>D&#8260;A</th><th>Flt&#8260;Eq</th>' +
-      '<th>STA<br>DLCL&#8260;DHBT</th><th>STA<br>ALCL&#8260;AHBT</th><th>Blk&#8260;Gnd</th>' +
+      '<th>Dp</th><th>D/A</th><th>Flt/Eq</th>' +
+      '<th>STA<br>DLCL/DHBT</th><th>STA<br>ALCL/AHBT</th><th>Blk/Gnd</th>' +
     '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
     (summaryBits ? ('<div class="dd-summary">' + summaryBits + '</div>') : '') +
     '</div>';
