@@ -2883,6 +2883,11 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .section-bar.lib-bar{cursor:default;justify-content:flex-start;gap:9px;}
   .lib-back{cursor:pointer;display:flex;align-items:center;flex:0 0 auto;padding:2px;margin:-2px;}
   .lib-back svg{width:10px;height:15px;display:block;}
+  /* A small action living in the same blue bar as the pane's own title —
+     white-on-translucent-white so it reads as part of that bar, not a
+     plain-background link (like .clear-all-link) mismatched onto it. */
+  .lib-bar-action{flex:0 0 auto;color:#fff;background:rgba(255,255,255,.18);border:none;border-radius:6px;padding:5px 10px;font-size:12px;font-weight:600;cursor:pointer;}
+  .lib-bar-action:active{background:rgba(255,255,255,.3);}
   .doc-row.lib-row{cursor:pointer;}
   .doc-row .code.seq-code{color:var(--blue);}
   .doc-row .desc.lib-routing{color:var(--value);}
@@ -4208,16 +4213,17 @@ function renderMyTripEmptyState(body){
 function myTripShowList(seqs){
   const body = document.getElementById('pairing-body');
   body.innerHTML = '';
-  const tidyWrap = document.createElement('div');
-  tidyWrap.style.cssText = 'padding:0 14px 6px;text-align:right;';
+  // Lives inside the pane's own blue title bar (via libraryBar's actionEl
+  // slot), not floating above it as an orphan link — .clear-all-link is a
+  // blue-text-on-plain-background style meant to sit next to a plain <h1>
+  // (see Home's "Clear All"), which would be invisible against this bar's
+  // own blue background.
   const tidyBtn = document.createElement('button');
-  tidyBtn.className = 'clear-all-link';
+  tidyBtn.className = 'lib-bar-action';
   tidyBtn.textContent = 'Tidy Up';
   tidyBtn.title = 'Remove every trip you promoted but never flew or saved';
-  tidyBtn.onclick = () => tidyMyTrips();
-  tidyWrap.appendChild(tidyBtn);
-  body.appendChild(tidyWrap);
-  const {pane, list} = libraryPane('My Trips', null);
+  tidyBtn.onclick = (e) => { e.stopPropagation(); tidyMyTrips(); };
+  const {pane, list} = libraryPane('My Trips', null, tidyBtn);
   seqs.forEach(s => list.appendChild(sequenceListRow(s, () => myTripShowDetail(s.seq, true))));
   body.appendChild(pane);
 }
@@ -4393,6 +4399,25 @@ function renderPairing(seqData){
     onEditClick: (row, day, i, leg) => toggleLegEditForm(row, seqData.seq, day.duty_day, i, leg),
   });
   body.appendChild(cardsWrap);
+
+  const dropWrap = document.createElement('div');
+  dropWrap.style.cssText = 'padding:0 14px 18px;';
+  const dropBtn = document.createElement('button');
+  dropBtn.textContent = 'Drop Trip';
+  dropBtn.style.cssText = 'margin:0;width:100%;background:var(--red);color:#fff;border:none;padding:12px;border-radius:8px;font-size:14px;font-weight:700;cursor:pointer;';
+  dropBtn.onclick = () => dropTrip(seqData.seq);
+  dropWrap.appendChild(dropBtn);
+  body.appendChild(dropWrap);
+}
+async function dropTrip(seq){
+  if(!confirm('Drop SEQ ' + seq + ' from My Trips? Any flights you already generated from it stay in your archive — this only removes it from the active list.')) return;
+  try {
+    const r = await fetch('/pbs/sequences/' + encodeURIComponent(seq), {method: 'DELETE'});
+    const data = await r.json();
+    if(!r.ok){ showToast(data.error || 'Could not drop this trip'); return; }
+    showToast('Trip dropped');
+    initPairingView();
+  } catch(e) { showToast('Request failed: ' + e); }
 }
 
 // Pairing Library — bulk-imported bid-pack files, browsed
@@ -4531,7 +4556,7 @@ function libraryBackLink(label, fn){
   wrap.appendChild(a);
   return wrap;
 }
-function libraryBar(title, backFn){
+function libraryBar(title, backFn, actionEl){
   const bar = document.createElement('div');
   bar.className = 'section-bar lib-bar';
   if(backFn){
@@ -4544,12 +4569,16 @@ function libraryBar(title, backFn){
   const label = document.createElement('span');
   label.textContent = title;
   bar.appendChild(label);
+  // Pushed to the far right regardless of the bar's own flex-start layout —
+  // margin-left:auto does this in any flex row, no separate right-aligned
+  // wrapper needed.
+  if(actionEl){ actionEl.style.marginLeft = 'auto'; bar.appendChild(actionEl); }
   return bar;
 }
-function libraryPane(title, backFn){
+function libraryPane(title, backFn, actionEl){
   const pane = document.createElement('div');
   pane.style.cssText = 'margin:0 14px 14px;border-radius:16px;overflow:hidden;border:1px solid var(--border);';
-  pane.appendChild(libraryBar(title, backFn));
+  pane.appendChild(libraryBar(title, backFn, actionEl));
   const list = document.createElement('div');
   list.className = 'doc-list';
   pane.appendChild(list);
