@@ -1158,7 +1158,17 @@ def write_takeoff_performance_string(
 
                 if _full_idx and _plan_len > 0 and _plan_mw > 0 and _base_rwy is not None:
                     try:
-                        _struct_cap = float(xml_root.findtext('weights/max_tow_struct', '0') or 0) / 1000.0 \
+                        # Raw lbs, matching _plan_mw's own convention below
+                        # (read straight off max_weight, not through
+                        # safe_weight()) — this used to divide by 1000
+                        # here while _plan_mw stayed raw, so min(_mw,
+                        # _struct_cap) always picked the ~1000x-too-small
+                        # _struct_cap, capping every synthesized runway's
+                        # weight down to a near-zero "thousands" value that
+                        # then got misread as raw lbs everywhere else in
+                        # this file (max_weight is raw lbs universally —
+                        # see safe_weight()'s callers at lines ~894/922/1425).
+                        _struct_cap = float(xml_root.findtext('weights/max_tow_struct', '0') or 0) \
                                       if xml_root is not None else 0.0
                     except Exception:
                         _struct_cap = 0.0
@@ -1419,7 +1429,8 @@ def write_takeoff_performance_string(
                 _lookup_code    = raw_code.strip()
                 display_code    = _CODE_MAP.get(_lookup_code, _lookup_code[:1] if _lookup_code else '')
                 original_limit_code = display_code
-                LOG.debug(f"[DBG MTOW] raw_code={raw_code!r} -> display_code={display_code!r}")
+                LOG.debug(f"[DBG MTOW] rwy={rwy!r} max_w_raw={max_w_raw!r} "
+                          f"raw_code={raw_code!r} -> display_code={display_code!r}")
 
                 try:
                     mtow_val = safe_weight(max_w_raw)
