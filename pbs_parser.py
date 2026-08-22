@@ -217,21 +217,34 @@ def _dec_to_hhmm(dec):
 
 
 def mot_for_leg(day, leg_index):
-    """Mandatory Off Time for one leg — the latest it could depart and still
-    let the rest of THIS duty day finish inside the legal FAR 117 duty
-    period, computed backward from the day's own report time:
+    """Mandatory Off Time for one leg — the latest the CURRENT duty day
+    could still release and stay inside the legal FAR 117 duty period,
+    computed backward from the day's own report time:
 
-        FDP_end   = report + table_b(report_hbt, legs_today)
-        time_left = sum(block + ground) from this leg through the day's
-                    last leg (the last leg's own ground is blank already,
-                    per _parse_leg_line's convention, so nothing further
-                    needs excluding there)
-        MOT       = FDP_end - time_left
+        FDP_end        = report + table_b(report_hbt, legs_today)
+        time_used       = sum(block + ground) for every leg BEFORE this one
+        time_remaining  = day["duty"] - time_used
+        MOT             = FDP_end - time_remaining
 
-    table_b is pairing_engine's own FAR 117 duty-period-length table —
-    reused as-is, not reimplemented. Returns an HHMM string, or None if
-    this day has no report/report_hbt (stale data parsed before those
-    were captured) or leg_index is out of range.
+    day["duty"] is the bid pack's own published scheduled duty-period
+    length (report to release, straight from the RLS line) — using it as
+    the anchor, not a re-summed block+ground total, matters: block+ground
+    alone omits BRIEF/DEBRIEF and any other overhead the airline already
+    baked into that figure, which is exactly why an 8-hour planned duty
+    day with only ~4 hours of raw block time was showing MOT four hours
+    later than it should (report 1200, 12hr FDP avail, 8hr planned duty
+    should show MOT 1600 — FDP_end 0000 minus the full 8hr remaining, not
+    minus just the flight's own block time). Subtracting only what's
+    ALREADY ELAPSED (legs before this one) rather than resumming what's
+    left is what makes this update leg by leg through the day, while
+    every leg still anchors to the same authoritative day-total.
+
+    Falls back to the older block+ground-only estimate when day["duty"]
+    is missing (stale data parsed before that field was captured) rather
+    than returning nothing. table_b is pairing_engine's own FAR 117
+    duty-period-length table — reused as-is, not reimplemented. Returns
+    an HHMM string, or None if this day has no report/report_hbt or
+    leg_index is out of range.
     """
     report = day.get("report")
     legs = day.get("legs") or []
@@ -240,11 +253,22 @@ def mot_for_leg(day, leg_index):
     fdp_end = fdp_end_for_day(day)
     if fdp_end is None:
         return None
-    time_left = sum(
-        float(l.get("block") or 0) + float(l.get("ground") or 0)
-        for l in legs[leg_index:]
-    )
-    return _dec_to_hhmm(fdp_end - time_left)
+    try:
+        duty_total = float(day.get("duty"))
+    except (TypeError, ValueError):
+        duty_total = None
+    if duty_total is not None:
+        time_used = sum(
+            float(l.get("block") or 0) + float(l.get("ground") or 0)
+            for l in legs[:leg_index]
+        )
+        time_remaining = duty_total - time_used
+    else:
+        time_remaining = sum(
+            float(l.get("block") or 0) + float(l.get("ground") or 0)
+            for l in legs[leg_index:]
+        )
+    return _dec_to_hhmm(fdp_end - time_remaining)
 
 
 def fdp_end_for_day(day):
