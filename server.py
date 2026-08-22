@@ -3311,7 +3311,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
     </section>
     <section id="settings-view" class="view">
       <div class="topbar">
-        <button class="back-link" onclick="navTab('overview')" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
+        <button class="back-link" onclick="backFromSettings()" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
         <div class="topbar-title">
           <h1>Settings</h1>
           <p>Applies to every flight on this account</p>
@@ -3438,7 +3438,20 @@ const LEG_ARR_DATE = "$arr_date";
 const LEG_SCHED_IN = "$sched_in";
 const LEG_BOOKMARKED_DOCS = $bookmarked_docs_json;
 const LEG_PENDING_DATE_SLIP = $pending_date_slip_json;
+// Settings is now reachable from every view (the global gear, not just
+// Overview's own topbar) — its own back chevron needs to return to
+// whichever view was actually active, not a hardcoded 'overview'. Simple
+// one-slot memory rather than a real history stack: fine since Settings
+// is always a dead-end detour, never itself a jumping-off point to a
+// third view.
+let _preSettingsView = 'overview';
 function showView(view){
+  if(view === 'settings'){
+    const activeSection = document.querySelector('.view.active');
+    if(activeSection && activeSection.id !== 'settings-view'){
+      _preSettingsView = activeSection.id.replace('-view', '');
+    }
+  }
   document.getElementById('overview-view').classList.toggle('active', view==='overview');
   document.getElementById('allcommands-view').classList.toggle('active', view==='allcommands');
   document.getElementById('release-view').classList.toggle('active', view==='release');
@@ -3484,6 +3497,17 @@ function navTab(view){
   if(view === 'pairing'){ window.location.href = '/schedule'; return; }
   if(!LEG_ID){ window.location.href = '/'; return; }
   showView(view);
+}
+// Settings' own back chevron — go to whichever view was actually active
+// before Settings (see _preSettingsView, set in showView()), not a fixed
+// 'overview'. The one case _preSettingsView can't capture is arriving
+// straight into Settings on page load (Home's gear links to
+// /schedule?view=settings) — nothing was "active" yet to remember, so
+// that still defaults to 'overview', which only makes sense with a real
+// leg; on the leg-independent page it means Home instead.
+function backFromSettings(){
+  if(!LEG_ID && _preSettingsView === 'overview'){ window.location.href = '/'; return; }
+  showView(_preSettingsView);
 }
 function saveSimbriefUser(value){
   const user = value.trim();
