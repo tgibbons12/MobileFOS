@@ -322,6 +322,14 @@ def _ensure_columns():
         with db.engine.begin() as conn:
             conn.execute(sa_text("ALTER TABLE users ADD COLUMN bid_layers JSON"))
         LOG.info("Migrated: added users.bid_layers")
+    if "timezone" not in existing:
+        with db.engine.begin() as conn:
+            conn.execute(sa_text("ALTER TABLE users ADD COLUMN timezone VARCHAR(64)"))
+        LOG.info("Migrated: added users.timezone")
+    if "active_seq" not in existing:
+        with db.engine.begin() as conn:
+            conn.execute(sa_text("ALTER TABLE users ADD COLUMN active_seq VARCHAR(32)"))
+        LOG.info("Migrated: added users.active_seq")
     existing_pbs = {c["name"] for c in inspector.get_columns("pbs_imports")}
     if "pending_edits" not in existing_pbs:
         with db.engine.begin() as conn:
@@ -2147,6 +2155,17 @@ def set_aeroapi_key():
     return jsonify({"ok": True})
 
 
+@app.route("/settings/timezone", methods=["POST"])
+def set_timezone():
+    """Which clock face MOT (and any other local-time display) renders in
+    — an IANA name, or blank to fall back to the bid pack's own local
+    time with no conversion."""
+    body = request.get_json(silent=True) or {}
+    current_user.timezone = (body.get("timezone") or "").strip() or None
+    db.session.commit()
+    return jsonify({"ok": True})
+
+
 @app.route("/settings/bid-shortcut")
 def get_bid_shortcut():
     return jsonify(current_user.bid_shortcut or None)
@@ -2287,6 +2306,55 @@ def render_launcher_html():
     )
 
 
+# A short, curated list rather than every IANA zone (airportsdata alone
+# has thousands) — this is a per-pilot display preference, not an
+# airport lookup, so a manageable picker matters more than completeness.
+_TIMEZONE_CHOICES = [
+    ("America/New_York", "Eastern"), ("America/Chicago", "Central"),
+    ("America/Denver", "Mountain"), ("America/Phoenix", "Arizona"),
+    ("America/Los_Angeles", "Pacific"), ("America/Anchorage", "Alaska"),
+    ("Pacific/Honolulu", "Hawaii"), ("UTC", "UTC"),
+]
+
+
+def _timezone_options_html(selected):
+    opts = ['<option value=""' + (' selected' if not selected else '') + '>As Computed</option>']
+    for tz_name, label in _TIMEZONE_CHOICES:
+        sel = ' selected' if tz_name == selected else ''
+        opts.append(f'<option value="{tz_name}"{sel}>{html.escape(label)} ({tz_name})</option>')
+    return ''.join(opts)
+
+
+def _mot_display(mot_raw, origin, pilot_tz):
+    """MOT as HH:MM (L), shifted into the pilot's saved timezone when one's
+    set. mot_raw is wall-clock local to `origin` (no real date exists in
+    this data — see pbs_leg_to_fos_leg's own known-gap note — so this
+    shifts by each zone's CURRENT utcoffset rather than doing full
+    date-aware conversion; same reference-time approximation
+    pairing_engine.Airports already uses for its own offset table)."""
+    if len(mot_raw) != 4 or not mot_raw.isdigit():
+        return "XX:XX (L)"
+    if not pilot_tz:
+        return f"{mot_raw[:2]}:{mot_raw[2:]} (L)"
+    try:
+        from datetime import datetime, timezone as dt_timezone
+        from zoneinfo import ZoneInfo
+        origin_tz_name = (_AIRPORT_TZ.get(_airport_icao(origin)) or {}).get("tz")
+        if not origin_tz_name:
+            return f"{mot_raw[:2]}:{mot_raw[2:]} (L)"
+        now = datetime.now(dt_timezone.utc)
+        origin_offset = ZoneInfo(origin_tz_name).utcoffset(now.replace(tzinfo=None))
+        pilot_offset = ZoneInfo(pilot_tz).utcoffset(now.replace(tzinfo=None))
+        shift_hours = (pilot_offset - origin_offset).total_seconds() / 3600
+        shifted = (int(mot_raw[:2]) + int(mot_raw[2:]) / 60.0 + shift_hours) % 24
+        h, m = int(shifted), round((shifted - int(shifted)) * 60)
+        if m == 60:
+            h, m = (h + 1) % 24, 0
+        return f"{h:02d}:{m:02d} (L)"
+    except Exception:
+        return f"{mot_raw[:2]}:{mot_raw[2:]} (L)"
+
+
 def render_fos_html(leg):
     ctx = {**DEFAULT_LEG, **leg}
     ctx["customer_load"] = str(ctx.get("customer_load") or "")
@@ -2400,8 +2468,8 @@ def render_fos_html(leg):
     ctx["default_simbrief_user"] = html.escape(current_user.default_simbrief_user or "")
     ctx["aeroapi_key"] = html.escape(current_user.aeroapi_key or "")
     ctx["app_version"] = APP_VERSION
-    _mot_raw = ctx.get("mot") or ""
-    ctx["mot_display"] = f"{_mot_raw[:2]}:{_mot_raw[2:]} (L)" if len(_mot_raw) == 4 else "XX:XX (L)"
+    ctx["mot_display"] = _mot_display(ctx.get("mot") or "", ctx.get("origin") or "", current_user.timezone)
+    ctx["timezone_options"] = _timezone_options_html(current_user.timezone)
     # Trip Recovery only works against a sequence that still exists in the
     # active pool (recover_leg/shift_day both 404 otherwise) — hiding it
     # here instead of leaving a dead entry point that silently fails on
@@ -3621,6 +3689,11 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         <input id="aero-key" type="password" placeholder="Your AeroAPI key" value="$aeroapi_key" onchange="saveAeroApiKey(this.value)">
       </div>
       <div class="search-block">
+        <label for="tz-select">Timezone (for MOT)</label>
+        <select id="tz-select" onchange="saveTimezone(this.value)">$timezone_options</select>
+        <div style="font-size:12px;color:var(--label);margin-top:8px;">Controls what clock face Mandatory Off Time is shown in. Leave on "As Computed" to see it in the bid pack's own local time.</div>
+      </div>
+      <div class="search-block">
         <label>Appearance</label>
         <div style="display:flex;gap:8px;">
           <button type="button" class="theme-opt" data-theme-opt="light" onclick="setThemePref('light')">Light</button>
@@ -3806,6 +3879,11 @@ function saveSimbriefUser(value){
 function saveAeroApiKey(value){
   const key = value.trim();
   fetch('/settings/aeroapi-key', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({aeroapi_key: key})})
+    .then(()=>{ document.getElementById('settings-msg').textContent = 'Saved.'; })
+    .catch(()=>{ document.getElementById('settings-msg').textContent = 'Could not save — try again.'; });
+}
+function saveTimezone(value){
+  fetch('/settings/timezone', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({timezone: value})})
     .then(()=>{ document.getElementById('settings-msg').textContent = 'Saved.'; })
     .catch(()=>{ document.getElementById('settings-msg').textContent = 'Could not save — try again.'; });
 }

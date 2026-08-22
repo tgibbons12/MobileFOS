@@ -49,6 +49,14 @@ class User(UserMixin, db.Model):
     # {"id","name","opr","base","fleet","properties":{...}} — see
     # _layer_matches() in server.py for what "properties" supports.
     bid_layers = db.Column(db.JSON, default=list)
+    # IANA timezone name (e.g. "America/Phoenix") — controls what clock
+    # face MOT is displayed in; blank means "show it as computed" (the
+    # bid pack's own local time, no conversion).
+    timezone = db.Column(db.String(64))
+    # One promoted sequence a pilot has deliberately "picked up" as their
+    # current trip (Schedule > My Trip's Pick Up button) — not leg-scoped
+    # like current_leg_id, and only cleared by an explicit Close Trip.
+    active_seq = db.Column(db.String(32))
     created_at = db.Column(db.DateTime(timezone=True), default=_now)
 
     def set_password(self, password):
