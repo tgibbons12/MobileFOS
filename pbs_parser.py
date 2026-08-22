@@ -234,17 +234,31 @@ def mot_for_leg(day, leg_index):
     were captured) or leg_index is out of range.
     """
     report = day.get("report")
-    report_hbt = day.get("report_hbt") or report
     legs = day.get("legs") or []
-    if not report or not report_hbt or leg_index >= len(legs):
+    if not report or leg_index >= len(legs):
         return None
-    from pairing_engine import table_b
-    fdp_end = _hhmm_to_dec(report) + table_b(_hhmm_to_dec(report_hbt), len(legs))
+    fdp_end = fdp_end_for_day(day)
+    if fdp_end is None:
+        return None
     time_left = sum(
         float(l.get("block") or 0) + float(l.get("ground") or 0)
         for l in legs[leg_index:]
     )
     return _dec_to_hhmm(fdp_end - time_left)
+
+
+def fdp_end_for_day(day):
+    """The day's own legal duty-period deadline (report + table_b's max
+    FDP for this report hour/leg count) as decimal hours — the shared
+    anchor mot_for_leg() counts backward from, also useful on its own for
+    "how much FDP is left right now" style displays."""
+    report = day.get("report")
+    report_hbt = day.get("report_hbt") or report
+    legs = day.get("legs") or []
+    if not report or not report_hbt:
+        return None
+    from pairing_engine import table_b
+    return _hhmm_to_dec(report) + table_b(_hhmm_to_dec(report_hbt), len(legs))
 
 
 def pbs_leg_to_fos_leg(meta, seq, day, leg, position):

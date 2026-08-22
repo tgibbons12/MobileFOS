@@ -1145,6 +1145,49 @@ def get_pbs_sequence(seq_number):
     return jsonify(out)
 
 
+@app.route("/pbs/sequences/<seq_number>/mot-log")
+def sequence_mot_log(seq_number):
+    """Every leg in this sequence with its own MOT, whether it's been
+    generated yet, and — if so — when its FFD was signed (or not). Tapping
+    the MOT time on Overview opens this."""
+    seq = next((s for s in _pbs_sequences() if s["seq"] == seq_number), None)
+    if not seq:
+        return jsonify({"error": "not found"}), 404
+
+    # Same identity key _duty_day_for_leg() already matches a flown Leg
+    # row against its origin sequence with, just built the other way
+    # around here (bulk keyed lookup instead of one at a time).
+    rows_by_key = {}
+    for row in Leg.query.filter_by(user_id=current_user.id).all():
+        if row.data.get("seq") != seq_number:
+            continue
+        key = (
+            (row.data.get("flight_number") or "").strip(),
+            _airport_icao(row.data.get("origin", "")),
+            _airport_icao(row.data.get("destination", "")),
+        )
+        rows_by_key[key] = row
+
+    legs_out = []
+    for day in seq.get("duty_days") or []:
+        fdp_end = pbs_parser.fdp_end_for_day(day)
+        fdp_remaining = _fdp_remaining_display(fdp_end, (day.get("legs") or [{}])[0].get("origin", ""))
+        for i, leg in enumerate(day.get("legs") or []):
+            key = (leg.get("flight_number", ""), _airport_icao(leg.get("origin", "")), _airport_icao(leg.get("destination", "")))
+            row = rows_by_key.get(key)
+            mot = pbs_parser.mot_for_leg(day, i)
+            legs_out.append({
+                "duty_day": day["duty_day"], "flight_number": leg.get("flight_number"),
+                "origin": leg.get("origin"), "destination": leg.get("destination"),
+                "mot_display": _mot_display(mot or "", leg.get("origin") or "", current_user.timezone),
+                "fdp_remaining": fdp_remaining,
+                "generated": row is not None,
+                "signed_at": (row.data.get("signed_at") if row else "") or "",
+                "fit_for_duty": bool(row.data.get("fit_for_duty")) if row else False,
+            })
+    return jsonify({"seq": seq_number, "legs": legs_out})
+
+
 @app.route("/pbs/sequences/<seq_number>/pick-up", methods=["POST"])
 def pick_up_sequence(seq_number):
     """Marks this sequence as the pilot's one active trip — requires a
@@ -2061,23 +2104,14 @@ def release_status():
     })
 
 
-_PDF_B64_FIELDS = (
-    "rls_pdf_b64", "wb_pdf_b64", "fi_pdf_b64", "fil_pdf_b64",
-    "weather_pdf_b64", "notams_pdf_b64", "field_report_pdf_b64",
-)
-
-
 def _gate_release_payload(payload, fit_for_duty):
-    """Withholds the actual PDF bytes from the response (not from the
-    ReleaseCache row — the release still generates and caches normally)
-    when FFD isn't signed on this leg. Real server-side enforcement, not
-    just a disabled button — the payload sent to the browser genuinely
-    has nothing to build a download link from until FFD is signed."""
-    if fit_for_duty:
-        return payload
-    out = {k: v for k, v in payload.items() if k not in _PDF_B64_FIELDS}
-    out["fit_for_duty_required"] = True
-    return out
+    """A soft gate, not a hard block — the PDF still generates, caches,
+    and can be VIEWED in-app either way (per the original "banner, not a
+    block on generation" design). Only the fit_for_duty flag rides along;
+    the frontend uses it to lock the actual Export/Download actions and
+    show the floating warning banner, while the PDF bytes themselves stay
+    in the payload so viewDoc() can still render the document."""
+    return {**payload, "fit_for_duty": bool(fit_for_duty)}
 
 
 @app.route("/fos/<int:leg_id>/release", methods=["POST"])
@@ -2421,6 +2455,31 @@ def _mot_display(mot_raw, origin, pilot_tz):
         return f"{h:02d}:{m:02d} (L)"
     except Exception:
         return f"{mot_raw[:2]}:{mot_raw[2:]} (L)"
+
+
+def _fdp_remaining_display(fdp_end_dec, origin):
+    """"Xh Ym remaining" / "Xh Ym over" against this duty day's own FDP
+    deadline, compared to the current time at `origin`. Same no-real-date
+    caveat as _mot_display — wraps the raw difference into the nearest
+    +/-12h window around now rather than doing full date-aware math, since
+    this data never carries a real calendar date to anchor against."""
+    if fdp_end_dec is None:
+        return None
+    try:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        origin_tz_name = (_AIRPORT_TZ.get(_airport_icao(origin)) or {}).get("tz")
+        if not origin_tz_name:
+            return None
+        now_local = datetime.now(ZoneInfo(origin_tz_name))
+        now_dec = now_local.hour + now_local.minute / 60.0 + now_local.second / 3600.0
+        diff = ((fdp_end_dec - now_dec + 12) % 24) - 12
+        h, m = int(abs(diff)), round((abs(diff) - int(abs(diff))) * 60)
+        if m == 60:
+            h, m = h + 1, 0
+        return f"{h}h {m:02d}m {'remaining' if diff >= 0 else 'over'}"
+    except Exception:
+        return None
 
 
 def render_fos_html(leg):
@@ -3408,7 +3467,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           </div>
           <div class="panel-card">
             <div class="panel-card-hdr">Mandatory Off Time</div>
-            <div class="mot-row"><span class="mot-time">$mot_display</span></div>
+            <div class="mot-row" style="cursor:pointer;" onclick="showMotLog()"><span class="mot-time">$mot_display</span></div>
           </div>
           <div class="panel-card" style="$recovery_card_style">
             <div class="panel-card-hdr">Trip Recovery</div>
@@ -3498,6 +3557,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         <div class="topbar-title"><h1>All Commands</h1></div>
       </div>
       <div class="panel-card">
+        <div class="ffd-banner" style="$ffd_banner_style">Fit for Duty not signed \u2014 sign below to unlock release and document downloads.</div>
         <div class="doc-row">
           <div><div class="code">FFD</div><div class="desc">Fit for Duty Declaration</div></div>
           <div class="actions">
@@ -3513,7 +3573,6 @@ FOS_TEMPLATE = """<!DOCTYPE html>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('rls','eFlight Plan')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg>
           </div>
         </div>
-        <div class="ffd-banner" style="$ffd_banner_style">Fit for Duty not signed \u2014 release and document downloads are locked until you sign it above.</div>
         <div class="doc-row">
           <div><div class="code">FI</div><div class="desc">Flight Details \u2013 GMT</div></div>
           <div class="actions"><svg class="bookmark-icon" data-doc="FI" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="toggleBookmark('FI', this)"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('fi','Flight Details \u2013 GMT')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
@@ -3589,7 +3648,18 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           <h1 id="pdf-view-title"></h1>
         </div>
       </div>
+      <div id="pdf-ffd-banner" class="ffd-banner" style="display:none;">Fit for Duty not signed — you can view this document, but Export is locked until you sign it.</div>
       <div id="pdf-pages" style="background:#525659;margin:0 -16px;padding:12px 12px 32px;display:flex;flex-direction:column;align-items:center;gap:12px;"></div>
+    </section>
+    <section id="motlog-view" class="view">
+      <div class="topbar">
+        <button class="back-link" onclick="showView('overview')" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
+        <div class="topbar-title">
+          <h1>MOT Log</h1>
+          <p>Signed times and FDP remaining, per leg</p>
+        </div>
+      </div>
+      <div id="motlog-body"><p class="placeholder-note">Loading…</p></div>
     </section>
 
     <section id="sign-view" class="view">
@@ -3889,6 +3959,7 @@ function showView(view){
   document.getElementById('release-view').classList.toggle('active', view==='release');
   document.getElementById('confirm-view').classList.toggle('active', view==='confirm');
   document.getElementById('pdf-view').classList.toggle('active', view==='pdf');
+  document.getElementById('motlog-view').classList.toggle('active', view==='motlog');
   document.getElementById('sign-view').classList.toggle('active', view==='sign');
   document.getElementById('pairing-view').classList.toggle('active', view==='pairing');
   document.getElementById('recovery-view').classList.toggle('active', view==='recovery');
@@ -4249,8 +4320,11 @@ function generateRelease(force){
       btn.disabled = false;
       if(!ok){ status.textContent = 'Failed: ' + (data.error || 'unknown error'); status.style.color = '#c0392b'; return; }
       _releaseCache = data; // ensureRelease()/viewDoc() reuse this — one generation serves both paths
-      if(data.fit_for_duty_required){
-        status.textContent = 'Release generated, but downloads are locked until you sign Fit for Duty (All Commands > FFD).';
+      // Generation itself is never blocked (soft gate) — the PDF renders
+      // fine via viewDoc() either way. Only the Download links here stay
+      // locked until FFD is signed, same as pdf-view's Export link.
+      if(!data.fit_for_duty){
+        status.textContent = 'Release generated — sign Fit for Duty (All Commands > FFD) to unlock downloads.';
         status.style.color = 'var(--red)';
         document.getElementById('release-rls-link').style.display = 'none';
         document.getElementById('release-wb-link').style.display = 'none';
@@ -4401,10 +4475,7 @@ async function viewDoc(kind, label){
   if(!data) return;
   const field = {rls:'rls_pdf_b64', fi:'fi_pdf_b64', fil:'fil_pdf_b64', wb:'wb_pdf_b64', weather:'weather_pdf_b64', notams:'notams_pdf_b64', field_report:'field_report_pdf_b64'}[kind];
   const b64 = data[field];
-  if(!b64){
-    showToast(data.fit_for_duty_required ? 'Sign Fit for Duty first to view/export documents' : (label + ' not available in this release'));
-    return;
-  }
+  if(!b64){ showToast(label + ' not available in this release'); return; }
   document.getElementById('pdf-view-title').textContent = label;
   showView('pdf');
   // Export still uses a blob: URL (fine for downloads) — the inline VIEW uses
@@ -4414,8 +4485,21 @@ async function viewDoc(kind, label){
   if(_pdfObjectUrl) URL.revokeObjectURL(_pdfObjectUrl);
   _pdfObjectUrl = URL.createObjectURL(new Blob([b64ToBytes(b64)], {type:'application/pdf'}));
   const exportLink = document.getElementById('pdf-export-link');
-  exportLink.href = _pdfObjectUrl;
-  exportLink.download = kind === 'rls' ? data.filename : (data.filename || 'release.pdf').replace('-RLS.pdf', '-' + kind.toUpperCase() + '.pdf');
+  const banner = document.getElementById('pdf-ffd-banner');
+  // Soft gate — viewing always works; Export locks until FFD is signed,
+  // with a floating banner above the rendered pages as the reminder.
+  if(data.fit_for_duty){
+    exportLink.href = _pdfObjectUrl;
+    exportLink.download = kind === 'rls' ? data.filename : (data.filename || 'release.pdf').replace('-RLS.pdf', '-' + kind.toUpperCase() + '.pdf');
+    exportLink.style.opacity = '';
+    exportLink.onclick = null;
+    banner.style.display = 'none';
+  } else {
+    exportLink.removeAttribute('href');
+    exportLink.style.opacity = '0.4';
+    exportLink.onclick = (e) => { e.preventDefault(); showToast('Sign Fit for Duty first to export'); };
+    banner.style.display = '';
+  }
   try {
     await renderPdfInline(b64ToBytes(b64));
   } catch(e) {
@@ -4427,6 +4511,44 @@ function closePdfView(){
   document.getElementById('pdf-pages').innerHTML = '';
   if(_pdfObjectUrl){ URL.revokeObjectURL(_pdfObjectUrl); _pdfObjectUrl = null; }
   showView('allcommands');
+}
+async function showMotLog(){
+  showView('motlog');
+  const body = document.getElementById('motlog-body');
+  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  if(!LEG_SEQ){ body.innerHTML = '<p class="placeholder-note">This flight isn’t tied to a sequence.</p>'; return; }
+  try {
+    const r = await fetch('/pbs/sequences/' + encodeURIComponent(LEG_SEQ) + '/mot-log');
+    const data = await r.json();
+    if(!r.ok){ body.innerHTML = '<p class="placeholder-note">' + (data.error || 'Failed to load') + '</p>'; return; }
+    if(!data.legs.length){ body.innerHTML = '<p class="placeholder-note">No legs in this sequence.</p>'; return; }
+    body.innerHTML = '';
+    let lastDay = null;
+    data.legs.forEach(leg => {
+      if(leg.duty_day !== lastDay){
+        lastDay = leg.duty_day;
+        const hdr = document.createElement('div');
+        hdr.className = 'panel-card-hdr';
+        hdr.style.cssText = 'padding:14px 17px 6px;';
+        hdr.textContent = 'Day ' + leg.duty_day;
+        body.appendChild(hdr);
+      }
+      const row = document.createElement('div');
+      row.className = 'doc-row';
+      row.style.cssText = 'display:block;';
+      const signedText = leg.generated
+        ? (leg.fit_for_duty ? ('FFD signed ' + new Date(leg.signed_at).toLocaleString()) : 'Generated — FFD not signed')
+        : 'Not generated yet';
+      row.innerHTML =
+        '<div style="display:flex;justify-content:space-between;align-items:baseline;">' +
+          '<span style="font-weight:700;font-size:15px;">' + (leg.flight_number || '—') + ' ' + leg.origin + '→' + leg.destination + '</span>' +
+          '<span class="mot-time" style="font-size:15px;">' + leg.mot_display + '</span>' +
+        '</div>' +
+        '<div style="font-size:12.5px;color:' + (leg.fit_for_duty ? 'var(--label)' : 'var(--red)') + ';margin-top:3px;">' + signedText + '</div>' +
+        (leg.fdp_remaining ? '<div style="font-size:12.5px;color:var(--label);margin-top:2px;">FDP ' + leg.fdp_remaining + '</div>' : '');
+      body.appendChild(row);
+    });
+  } catch(e) { body.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>'; }
 }
 
 // Fit for Duty and the eFlight Plan share the same canvas/signature slot
