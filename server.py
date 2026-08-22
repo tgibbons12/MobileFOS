@@ -250,6 +250,26 @@ def _js_str(s):
 app = Flask(__name__)
 LOG = logging.getLogger(__name__)
 
+
+def _resolve_app_version():
+    """Short git commit hash for whatever's actually running — Railway sets
+    RAILWAY_GIT_COMMIT_SHA on every deploy automatically, so this updates
+    itself with no manual bump. Falls back to asking git directly for local
+    dev, where that env var isn't set."""
+    sha = os.environ.get("RAILWAY_GIT_COMMIT_SHA", "")
+    if not sha:
+        try:
+            import subprocess
+            sha = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=os.path.dirname(__file__), stderr=subprocess.DEVNULL,
+            ).decode().strip()
+        except Exception:
+            sha = ""
+    return sha[:7] if sha else "dev"
+
+
+APP_VERSION = _resolve_app_version()
+
 # Railway's Postgres plugin injects DATABASE_URL as "postgres://", which
 # SQLAlchemy 1.4+/psycopg2 reject — they want "postgresql://". Falls back to
 # a local SQLite file when DATABASE_URL isn't set at all, so local dev never
@@ -1879,7 +1899,7 @@ def clear_archive():
 def health():
     # Unauthenticated (Railway healthcheck) — a DB-wide count, not scoped to
     # any one pilot, just proves the process is up and the DB is reachable.
-    return jsonify({"status": "ok", "archived_legs": Leg.query.count()})
+    return jsonify({"status": "ok", "version": APP_VERSION, "archived_legs": Leg.query.count()})
 
 
 @app.route("/settings/simbrief-user", methods=["POST"])
@@ -2039,6 +2059,7 @@ def render_launcher_html():
         default_simbrief_user=_js_str(current_user.default_simbrief_user),
         current_leg_id=str(current_leg["id"]) if current_leg else "",
         current_leg_disabled="" if current_leg else " disabled",
+        app_version=APP_VERSION,
     )
 
 
@@ -2154,6 +2175,7 @@ def render_fos_html(leg):
     # can type anything here.
     ctx["default_simbrief_user"] = html.escape(current_user.default_simbrief_user or "")
     ctx["aeroapi_key"] = html.escape(current_user.aeroapi_key or "")
+    ctx["app_version"] = APP_VERSION
     str_ctx = {k: ("" if v is None else str(v)) for k, v in ctx.items() if k != "signature"}
     return Template(FOS_TEMPLATE).safe_substitute(**str_ctx)
 
@@ -3355,6 +3377,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         </div>
       </div>
       <div id="settings-msg" class="placeholder-note"></div>
+      <div style="text-align:center;padding:18px 0 4px;font-size:12px;color:var(--label);">Version $app_version</div>
     </section>
     <section id="confirm-view" class="view">
       <div class="topbar">
