@@ -1007,12 +1007,6 @@ def promote_pack_sequence(opr, base, fleet, seq_number):
     elif not row.meta:
         row.meta = {"operator": opr.upper(), "base": base.upper()}
 
-    existing = row.sequences or []
-    if any(s["seq"] == seq_number for s in existing):
-        # already promoted — treat as a no-op success rather than a
-        # duplicate, matching /pairings/accept's own fresh-seq-number
-        # habit of never silently colliding.
-        return jsonify(seq)
     # Stamp this copy with the pack it actually came from — PbsImport.meta
     # is one shared operator/base/fleet for the whole pool, which goes
     # stale the moment a second promote comes from a *different* pack (the
@@ -1020,7 +1014,12 @@ def promote_pack_sequence(opr, base, fleet, seq_number):
     # whichever pack happened to set row.meta first, not the one this
     # sequence was actually promoted from).
     stamped = {**seq, "_pack_opr": opr.upper(), "_pack_base": base.upper(), "_pack_fleet": fleet.upper()}
-    row.sequences = existing + [stamped]
+    # Re-promoting an already-present seq overwrites it rather than no-op —
+    # deliberately, so re-promoting after the pack itself gets refreshed
+    # (a newer pbs_parser fix, corrected upstream data, etc.) is how a
+    # pilot un-stales a pairing they already promoted, not a dead end.
+    existing = row.sequences or []
+    row.sequences = [s for s in existing if s["seq"] != seq_number] + [stamped]
     db.session.commit()
     return jsonify(seq)
 
@@ -4200,7 +4199,7 @@ async function myTripShowDetail(seqNumber, showBack){
 // Pairing Library comment above initLibraryView for why (Python's
 // string.Template silently eats a bare ${identifier} that collides with a
 // real template context key).
-function dutyDayCardHtml(day, flightPrefix, withEditIcons){
+function dutyDayCardHtml(day, withEditIcons){
   const legs = day.legs || [];
   let rows = '';
   legs.forEach((leg, i) => {
@@ -4209,7 +4208,10 @@ function dutyDayCardHtml(day, flightPrefix, withEditIcons){
     const rptLine = (isFirst && day.report) ? ('<div class="rpt-line">RPT <b>' + day.report + '</b></div>') : '';
     const rlsLine = (isLast && day.release) ? ('<div class="rls-line">RLS <b>' + day.release + '</b></div>') : '';
     const gndLine = leg.ground ? ('<div class="sub">' + leg.ground + '</div>') : '';
-    const fltText = leg.flight_number ? ((flightPrefix ? flightPrefix + ' ' : '') + leg.flight_number) : '—';
+    // No operator prefix here — it's the same operator for every leg in
+    // the trip, so it's shown once in the summary line above instead of
+    // repeated on every single row.
+    const fltText = leg.flight_number || '—';
     const editIcon = withEditIcons
       ? '<svg class="edit-icon" data-leg-index="' + i + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><title>Edit this leg</title><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>'
       : '';
@@ -4244,13 +4246,13 @@ function layoverHtml(day){
   return '<div class="layover"><span><b>' + sta + '</b> ' + name + '</span>' +
     (day.hotel_rest ? ('<span class="rest">Rest ' + day.hotel_rest + '</span>') : '') + '</div>';
 }
-// opts: {flightPrefix, interactive, onRowClick(day,legIndex,leg), onEditClick(row,day,legIndex,leg)}
+// opts: {interactive, onRowClick(day,legIndex,leg), onEditClick(row,day,legIndex,leg)}
 function renderDutyDayCards(container, seqData, opts){
   opts = opts || {};
   const dutyDays = seqData.duty_days || [];
   dutyDays.forEach(day => {
     const wrap = document.createElement('div');
-    wrap.innerHTML = dutyDayCardHtml(day, opts.flightPrefix || '', !!opts.interactive);
+    wrap.innerHTML = dutyDayCardHtml(day, !!opts.interactive);
     const cardEl = wrap.firstElementChild;
     if(opts.interactive){
       cardEl.querySelectorAll('tbody tr').forEach((row, i) => {
@@ -4290,6 +4292,7 @@ function renderPairing(seqData){
     (seqData.positions || []).join('/'),
   ];
   if(firstLeg && lastLeg) summaryBits.unshift(firstLeg.origin + ' → ' + lastLeg.destination);
+  if(flightPrefix) summaryBits.unshift(flightPrefix);
   summary.textContent = summaryBits.filter(Boolean).join('  ·  ');
   body.appendChild(summary);
 
@@ -4308,7 +4311,6 @@ function renderPairing(seqData){
   const cardsWrap = document.createElement('div');
   cardsWrap.style.cssText = 'padding:0 14px 14px;';
   renderDutyDayCards(cardsWrap, seqData, {
-    flightPrefix,
     interactive: true,
     onRowClick: (day, i, leg) => generatePairingLeg(seqData.seq, day.duty_day, i, position),
     onEditClick: (row, day, i, leg) => toggleLegEditForm(row, seqData.seq, day.duty_day, i, leg),
@@ -4636,6 +4638,7 @@ async function libraryShowSequenceDetail(seqNumber){
     body.appendChild(libraryBackLink('Back to Sequences', libraryShowSequences));
 
     const totalBits = [
+      opr,
       seqData.block ? ('Block ' + seqData.block) : '',
       seqData.tpay ? ('TPAY ' + seqData.tpay) : '',
       seqData.tafb ? ('TAFB ' + seqData.tafb) : '',
@@ -4666,7 +4669,7 @@ async function libraryShowSequenceDetail(seqNumber){
 
     const cardsWrap = document.createElement('div');
     cardsWrap.style.cssText = 'padding:0 14px 14px;';
-    renderDutyDayCards(cardsWrap, seqData, {flightPrefix: opr, interactive: false});
+    renderDutyDayCards(cardsWrap, seqData, {interactive: false});
     body.appendChild(cardsWrap);
   } catch(e) { body.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>'; }
 }
