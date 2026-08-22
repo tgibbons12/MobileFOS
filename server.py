@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import time
+import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 
@@ -317,6 +318,10 @@ def _ensure_columns():
         with db.engine.begin() as conn:
             conn.execute(sa_text("ALTER TABLE users ADD COLUMN saved_pairings JSON"))
         LOG.info("Migrated: added users.saved_pairings")
+    if "bid_layers" not in existing:
+        with db.engine.begin() as conn:
+            conn.execute(sa_text("ALTER TABLE users ADD COLUMN bid_layers JSON"))
+        LOG.info("Migrated: added users.bid_layers")
     existing_pbs = {c["name"] for c in inspector.get_columns("pbs_imports")}
     if "pending_edits" not in existing_pbs:
         with db.engine.begin() as conn:
@@ -858,6 +863,137 @@ def _decorate_sequence(seq, operator_iata):
         for day in seq["duty_days"]
     ]
     return out
+
+
+def _seq_max_legs_per_day(s):
+    return max((len(d["legs"]) for d in s["duty_days"]), default=0)
+
+
+def _seq_has_red_eye(s):
+    """Any leg departing in the 22:00-04:00 local window — the same
+    heuristic approved for this in the earlier bid-layers design pass."""
+    for day in s["duty_days"]:
+        for leg in day["legs"]:
+            dep_local = leg.get("dep_local") or ""
+            if len(dep_local) == 4 and dep_local.isdigit():
+                hour = int(dep_local[:2])
+                if hour >= 22 or hour < 4:
+                    return True
+    return False
+
+
+def _layer_matches(seq, summary, properties):
+    """True if `seq` (raw parsed sequence) satisfies a bid layer's saved
+    filter criteria. `summary` is this seq's own _summarize_sequence()
+    output, reused so routing/layover_indices aren't recomputed twice."""
+    p = properties or {}
+    days = summary["days"]
+    if p.get("min_days") is not None and days < p["min_days"]:
+        return False
+    if p.get("max_days") is not None and days > p["max_days"]:
+        return False
+    if p.get("min_block") is not None and float(summary.get("block") or 0) < p["min_block"]:
+        return False
+    if p.get("min_tafb") is not None and float(summary.get("tafb") or 0) < p["min_tafb"]:
+        return False
+    if p.get("max_legs_per_day") is not None and _seq_max_legs_per_day(seq) > p["max_legs_per_day"]:
+        return False
+    if p.get("exclude_red_eye") and _seq_has_red_eye(seq):
+        return False
+    layover_stations = {summary["routing"][i] for i in summary["layover_indices"]}
+    include = set(p.get("layover_include") or [])
+    exclude = set(p.get("layover_exclude") or [])
+    if include and not (layover_stations & include):
+        return False
+    if exclude and (layover_stations & exclude):
+        return False
+    return True
+
+
+def _bid_layer(layer_id):
+    return next((l for l in (current_user.bid_layers or []) if l["id"] == layer_id), None)
+
+
+@app.route("/pbs/layers")
+def list_bid_layers():
+    layers = current_user.bid_layers or []
+    out = []
+    for layer in layers:
+        pack = _pack_row(layer["opr"], layer["base"], layer["fleet"])
+        count = 0
+        if pack:
+            for s in (pack.sequences or []):
+                summary = _summarize_sequence(s)
+                if _layer_matches(s, summary, layer.get("properties")):
+                    count += 1
+        out.append({**layer, "count": count})
+    return jsonify(out)
+
+
+@app.route("/pbs/layers", methods=["POST"])
+def create_bid_layer():
+    body = request.get_json(silent=True) or {}
+    name = (body.get("name") or "").strip()
+    opr = (body.get("opr") or "").strip().upper()
+    base = (body.get("base") or "").strip().upper()
+    fleet = (body.get("fleet") or "").strip().upper()
+    if not name or not opr or not base or not fleet:
+        return jsonify({"error": "name, opr, base, and fleet are all required"}), 400
+    if not _pack_row(opr, base, fleet):
+        return jsonify({"error": "no pack found for that operator/base/fleet"}), 404
+    layer = {
+        "id": uuid.uuid4().hex[:8], "name": name,
+        "opr": opr, "base": base, "fleet": fleet,
+        "properties": body.get("properties") or {},
+    }
+    layers = list(current_user.bid_layers or [])
+    layers.append(layer)
+    current_user.bid_layers = layers
+    db.session.commit()
+    return jsonify(layer)
+
+
+@app.route("/pbs/layers/<layer_id>", methods=["PUT"])
+def update_bid_layer(layer_id):
+    layers = list(current_user.bid_layers or [])
+    idx = next((i for i, l in enumerate(layers) if l["id"] == layer_id), None)
+    if idx is None:
+        return jsonify({"error": "not found"}), 404
+    body = request.get_json(silent=True) or {}
+    if "name" in body:
+        layers[idx]["name"] = (body.get("name") or "").strip() or layers[idx]["name"]
+    if "properties" in body:
+        layers[idx]["properties"] = body.get("properties") or {}
+    current_user.bid_layers = layers
+    db.session.commit()
+    return jsonify(layers[idx])
+
+
+@app.route("/pbs/layers/<layer_id>", methods=["DELETE"])
+def delete_bid_layer(layer_id):
+    layers = list(current_user.bid_layers or [])
+    remaining = [l for l in layers if l["id"] != layer_id]
+    if len(remaining) == len(layers):
+        return jsonify({"error": "not found"}), 404
+    current_user.bid_layers = remaining
+    db.session.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/pbs/layers/<layer_id>/pairings")
+def list_bid_layer_pairings(layer_id):
+    layer = _bid_layer(layer_id)
+    if not layer:
+        return jsonify({"error": "not found"}), 404
+    pack = _pack_row(layer["opr"], layer["base"], layer["fleet"])
+    if not pack:
+        return jsonify({"error": "no pack found for that operator/base/fleet"}), 404
+    matches = []
+    for s in (pack.sequences or []):
+        summary = _summarize_sequence(s)
+        if _layer_matches(s, summary, layer.get("properties")):
+            matches.append(summary)
+    return jsonify({"layer": layer, "pairings": matches})
 
 
 @app.route("/pbs/sequences")
@@ -3275,6 +3411,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
       <div class="tabs">
         <button class="tab-btn active" id="tab-mytrip-btn" onclick="showScheduleTab('mytrip')">My Trip</button>
         <button class="tab-btn" id="tab-library-btn" onclick="showScheduleTab('library')">Pairing Library</button>
+        <button class="tab-btn" id="tab-layers-btn" onclick="showScheduleTab('layers')">Bid Layers</button>
       </div>
       <div id="tab-mytrip" class="tab-panel active">
         <div id="pairing-body"><p class="placeholder-note">Loading…</p></div>
@@ -3282,6 +3419,9 @@ FOS_TEMPLATE = """<!DOCTYPE html>
       <div id="tab-library" class="tab-panel">
         <div id="library-crumb" style="padding:10px 14px;font-size:12.5px;color:var(--label);"></div>
         <div id="library-body"><p class="placeholder-note">Loading…</p></div>
+      </div>
+      <div id="tab-layers" class="tab-panel">
+        <div id="layers-body"><p class="placeholder-note">Loading…</p></div>
       </div>
     </section>
     <section id="recovery-view" class="view">
@@ -4158,11 +4298,17 @@ let _libraryLoaded = false;
 function showScheduleTab(tab){
   document.getElementById('tab-mytrip').classList.toggle('active', tab==='mytrip');
   document.getElementById('tab-library').classList.toggle('active', tab==='library');
+  document.getElementById('tab-layers').classList.toggle('active', tab==='layers');
   document.getElementById('tab-mytrip-btn').classList.toggle('active', tab==='mytrip');
   document.getElementById('tab-library-btn').classList.toggle('active', tab==='library');
+  document.getElementById('tab-layers-btn').classList.toggle('active', tab==='layers');
   if(tab === 'library' && !_libraryLoaded){
     _libraryLoaded = true;
     initLibraryView();
+  }
+  if(tab === 'layers' && !_layersLoaded){
+    _layersLoaded = true;
+    layerShowList();
   }
 }
 // My Trip — the pilot's own active sequence pool (PbsImport.sequences),
@@ -4797,6 +4943,232 @@ async function promoteAndFly(opr, base, fleet, seqNumber){
     if(!genR.ok){ showToast(genData.error || 'Promoted, but could not start flying it'); return; }
     window.location.href = genData.fos_url + '?view=release';
   } catch(e) { showToast('Request failed: ' + e); }
+}
+
+// Bid Layers — saved filter criteria over one Pairing Library pack
+// (PairingPack), for sorting through a pack's own hundreds of sequences
+// instead of scrolling all of them. Every route lives under /pbs/layers;
+// see _layer_matches() in server.py for what "properties" supports.
+// Reuses libraryPane/libraryGroupRow/sequenceListRow/renderDutyDayCards —
+// only the list/form/matches rendering here is new.
+let _layersLoaded = false;
+async function layerShowList(){
+  const body = document.getElementById('layers-body');
+  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  try {
+    const r = await fetch('/pbs/layers');
+    const layers = await r.json();
+    if(!r.ok){ body.innerHTML = '<p class="placeholder-note">' + (layers.error || 'Failed to load') + '</p>'; return; }
+    body.innerHTML = '';
+    const newBtn = document.createElement('button');
+    newBtn.className = 'lib-bar-action';
+    newBtn.textContent = '+ New';
+    newBtn.onclick = (e) => { e.stopPropagation(); layerShowForm(null); };
+    const {pane, list} = libraryPane('Bid Layers', null, newBtn);
+    if(!layers.length){
+      list.innerHTML = '<p class="placeholder-note" style="padding:14px;">No layers yet — save a filter to start sorting a pack’s pairings.</p>';
+    }
+    layers.forEach(layer => list.appendChild(layerRow(layer)));
+    body.appendChild(pane);
+  } catch(e) { body.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>'; }
+}
+function layerRow(layer){
+  const row = document.createElement('div');
+  row.className = 'doc-row lib-row';
+  const left = document.createElement('div');
+  const code = document.createElement('div'); code.className = 'code'; code.textContent = layer.name;
+  const desc = document.createElement('div'); desc.className = 'desc';
+  desc.textContent = layer.opr + ' ' + layer.base + '/' + layer.fleet;
+  left.appendChild(code); left.appendChild(desc);
+  const stats = document.createElement('div'); stats.className = 'lib-stats';
+  const countLine = document.createElement('div');
+  countLine.textContent = layer.count + ' pairing' + (layer.count === 1 ? '' : 's');
+  stats.appendChild(countLine);
+  row.appendChild(left); row.appendChild(stats);
+  row.onclick = () => layerShowPairings(layer);
+  return row;
+}
+async function layerShowForm(existing){
+  const body = document.getElementById('layers-body');
+  body.innerHTML = '';
+  body.appendChild(libraryBackLink('Back to Bid Layers', layerShowList));
+  const panel = document.createElement('div');
+  panel.className = 'panel';
+  const p = (existing && existing.properties) || {};
+  panel.innerHTML =
+    '<label>Layer Name</label>' +
+    '<input class="lf-name" type="text" value="' + (existing ? existing.name.replace(/"/g, '&quot;') : '') + '">' +
+    (existing
+      ? ''
+      : '<label>Operator</label><select class="lf-opr"></select>' +
+        '<label>Base</label><select class="lf-base"></select>' +
+        '<label>Fleet</label><select class="lf-fleet"></select>') +
+    '<label>Days (min / max)</label>' +
+    '<div style="display:flex;gap:8px;">' +
+      '<input class="lf-min-days" type="number" min="1" placeholder="Min" value="' + (p.min_days ?? '') + '">' +
+      '<input class="lf-max-days" type="number" min="1" placeholder="Max" value="' + (p.max_days ?? '') + '">' +
+    '</div>' +
+    '<label>Min Block Hours</label>' +
+    '<input class="lf-min-block" type="number" step="0.01" min="0" value="' + (p.min_block ?? '') + '">' +
+    '<label>Min TAFB Hours</label>' +
+    '<input class="lf-min-tafb" type="number" step="0.01" min="0" value="' + (p.min_tafb ?? '') + '">' +
+    '<label>Max Legs Per Day</label>' +
+    '<input class="lf-max-legs" type="number" min="1" value="' + (p.max_legs_per_day ?? '') + '">' +
+    '<label style="display:flex;align-items:center;gap:8px;margin-top:10px;">' +
+      '<input class="lf-no-redeye" type="checkbox"' + (p.exclude_red_eye ? ' checked' : '') + '> Exclude red-eyes' +
+    '</label>' +
+    '<label>Layover Include (station codes, comma separated)</label>' +
+    '<input class="lf-layover-include" type="text" placeholder="e.g. MIA, LAX" value="' + ((p.layover_include || []).join(', ')) + '">' +
+    '<label>Layover Exclude (station codes, comma separated)</label>' +
+    '<input class="lf-layover-exclude" type="text" placeholder="e.g. JAC" value="' + ((p.layover_exclude || []).join(', ')) + '">' +
+    '<div style="display:flex;gap:8px;margin-top:14px;">' +
+      (existing ? '<button type="button" class="lf-delete" style="margin:0;flex:1;background:var(--red);">Delete</button>' : '') +
+      '<button type="button" class="lf-save" style="margin:0;flex:2;">Save</button>' +
+    '</div>' +
+    '<div class="lf-msg" style="margin-top:8px;font-size:12.5px;color:var(--label);"></div>';
+  body.appendChild(panel);
+
+  if(!existing){
+    const oprSel = panel.querySelector('.lf-opr');
+    const baseSel = panel.querySelector('.lf-base');
+    const fleetSel = panel.querySelector('.lf-fleet');
+    const r = await fetch('/pbs/packs');
+    const packs = await r.json();
+    const fillSelect = (sel, values) => {
+      sel.innerHTML = values.map(v => '<option value="' + v + '">' + v + '</option>').join('');
+    };
+    const oprs = [...new Set(packs.map(pk => pk.opr))].sort();
+    fillSelect(oprSel, oprs);
+    const refreshBases = () => {
+      const bases = [...new Set(packs.filter(pk => pk.opr === oprSel.value).map(pk => pk.base))].sort();
+      fillSelect(baseSel, bases);
+      refreshFleets();
+    };
+    const refreshFleets = () => {
+      const fleets = packs.filter(pk => pk.opr === oprSel.value && pk.base === baseSel.value).map(pk => pk.fleet).sort();
+      fillSelect(fleetSel, fleets);
+    };
+    oprSel.onchange = refreshBases;
+    baseSel.onchange = refreshFleets;
+    refreshBases();
+  }
+
+  const msgEl = panel.querySelector('.lf-msg');
+  panel.querySelector('.lf-save').onclick = () => layerSaveForm(panel, existing, msgEl);
+  if(existing){
+    panel.querySelector('.lf-delete').onclick = () => layerDeleteLayer(existing.id);
+  }
+}
+function _numOrNull(v){ return v === '' || v === null || v === undefined ? null : Number(v); }
+function _stationList(v){ return (v || '').split(',').map(s => s.trim().toUpperCase()).filter(Boolean); }
+async function layerSaveForm(panel, existing, msgEl){
+  const name = panel.querySelector('.lf-name').value.trim();
+  if(!name){ msgEl.textContent = 'Name is required.'; msgEl.style.color = 'var(--red)'; return; }
+  const properties = {
+    min_days: _numOrNull(panel.querySelector('.lf-min-days').value),
+    max_days: _numOrNull(panel.querySelector('.lf-max-days').value),
+    min_block: _numOrNull(panel.querySelector('.lf-min-block').value),
+    min_tafb: _numOrNull(panel.querySelector('.lf-min-tafb').value),
+    max_legs_per_day: _numOrNull(panel.querySelector('.lf-max-legs').value),
+    exclude_red_eye: panel.querySelector('.lf-no-redeye').checked,
+    layover_include: _stationList(panel.querySelector('.lf-layover-include').value),
+    layover_exclude: _stationList(panel.querySelector('.lf-layover-exclude').value),
+  };
+  try {
+    let r;
+    if(existing){
+      r = await fetch('/pbs/layers/' + existing.id, {
+        method: 'PUT', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name, properties}),
+      });
+    } else {
+      const opr = panel.querySelector('.lf-opr').value;
+      const base = panel.querySelector('.lf-base').value;
+      const fleet = panel.querySelector('.lf-fleet').value;
+      if(!opr || !base || !fleet){ msgEl.textContent = 'Pick an operator/base/fleet.'; msgEl.style.color = 'var(--red)'; return; }
+      r = await fetch('/pbs/layers', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name, opr, base, fleet, properties}),
+      });
+    }
+    const data = await r.json();
+    if(!r.ok){ msgEl.textContent = data.error || 'Save failed'; msgEl.style.color = 'var(--red)'; return; }
+    showToast('Layer saved');
+    layerShowList();
+  } catch(e) { msgEl.textContent = 'Request failed: ' + e; msgEl.style.color = 'var(--red)'; }
+}
+async function layerDeleteLayer(id){
+  if(!confirm('Delete this layer?')) return;
+  try {
+    const r = await fetch('/pbs/layers/' + id, {method: 'DELETE'});
+    const data = await r.json();
+    if(!r.ok){ showToast(data.error || 'Delete failed'); return; }
+    showToast('Layer deleted');
+    layerShowList();
+  } catch(e) { showToast('Request failed: ' + e); }
+}
+async function layerShowPairings(layer){
+  const body = document.getElementById('layers-body');
+  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  try {
+    const r = await fetch('/pbs/layers/' + layer.id + '/pairings');
+    const data = await r.json();
+    if(!r.ok){ body.innerHTML = '<p class="placeholder-note">' + (data.error || 'Failed to load') + '</p>'; return; }
+    body.innerHTML = '';
+    body.appendChild(libraryBackLink('Back to Bid Layers', layerShowList));
+    const editBtn = document.createElement('button');
+    editBtn.className = 'lib-bar-action';
+    editBtn.textContent = 'Edit';
+    editBtn.onclick = (e) => { e.stopPropagation(); layerShowForm(layer); };
+    const {pane, list} = libraryPane(layer.name + ' (' + data.pairings.length + ')', layerShowList, editBtn);
+    if(!data.pairings.length){
+      list.innerHTML = '<p class="placeholder-note" style="padding:14px;">Nothing in this pack matches this layer’s filters.</p>';
+    }
+    data.pairings.forEach(s => list.appendChild(sequenceListRow(s, () => layerShowSequenceDetail(layer, s.seq))));
+    body.appendChild(pane);
+  } catch(e) { body.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>'; }
+}
+// Structurally parallel to libraryShowSequenceDetail — same detail route,
+// same Fly/Save buttons, same duty-day cards — just targeting layers-body
+// and backing out to this layer's own matches list instead of the
+// Library's own Sequences list.
+async function layerShowSequenceDetail(layer, seqNumber){
+  const {opr, base, fleet} = layer;
+  const body = document.getElementById('layers-body');
+  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  try {
+    const r = await fetch('/pbs/packs/' + opr + '/' + base + '/' + fleet + '/sequences/' + encodeURIComponent(seqNumber));
+    const seqData = await r.json();
+    if(!r.ok){ body.innerHTML = '<p class="placeholder-note">' + (seqData.error || 'Failed to load') + '</p>'; return; }
+    body.innerHTML = '';
+    body.appendChild(libraryBackLink('Back to ' + layer.name, () => layerShowPairings(layer)));
+
+    const totalEl = document.createElement('div');
+    totalEl.className = 'lib-total';
+    totalEl.textContent = [opr, (seqData.positions || []).join('/')].filter(Boolean).join(' · ');
+    body.appendChild(totalEl);
+
+    const flyRow = document.createElement('div');
+    flyRow.className = 'fly-row';
+    const flyBtn = document.createElement('button');
+    flyBtn.className = 'fly-btn';
+    flyBtn.textContent = 'Fly This Pairing';
+    flyBtn.onclick = () => promoteAndFly(opr, base, fleet, seqNumber);
+    const saveBtn = document.createElement('button');
+    saveBtn.className = 'save-btn';
+    saveBtn.title = 'Save this pairing';
+    saveBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>';
+    if(isPairingSaved(opr, base, fleet, seqNumber)) saveBtn.classList.add('saved');
+    saveBtn.onclick = () => toggleSavedPairing(opr, base, fleet, seqNumber, saveBtn);
+    flyRow.appendChild(flyBtn);
+    flyRow.appendChild(saveBtn);
+    body.appendChild(flyRow);
+
+    const cardsWrap = document.createElement('div');
+    cardsWrap.style.cssText = 'padding:0 14px 14px;';
+    renderDutyDayCards(cardsWrap, seqData, {interactive: false});
+    body.appendChild(cardsWrap);
+  } catch(e) { body.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>'; }
 }
 
 async function generatePairingLeg(seq, dutyDay, legIndex, position, view){

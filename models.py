@@ -44,6 +44,11 @@ class User(UserMixin, db.Model):
     # opr/base/fleet) and from PbsImport.sequences (actually being flown);
     # this is just a personal shortlist for quick re-visits.
     saved_pairings = db.Column(db.JSON, default=list)
+    # Saved filter criteria over one Pairing Library pack — "sort the
+    # thousands of pairings" rather than browse them one by one. Each is
+    # {"id","name","opr","base","fleet","properties":{...}} — see
+    # _layer_matches() in server.py for what "properties" supports.
+    bid_layers = db.Column(db.JSON, default=list)
     created_at = db.Column(db.DateTime(timezone=True), default=_now)
 
     def set_password(self, password):
