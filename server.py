@@ -900,17 +900,22 @@ def _layer_matches(seq, summary, properties):
         return False
     if p.get("exclude_red_eye") and _seq_has_red_eye(seq):
         return False
+    # Two independent axes: Layover Include is the strict, overnight-only
+    # version ("I want to lay over in one of these cities"); Include/Avoid
+    # are route-wide ("touches this station at all, same-day stop or
+    # overnight, doesn't matter"). No route-wide "must overnight AND avoid"
+    # pairing needed — Avoid already covers excluding a layover, since a
+    # layover is itself a touch.
     layover_stations = {summary["routing"][i] for i in summary["layover_indices"]}
-    include = set(p.get("layover_include") or [])
-    exclude = set(p.get("layover_exclude") or [])
-    if include and not (layover_stations & include):
+    layover_include = set(p.get("layover_include") or [])
+    if layover_include and not (layover_stations & layover_include):
         return False
-    if exclude and (layover_stations & exclude):
+    route_stations = set(summary["routing"])
+    include = set(p.get("include_stations") or [])
+    if include and not (route_stations & include):
         return False
-    # Full-route avoid — unlike layover_exclude, this drops a pairing for
-    # so much as touching a station same-day, not just overnighting there.
     avoid = set(p.get("avoid_stations") or [])
-    if avoid and (set(summary["routing"]) & avoid):
+    if avoid and (route_stations & avoid):
         return False
     return True
 
@@ -958,7 +963,7 @@ def preview_bid_layer():
         "max_legs_per_day": _num("max_legs_per_day"),
         "exclude_red_eye": request.args.get("exclude_red_eye") == "1",
         "layover_include": _stations("layover_include"),
-        "layover_exclude": _stations("layover_exclude"),
+        "include_stations": _stations("include_stations"),
         "avoid_stations": _stations("avoid_stations"),
     }
     count = _count_layer_matches(opr, base, fleet, properties)
@@ -5035,6 +5040,23 @@ function layerRow(layer){
   row.onclick = () => layerShowPairings(layer);
   return row;
 }
+// Round-number dropdowns instead of free-typed numbers — less error-prone
+// (no fat-fingered "45" meant to be "4.5"), and on iOS a plain <select>
+// already renders as the native scroll-wheel picker, so this is both
+// asks in one change.
+function _rangeArray(start, end, step){
+  const out = [];
+  for(let v = start; v <= end; v += step) out.push(v);
+  return out;
+}
+function _rangeOptionsHtml(values, current){
+  const cur = (current === null || current === undefined) ? '' : String(current);
+  let html = '<option value=""' + (cur === '' ? ' selected' : '') + '>Any</option>';
+  values.forEach(v => {
+    html += '<option value="' + v + '"' + (String(v) === cur ? ' selected' : '') + '>' + v + '</option>';
+  });
+  return html;
+}
 async function layerShowForm(existing){
   const body = document.getElementById('layers-body');
   body.innerHTML = '';
@@ -5052,23 +5074,23 @@ async function layerShowForm(existing){
         '<label>Fleet</label><select class="lf-fleet"></select>') +
     '<label>Days (min / max)</label>' +
     '<div style="display:flex;gap:8px;">' +
-      '<input class="lf-min-days" type="number" min="1" placeholder="Min" value="' + (p.min_days ?? '') + '">' +
-      '<input class="lf-max-days" type="number" min="1" placeholder="Max" value="' + (p.max_days ?? '') + '">' +
+      '<select class="lf-min-days">' + _rangeOptionsHtml(_rangeArray(1, 10, 1), p.min_days) + '</select>' +
+      '<select class="lf-max-days">' + _rangeOptionsHtml(_rangeArray(1, 10, 1), p.max_days) + '</select>' +
     '</div>' +
     '<label>Min Block Hours</label>' +
-    '<input class="lf-min-block" type="number" step="0.01" min="0" value="' + (p.min_block ?? '') + '">' +
+    '<select class="lf-min-block">' + _rangeOptionsHtml(_rangeArray(0, 60, 5), p.min_block) + '</select>' +
     '<label>Min TAFB Hours</label>' +
-    '<input class="lf-min-tafb" type="number" step="0.01" min="0" value="' + (p.min_tafb ?? '') + '">' +
+    '<select class="lf-min-tafb">' + _rangeOptionsHtml(_rangeArray(0, 150, 10), p.min_tafb) + '</select>' +
     '<label>Max Legs Per Day</label>' +
-    '<input class="lf-max-legs" type="number" min="1" value="' + (p.max_legs_per_day ?? '') + '">' +
+    '<select class="lf-max-legs">' + _rangeOptionsHtml(_rangeArray(1, 6, 1), p.max_legs_per_day) + '</select>' +
     '<label style="display:flex;align-items:center;gap:8px;margin-top:10px;">' +
       '<input class="lf-no-redeye" type="checkbox"' + (p.exclude_red_eye ? ' checked' : '') + '> Exclude red-eyes' +
     '</label>' +
-    '<label>Layover Include (station codes, comma separated)</label>' +
+    '<label>Layover Include (must overnight here — station codes, comma separated)</label>' +
     '<input class="lf-layover-include" type="text" placeholder="e.g. MIA, LAX" value="' + ((p.layover_include || []).join(', ')) + '">' +
-    '<label>Layover Exclude (station codes, comma separated)</label>' +
-    '<input class="lf-layover-exclude" type="text" placeholder="e.g. JAC" value="' + ((p.layover_exclude || []).join(', ')) + '">' +
-    '<label>Avoid Entirely (any stop, not just an overnight — comma separated)</label>' +
+    '<label>Include (touches this stop at all, same-day or overnight)</label>' +
+    '<input class="lf-include" type="text" placeholder="e.g. MIA, LAX" value="' + ((p.include_stations || []).join(', ')) + '">' +
+    '<label>Avoid (never touches this stop, same-day or overnight)</label>' +
     '<input class="lf-avoid" type="text" placeholder="e.g. ORD" value="' + ((p.avoid_stations || []).join(', ')) + '">' +
     '<div class="lf-live-count" style="margin-top:12px;padding:10px 12px;border-radius:8px;background:var(--bg);font-size:13px;font-weight:600;color:var(--label);"></div>' +
     '<div style="display:flex;gap:8px;margin-top:14px;">' +
@@ -5136,7 +5158,7 @@ function _gatherLayerProperties(panel){
     max_legs_per_day: _numOrNull(panel.querySelector('.lf-max-legs').value),
     exclude_red_eye: panel.querySelector('.lf-no-redeye').checked,
     layover_include: _stationList(panel.querySelector('.lf-layover-include').value),
-    layover_exclude: _stationList(panel.querySelector('.lf-layover-exclude').value),
+    include_stations: _stationList(panel.querySelector('.lf-include').value),
     avoid_stations: _stationList(panel.querySelector('.lf-avoid').value),
   };
 }
@@ -5158,7 +5180,7 @@ function _queueLayerPreview(panel, getScope){
       max_legs_per_day: props.max_legs_per_day ?? '',
       exclude_red_eye: props.exclude_red_eye ? '1' : '0',
       layover_include: props.layover_include.join(','),
-      layover_exclude: props.layover_exclude.join(','),
+      include_stations: props.include_stations.join(','),
       avoid_stations: props.avoid_stations.join(','),
     });
     try {
