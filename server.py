@@ -4222,7 +4222,7 @@ function myTripShowList(seqs){
   body.appendChild(pane);
 }
 async function tidyMyTrips(){
-  if(!confirm('Remove every trip in My Trips that you haven\'t flown a leg of or saved? Saved and in-progress trips are kept.')) return;
+  if(!confirm("Remove every trip in My Trips that you haven't flown a leg of or saved? Saved and in-progress trips are kept.")) return;
   try {
     const r = await fetch('/pbs/sequences/tidy', {method: 'POST'});
     const data = await r.json();
