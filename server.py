@@ -2891,17 +2891,21 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .dd-table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;}
   table.dd-table{width:100%;border-collapse:collapse;font-size:var(--dd-fs);font-variant-numeric:tabular-nums;}
   table.dd-table th{
-    font-size:var(--dd-fs);font-weight:600;color:var(--label);text-align:left;line-height:1.3;
-    padding:4px 5px;border-bottom:1px solid var(--border);white-space:nowrap;
+    font-size:calc(var(--dd-fs) - 1px);font-weight:600;color:var(--label);text-align:left;line-height:1.3;
+    text-transform:uppercase;letter-spacing:.02em;
+    padding:4px 8px;border-bottom:1px solid var(--border);white-space:nowrap;
   }
-  table.dd-table th:first-child, table.dd-table td:first-child{padding-left:14px;}
-  table.dd-table th:last-child, table.dd-table td:last-child{padding-right:14px;text-align:right;}
-  table.dd-table td{padding:6px 5px;white-space:nowrap;vertical-align:top;position:relative;}
+  /* Uniform column padding — narrow columns (Dp/D-A/Flt-Eq/Blk-Gnd) don't
+     get extra room just for being near an edge; only the very first/last
+     column keeps a bit more to clear the card's own rounded corner. */
+  table.dd-table th:first-child, table.dd-table td:first-child{padding-left:12px;}
+  table.dd-table th:last-child, table.dd-table td:last-child{padding-right:12px;text-align:right;}
+  table.dd-table td{padding:6px 8px;white-space:nowrap;vertical-align:top;position:relative;}
   @media (max-width: 400px){
     .dd-card{--dd-fs:13px;}
-    table.dd-table th:first-child, table.dd-table td:first-child{padding-left:10px;}
-    table.dd-table th:last-child, table.dd-table td:last-child{padding-right:10px;}
-    table.dd-table th, table.dd-table td{padding-left:3px;padding-right:3px;}
+    table.dd-table th:first-child, table.dd-table td:first-child{padding-left:9px;}
+    table.dd-table th:last-child, table.dd-table td:last-child{padding-right:9px;}
+    table.dd-table th, table.dd-table td{padding-left:5px;padding-right:5px;}
   }
   table.dd-table tbody tr:first-child td{padding-top:8px;}
   table.dd-table tbody tr:last-child td{padding-bottom:8px;}
@@ -2911,13 +2915,20 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   table.dd-table .sta{font-weight:700;color:var(--value);}
   table.dd-table .sub{color:var(--label);margin-top:1px;}
   table.dd-table .blk{font-weight:600;color:var(--value);}
-  table.dd-table .rpt-line, table.dd-table .rls-line{color:var(--label);font-weight:600;}
+  /* RPT/RLS read as their own distinct line, not squeezed against the
+     station/time line next to them — equal breathing room above the
+     first leg's report and below the last leg's release. */
+  table.dd-table .rpt-line{color:var(--label);font-weight:600;padding-bottom:4px;margin-bottom:3px;border-bottom:1px dashed var(--border);}
+  table.dd-table .rls-line{color:var(--label);font-weight:600;padding-top:4px;margin-top:3px;border-top:1px dashed var(--border);}
   table.dd-table .rpt-line b, table.dd-table .rls-line b{color:var(--value);font-weight:700;}
   .dd-summary{display:flex;justify-content:flex-end;gap:6px;padding:7px 14px 9px;font-size:var(--dd-fs);color:var(--label);border-top:1px solid var(--border);}
   .dd-summary b{color:var(--value);font-weight:700;}
-  .layover{display:flex;justify-content:space-between;padding:7px 14px;font-size:var(--dd-fs, 14.5px);color:var(--label);}
-  .layover b{color:var(--value);font-weight:600;}
-  .layover .rest{font-variant-numeric:tabular-nums;}
+  /* Hotel/rest is the one thing between two duty days worth noticing at a
+     glance — bigger and bolder than the muted card chrome around it. */
+  .layover{display:flex;justify-content:space-between;align-items:baseline;padding:9px 14px;font-size:calc(var(--dd-fs, 14.5px) + 1.5px);font-weight:600;color:var(--value);}
+  .layover b{font-weight:700;}
+  .layover .rest{font-variant-numeric:tabular-nums;color:var(--blue);font-weight:700;}
+  .layover .rest b{color:var(--blue);}
   #sign-pad{touch-action:none;background:#fff;border:1px solid var(--border);border-radius:6px;width:100%;height:220px;}
   .placeholder-note{padding:12px 14px;color:var(--label);font-style:italic;font-size:13px;background:var(--card);}
   .view{display:none;}
@@ -4205,8 +4216,8 @@ function dutyDayCardHtml(day, withEditIcons){
   legs.forEach((leg, i) => {
     const isFirst = i === 0;
     const isLast = i === legs.length - 1;
-    const rptLine = (isFirst && day.report) ? ('<div class="rpt-line">RPT <b>' + day.report + '</b></div>') : '';
-    const rlsLine = (isLast && day.release) ? ('<div class="rls-line">RLS <b>' + day.release + '</b></div>') : '';
+    const rptLine = (isFirst && day.report) ? ('<div class="rpt-line">RPT <b>' + day.report + '/' + (day.report_hbt || day.report) + '</b></div>') : '';
+    const rlsLine = (isLast && day.release) ? ('<div class="rls-line">RLS <b>' + day.release + '/' + (day.release_hbt || day.release) + '</b></div>') : '';
     const gndLine = leg.ground ? ('<div class="sub">' + leg.ground + '</div>') : '';
     // No operator prefix here — it's the same operator for every leg in
     // the trip, so it's shown once in the summary line above instead of
@@ -4224,10 +4235,11 @@ function dutyDayCardHtml(day, withEditIcons){
       '<td><div class="blk">' + (leg.block || '') + '</div>' + gndLine + '</td>' +
       '</tr>';
   });
+  // No per-day TAFB — it's only a whole-pairing figure (see pbs_parser's
+  // RLS_RE comment); the real cumulative one shows on the TOTAL card below.
   const summaryBits = [
     day.block ? ('Blk <b>' + day.block + '</b>') : '',
     day.duty ? ('Duty <b>' + day.duty + '</b>') : '',
-    day.tafb ? ('TAFB <b>' + day.tafb + '</b>') : '',
   ].filter(Boolean).join(' &middot; ');
   return '<div class="dd-card">' +
     '<div class="dd-hdr">Day ' + day.duty_day + '</div>' +
@@ -4243,8 +4255,17 @@ function layoverHtml(day){
   const spaceIdx = day.hotel.indexOf(' ');
   const sta = spaceIdx === -1 ? day.hotel : day.hotel.slice(0, spaceIdx);
   const name = spaceIdx === -1 ? '' : day.hotel.slice(spaceIdx + 1);
-  return '<div class="layover"><span><b>' + sta + '</b> ' + name + '</span>' +
-    (day.hotel_rest ? ('<span class="rest">Rest ' + day.hotel_rest + '</span>') : '') + '</div>';
+  return '<div class="layover"><span><b>' + sta + '</b> HOTEL ' + name + '</span>' +
+    (day.hotel_rest ? ('<span class="rest">REST: <b>' + day.hotel_rest + '</b></span>') : '') + '</div>';
+}
+function totalCardHtml(seqData){
+  const bits = [
+    seqData.block ? ('Block <b>' + seqData.block + '</b>') : '',
+    seqData.tpay ? ('TPAY <b>' + seqData.tpay + '</b>') : '',
+    seqData.tafb ? ('TAFB <b>' + seqData.tafb + '</b>') : '',
+  ].filter(Boolean).join(' &middot; ');
+  if(!bits) return '';
+  return '<div class="dd-card"><div class="dd-hdr">Total</div><div class="dd-summary" style="justify-content:center;border-top:none;">' + bits + '</div></div>';
 }
 // opts: {interactive, onRowClick(day,legIndex,leg), onEditClick(row,day,legIndex,leg)}
 function renderDutyDayCards(container, seqData, opts){
@@ -4270,7 +4291,11 @@ function renderDutyDayCards(container, seqData, opts){
   });
   if(!dutyDays.length){
     container.innerHTML = '<p class="placeholder-note">No duty days on this sequence.</p>';
+    return;
   }
+  const totalWrap = document.createElement('div');
+  totalWrap.innerHTML = totalCardHtml(seqData);
+  if(totalWrap.firstElementChild) container.appendChild(totalWrap.firstElementChild);
 }
 function renderPairing(seqData){
   const body = document.getElementById('pairing-body');
@@ -4637,11 +4662,11 @@ async function libraryShowSequenceDetail(seqNumber){
     body.appendChild(libraryCrumb('SEQ ' + seqNumber));
     body.appendChild(libraryBackLink('Back to Sequences', libraryShowSequences));
 
+    // Block/TPAY/TAFB moved to the Total card at the bottom (below every
+    // duty day, via renderDutyDayCards' own totalCardHtml) — this line is
+    // just operator + crew position now.
     const totalBits = [
       opr,
-      seqData.block ? ('Block ' + seqData.block) : '',
-      seqData.tpay ? ('TPAY ' + seqData.tpay) : '',
-      seqData.tafb ? ('TAFB ' + seqData.tafb) : '',
       (seqData.positions || []).join('/'),
     ].filter(Boolean);
     if(totalBits.length){

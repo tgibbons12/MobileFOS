@@ -15,10 +15,19 @@ SEQ_HEADER_RE = re.compile(
     r'^SEQ\s+(?P<seq>\d+)\s+(?P<ops>\d+)\s+OPS\s+POSN\s+(?P<positions>[A-Z ]+?)\s{2,}'
 )
 RPT_RE = re.compile(r'^\s*RPT\s+(?P<out>\d{4})/(?P<zout>\d{4})')
+# No per-day TAFB field actually exists in this format — TAFB (time away
+# from base) only makes sense for the whole pairing, and is captured by
+# TTL_RE below. What used to be captured here as a trailing "tafp" group
+# was really just eating the sequence's own calendar day-of-month usage
+# marker (a bare integer following the duty/FDP figures, e.g. "10" in
+# "RLS 2100/0000  5.57  0.00  5.57  7.27  7.27 10 -- -- -- -- -- --") —
+# same misreading bug class as _parse_leg_line's ground-time fix above,
+# just one line format over. Every day of a trip shares that marker, which
+# is why it silently showed the exact same bogus "TAFB" on every day card.
 RLS_RE = re.compile(
     r'^\s*RLS\s+(?P<in_>\d{4})/(?P<zin>\d{4})\s+'
     r'(?P<block>[\d.]+)\s+(?P<grnd>[\d.]+)\s+(?P<tpay>[\d.]+)\s+'
-    r'(?P<duty>[\d.]+)(?:\s+(?P<fdp>[\d.]+))?\s+(?P<tafb>[\d.]+)'
+    r'(?P<duty>[\d.]+)(?:\s+(?P<fdp>[\d.]+))?'
 )
 HOTEL_RE = re.compile(r'^\s*(?P<sta>[A-Z]{3})\s+HOTEL\s+(?P<hotel>\S+)(?:\s+(?P<rest>[\d.]+))?')
 # The pairing-total row — same four columns as RLS (block/ground/tpay/tafb)
@@ -138,20 +147,20 @@ def parse_pbs(text):
                 duty_day_num += 1
                 current_day = {
                     "duty_day": duty_day_num,
-                    "report": m.group("out"),
+                    "report": m.group("out"), "report_hbt": m.group("zout"),
                     "legs": [],
-                    "release": None, "hotel": None, "hotel_rest": None,
-                    "block": None, "duty": None, "tpay": None, "tafb": None,
+                    "release": None, "release_hbt": None, "hotel": None, "hotel_rest": None,
+                    "block": None, "duty": None, "tpay": None,
                 }
                 seq["duty_days"].append(current_day)
                 continue
             m = RLS_RE.match(line)
             if m and current_day is not None:
                 current_day["release"] = m.group("in_")
+                current_day["release_hbt"] = m.group("zin")
                 current_day["block"] = m.group("block")
                 current_day["duty"] = m.group("duty")
                 current_day["tpay"] = m.group("tpay")
-                current_day["tafb"] = m.group("tafb")
                 continue
             m = HOTEL_RE.match(line)
             if m and current_day is not None:
