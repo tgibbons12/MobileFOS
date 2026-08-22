@@ -1007,18 +1007,30 @@ def create_bid_layer():
 
 @app.route("/pbs/layers/<layer_id>", methods=["PUT"])
 def update_bid_layer(layer_id):
-    layers = list(current_user.bid_layers or [])
+    layers = current_user.bid_layers or []
     idx = next((i for i, l in enumerate(layers) if l["id"] == layer_id), None)
     if idx is None:
         return jsonify({"error": "not found"}), 404
     body = request.get_json(silent=True) or {}
+    # Build a NEW dict rather than mutating layers[idx] in place — bid_layers
+    # is a plain (unwrapped) JSON column, so SQLAlchemy only notices a
+    # change via a genuinely different value on attribute assignment.
+    # layers[idx] is the same dict object already referenced by
+    # current_user.bid_layers; mutating its fields in place and then
+    # reassigning current_user.bid_layers = layers left old/new comparing
+    # equal (the "old" side had already been mutated too, same object) —
+    # the update silently never persisted, even though this route's own
+    # response looked correct (it just echoed the in-memory dict).
+    updated = dict(layers[idx])
     if "name" in body:
-        layers[idx]["name"] = (body.get("name") or "").strip() or layers[idx]["name"]
+        updated["name"] = (body.get("name") or "").strip() or updated["name"]
     if "properties" in body:
-        layers[idx]["properties"] = body.get("properties") or {}
-    current_user.bid_layers = layers
+        updated["properties"] = body.get("properties") or {}
+    new_layers = list(layers)
+    new_layers[idx] = updated
+    current_user.bid_layers = new_layers
     db.session.commit()
-    return jsonify(layers[idx])
+    return jsonify(updated)
 
 
 @app.route("/pbs/layers/<layer_id>", methods=["DELETE"])
@@ -5065,8 +5077,8 @@ async function layerShowForm(existing){
   panel.className = 'panel';
   const p = (existing && existing.properties) || {};
   panel.innerHTML =
-    '<label>Layer Name</label>' +
-    '<input class="lf-name" type="text" value="' + (existing ? existing.name.replace(/"/g, '&quot;') : '') + '">' +
+    '<label>Layer Name (only needed to Save)</label>' +
+    '<input class="lf-name" type="text" placeholder="Adjust filters freely — name it when you’re ready to save" value="' + (existing ? existing.name.replace(/"/g, '&quot;') : '') + '">' +
     (existing
       ? ''
       : '<label>Operator</label><select class="lf-opr"></select>' +
