@@ -2915,12 +2915,15 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   table.dd-table .sta{font-weight:700;color:var(--value);}
   table.dd-table .sub{color:var(--label);margin-top:1px;}
   table.dd-table .blk{font-weight:600;color:var(--value);}
-  /* RPT/RLS read as their own distinct line, not squeezed against the
-     station/time line next to them — equal breathing room above the
-     first leg's report and below the last leg's release. */
-  table.dd-table .rpt-line{color:var(--label);font-weight:600;padding-bottom:4px;margin-bottom:3px;border-bottom:1px dashed var(--border);}
-  table.dd-table .rls-line{color:var(--label);font-weight:600;padding-top:4px;margin-top:3px;border-top:1px dashed var(--border);}
-  table.dd-table .rpt-line b, table.dd-table .rls-line b{color:var(--value);font-weight:700;}
+  /* RPT/RLS are genuine rows of their own, spanning the full table width —
+     not squeezed into a leg's own departure/arrival cell. */
+  table.dd-table tr.marker-row td:last-child{
+    padding-top:7px;padding-bottom:7px;white-space:normal;
+    color:var(--label);font-weight:600;text-align:left;
+    background:var(--bg);
+  }
+  table.dd-table .marker-row b{color:var(--value);font-weight:700;}
+  table.dd-table .marker-row + tr td{padding-top:8px;}
   .dd-summary{display:flex;justify-content:flex-end;gap:6px;padding:7px 14px 9px;font-size:var(--dd-fs);color:var(--label);border-top:1px solid var(--border);}
   .dd-summary b{color:var(--value);font-weight:700;}
   /* Hotel/rest is the one thing between two duty days worth noticing at a
@@ -4202,9 +4205,11 @@ async function myTripShowDetail(seqNumber, showBack){
 // sequence detail (read-only preview of a not-yet-promoted pairing).
 // Renders as a real <table> mirroring the bid pack's own column grid —
 // DP / D-A / Flt·Eq / Dep / Arr / Blk·Gnd — not a list of app rows. RPT
-// and RLS are stacked inside the first leg's Dep cell and the last leg's
-// Arr cell respectively, same as they sit inline in the source document;
-// HOTEL/rest renders separately, between two day cards, never inside one.
+// and RLS are each a genuine full-width row of their own (spanning every
+// column), sitting right before the first leg and right after the last
+// leg — not stacked inside a leg's own cell, which read as crowding the
+// leg's own departure/arrival next to it. HOTEL/rest renders separately,
+// between two day cards, never inside one.
 //
 // NOTE: string concatenation throughout, not template literals — see the
 // Pairing Library comment above initLibraryView for why (Python's
@@ -4212,12 +4217,12 @@ async function myTripShowDetail(seqNumber, showBack){
 // real template context key).
 function dutyDayCardHtml(day, withEditIcons){
   const legs = day.legs || [];
-  let rows = '';
+  const colCount = 6;
+  const rptRow = day.report
+    ? '<tr class="marker-row"><td colspan="' + colCount + '">RPT <b>' + day.report + '/' + (day.report_hbt || day.report) + '</b></td></tr>'
+    : '';
+  let rows = rptRow;
   legs.forEach((leg, i) => {
-    const isFirst = i === 0;
-    const isLast = i === legs.length - 1;
-    const rptLine = (isFirst && day.report) ? ('<div class="rpt-line">RPT <b>' + day.report + '/' + (day.report_hbt || day.report) + '</b></div>') : '';
-    const rlsLine = (isLast && day.release) ? ('<div class="rls-line">RLS <b>' + day.release + '/' + (day.release_hbt || day.release) + '</b></div>') : '';
     const gndLine = leg.ground ? ('<div class="sub">' + leg.ground + '</div>') : '';
     // No operator prefix here — it's the same operator for every leg in
     // the trip, so it's shown once in the summary line above instead of
@@ -4230,11 +4235,14 @@ function dutyDayCardHtml(day, withEditIcons){
       '<td><div class="dp-cell">' + (i + 1) + editIcon + '</div></td>' +
       '<td>' + (leg.da || '') + '</td>' +
       '<td><div class="flt">' + fltText + '</div><div class="sub">' + (leg.equipment || '') + '</div></td>' +
-      '<td>' + rptLine + '<div class="sta">' + leg.origin + '</div><div class="sub">' + leg.dep_local + '/' + leg.dep_z + '</div></td>' +
-      '<td><div class="sta">' + leg.destination + '</div><div class="sub">' + leg.arr_local + '/' + leg.arr_z + '</div>' + rlsLine + '</td>' +
+      '<td><div class="sta">' + leg.origin + '</div><div class="sub">' + leg.dep_local + '/' + leg.dep_z + '</div></td>' +
+      '<td><div class="sta">' + leg.destination + '</div><div class="sub">' + leg.arr_local + '/' + leg.arr_z + '</div></td>' +
       '<td><div class="blk">' + (leg.block || '') + '</div>' + gndLine + '</td>' +
       '</tr>';
   });
+  if(day.release){
+    rows += '<tr class="marker-row"><td colspan="' + colCount + '">RLS <b>' + day.release + '/' + (day.release_hbt || day.release) + '</b></td></tr>';
+  }
   // No per-day TAFB — it's only a whole-pairing figure (see pbs_parser's
   // RLS_RE comment); the real cumulative one shows on the TOTAL card below.
   const summaryBits = [
