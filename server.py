@@ -2061,6 +2061,25 @@ def release_status():
     })
 
 
+_PDF_B64_FIELDS = (
+    "rls_pdf_b64", "wb_pdf_b64", "fi_pdf_b64", "fil_pdf_b64",
+    "weather_pdf_b64", "notams_pdf_b64", "field_report_pdf_b64",
+)
+
+
+def _gate_release_payload(payload, fit_for_duty):
+    """Withholds the actual PDF bytes from the response (not from the
+    ReleaseCache row — the release still generates and caches normally)
+    when FFD isn't signed on this leg. Real server-side enforcement, not
+    just a disabled button — the payload sent to the browser genuinely
+    has nothing to build a download link from until FFD is signed."""
+    if fit_for_duty:
+        return payload
+    out = {k: v for k, v in payload.items() if k not in _PDF_B64_FIELDS}
+    out["fit_for_duty_required"] = True
+    return out
+
+
 @app.route("/fos/<int:leg_id>/release", methods=["POST"])
 def generate_release(leg_id):
     """Generates (or, by far the common case, just returns) this leg's
@@ -2077,7 +2096,10 @@ def generate_release(leg_id):
     body = request.get_json(silent=True) or {}
     cached = ReleaseCache.query.filter_by(leg_id=leg_id).first()
     if cached and not body.get("force"):
-        return jsonify({**cached.payload, "cached": True, "generated_at": cached.generated_at.isoformat()})
+        return jsonify({
+            **_gate_release_payload(cached.payload, record.get("fit_for_duty")),
+            "cached": True, "generated_at": cached.generated_at.isoformat(),
+        })
 
     if not release_engine.is_available():
         return jsonify({"error": release_engine.import_error()}), 503
@@ -2116,7 +2138,10 @@ def generate_release(leg_id):
         db.session.add(ReleaseCache(leg_id=leg_id, filename=filename, payload=payload, generated_at=generated_at))
     db.session.commit()
 
-    return jsonify({**payload, "cached": False, "generated_at": generated_at.isoformat()})
+    return jsonify({
+        **_gate_release_payload(payload, record.get("fit_for_duty")),
+        "cached": False, "generated_at": generated_at.isoformat(),
+    })
 
 
 def _archive_rows():
@@ -2483,6 +2508,7 @@ def render_fos_html(leg):
     ctx["saved_docs_count"] = str(len(bookmarked))
     ctx["bookmarked_docs_json"] = json.dumps(bookmarked)
     ctx["pending_date_slip_json"] = json.dumps(ctx.get("pending_date_slip") or None)
+    ctx["ffd_banner_style"] = "" if not ctx.get("fit_for_duty") else "display:none;"
     # Neither PBS nor a SimBrief OFP ever carries a flight "status" — it's
     # not data either source has. Derive one locally from what this app
     # actually tracks rather than leaving it permanently blank.
@@ -3194,6 +3220,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .doc-row .actions{display:flex;align-items:center;gap:26px;flex:0 0 auto;}
   .doc-row .actions svg{width:19px;height:19px;color:var(--label);cursor:pointer;padding:7px;margin:-7px;box-sizing:content-box;}
   .doc-row .check{color:var(--inactive,#9aa1ab);cursor:pointer;}
+  .ffd-banner{background:var(--red);color:#fff;font-size:13px;font-weight:600;line-height:1.4;padding:11px 17px;}
   .doc-row .check.signed{color:var(--blue-dark);}
   .doc-row .actions svg.bookmark-icon.bookmarked{color:var(--blue);fill:var(--blue);}
   .doc-row .actions svg.ext-link{color:var(--blue);}
@@ -3486,6 +3513,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('rls','eFlight Plan')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg>
           </div>
         </div>
+        <div class="ffd-banner" style="$ffd_banner_style">Fit for Duty not signed \u2014 release and document downloads are locked until you sign it above.</div>
         <div class="doc-row">
           <div><div class="code">FI</div><div class="desc">Flight Details \u2013 GMT</div></div>
           <div class="actions"><svg class="bookmark-icon" data-doc="FI" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="toggleBookmark('FI', this)"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('fi','Flight Details \u2013 GMT')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
@@ -4221,6 +4249,13 @@ function generateRelease(force){
       btn.disabled = false;
       if(!ok){ status.textContent = 'Failed: ' + (data.error || 'unknown error'); status.style.color = '#c0392b'; return; }
       _releaseCache = data; // ensureRelease()/viewDoc() reuse this — one generation serves both paths
+      if(data.fit_for_duty_required){
+        status.textContent = 'Release generated, but downloads are locked until you sign Fit for Duty (All Commands > FFD).';
+        status.style.color = 'var(--red)';
+        document.getElementById('release-rls-link').style.display = 'none';
+        document.getElementById('release-wb-link').style.display = 'none';
+        return;
+      }
       status.innerHTML = (data.cached ? 'Release already on file (generated ' + new Date(data.generated_at).toLocaleString() + ').' : 'Release generated.')
         + ' <a href="#" onclick="generateRelease(true);return false;" style="color:inherit;">Regenerate</a>';
       status.style.color = 'var(--blue-dark)';
@@ -4366,7 +4401,10 @@ async function viewDoc(kind, label){
   if(!data) return;
   const field = {rls:'rls_pdf_b64', fi:'fi_pdf_b64', fil:'fil_pdf_b64', wb:'wb_pdf_b64', weather:'weather_pdf_b64', notams:'notams_pdf_b64', field_report:'field_report_pdf_b64'}[kind];
   const b64 = data[field];
-  if(!b64){ showToast(label + ' not available in this release'); return; }
+  if(!b64){
+    showToast(data.fit_for_duty_required ? 'Sign Fit for Duty first to view/export documents' : (label + ' not available in this release'));
+    return;
+  }
   document.getElementById('pdf-view-title').textContent = label;
   showView('pdf');
   // Export still uses a blob: URL (fine for downloads) — the inline VIEW uses
