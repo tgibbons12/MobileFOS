@@ -478,7 +478,7 @@ DEFAULT_LEG = {
     "oew": "", "max_zfw": "", "max_tow_struct": "", "max_ldw": "",
     "bookmarked_docs": [],
     "status": "", "customer_load": "", "position": "", "crew": [],
-    "flight_time": "", "odl_time": "", "duty_time": "", "ground_time": "",
+    "flight_time": "", "odl_time": "", "duty_time": "", "ground_time": "", "mot": "",
     "tz_diff": "", "hotel_details": "", "limo_details": "",
     "signed_in": False, "fit_for_duty": False,
     "signature": "", "signed_at": "",
@@ -2400,6 +2400,15 @@ def render_fos_html(leg):
     ctx["default_simbrief_user"] = html.escape(current_user.default_simbrief_user or "")
     ctx["aeroapi_key"] = html.escape(current_user.aeroapi_key or "")
     ctx["app_version"] = APP_VERSION
+    _mot_raw = ctx.get("mot") or ""
+    ctx["mot_display"] = f"{_mot_raw[:2]}:{_mot_raw[2:]} (L)" if len(_mot_raw) == 4 else "XX:XX (L)"
+    # Trip Recovery only works against a sequence that still exists in the
+    # active pool (recover_leg/shift_day both 404 otherwise) — hiding it
+    # here instead of leaving a dead entry point that silently fails on
+    # submit. See pairing_engine_and_recovery notes: Drop Trip can delete
+    # the sequence backing an already-open leg without touching the leg.
+    seq_still_active = bool(ctx.get("seq")) and any(s["seq"] == ctx["seq"] for s in _pbs_sequences())
+    ctx["recovery_card_style"] = "" if seq_still_active else "display:none;"
     str_ctx = {k: ("" if v is None else str(v)) for k, v in ctx.items() if k != "signature"}
     return Template(FOS_TEMPLATE).safe_substitute(**str_ctx)
 
@@ -3261,13 +3270,9 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           </div>
           <div class="panel-card">
             <div class="panel-card-hdr">Mandatory Off Time</div>
-            <div class="mot-row"><span class="mot-time">XX:XX (L)</span></div>
-            <div class="mot-scorecard">
-              <div><div class="code">HI117</div><div class="desc">FAR 117 scorecard</div></div>
-              <span class="mot-view">View</span>
-            </div>
+            <div class="mot-row"><span class="mot-time">$mot_display</span></div>
           </div>
-          <div class="panel-card">
+          <div class="panel-card" style="$recovery_card_style">
             <div class="panel-card-hdr">Trip Recovery</div>
             <div class="doc-row" style="border-bottom:none;cursor:pointer;" onclick="showView('recovery')">
               <div style="display:flex;align-items:center;gap:10px;">

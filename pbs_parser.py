@@ -203,6 +203,50 @@ def _fmt_time(hhmm):
     return f"{hhmm[:2]}:{hhmm[2:]}" if hhmm and len(hhmm) == 4 else (hhmm or "")
 
 
+def _hhmm_to_dec(hhmm):
+    return int(hhmm[:2]) + int(hhmm[2:]) / 60.0
+
+
+def _dec_to_hhmm(dec):
+    dec = dec % 24
+    h = int(dec)
+    m = round((dec - h) * 60)
+    if m == 60:
+        h, m = h + 1, 0
+    return f"{h % 24:02d}{m:02d}"
+
+
+def mot_for_leg(day, leg_index):
+    """Mandatory Off Time for one leg — the latest it could depart and still
+    let the rest of THIS duty day finish inside the legal FAR 117 duty
+    period, computed backward from the day's own report time:
+
+        FDP_end   = report + table_b(report_hbt, legs_today)
+        time_left = sum(block + ground) from this leg through the day's
+                    last leg (the last leg's own ground is blank already,
+                    per _parse_leg_line's convention, so nothing further
+                    needs excluding there)
+        MOT       = FDP_end - time_left
+
+    table_b is pairing_engine's own FAR 117 duty-period-length table —
+    reused as-is, not reimplemented. Returns an HHMM string, or None if
+    this day has no report/report_hbt (stale data parsed before those
+    were captured) or leg_index is out of range.
+    """
+    report = day.get("report")
+    report_hbt = day.get("report_hbt") or report
+    legs = day.get("legs") or []
+    if not report or not report_hbt or leg_index >= len(legs):
+        return None
+    from pairing_engine import table_b
+    fdp_end = _hhmm_to_dec(report) + table_b(_hhmm_to_dec(report_hbt), len(legs))
+    time_left = sum(
+        float(l.get("block") or 0) + float(l.get("ground") or 0)
+        for l in legs[leg_index:]
+    )
+    return _dec_to_hhmm(fdp_end - time_left)
+
+
 def pbs_leg_to_fos_leg(meta, seq, day, leg, position):
     """Maps one parsed PBS leg onto the FOS 'leg' schema (server.py DEFAULT_LEG).
 
@@ -212,6 +256,7 @@ def pbs_leg_to_fos_leg(meta, seq, day, leg, position):
     Everything time-of-day, route, and duty/hotel related is real.
     """
     meta = meta or {}
+    leg_index = next((i for i, l in enumerate(day.get("legs") or []) if l is leg), 0)
     return {
         "seq": seq["seq"],
         "date": "",
@@ -236,6 +281,7 @@ def pbs_leg_to_fos_leg(meta, seq, day, leg, position):
         "position": position, "crew": [],
         "flight_time": leg["block"], "odl_time": "",
         "duty_time": day.get("duty") or "", "ground_time": leg.get("ground") or "",
+        "mot": mot_for_leg(day, leg_index) or "",
         "tz_diff": "",
         "hotel_details": day.get("hotel") or "", "limo_details": "",
     }
