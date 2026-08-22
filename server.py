@@ -554,20 +554,34 @@ def _dates_match(a, b):
     return abs((da - db_).days) <= 1
 
 
-def _find(flight_number, dep_date, origin=None, destination=None):
+def _find(flight_number, dep_date, origin=None, destination=None, seq=None):
     """The ORM row (not a plain dict) — only consumer is _store_leg, which
     needs to mutate/insert it. Exact flight_number+dep_date is the fast
     path; when that misses, fall back to flight_number+city pair with a
     tolerant date match (see _dates_match) so the same real flight imported
     from PBS (blank date) and then enriched via SimBrief (real date) syncs
     onto one row instead of leaving two "instances" of it around — the
-    duplicate-flight bug this was built to close."""
+    duplicate-flight bug this was built to close.
+
+    seq disambiguates PBS-sourced legs specifically: a PBS leg's dep_date
+    is always blank (no real calendar date exists in that data — see
+    pbs_leg_to_fos_leg's own docstring), and the SAME flight number+route
+    recurs across dozens of different SEQs for any daily-flown city pair
+    (confirmed against real bid-pack data: flight 625 EWR-LAX alone
+    appears in 150+ different SEQs in one pack). Without this, generating
+    "flight 625" from one trip's SEQ would silently find and overwrite
+    the Leg row already open for a DIFFERENT trip's "flight 625" a pilot
+    had generated earlier — the exact "same page shows a different flight
+    depending on how you got there" bug this closes. Only enforced when
+    BOTH sides actually carry a seq (a SimBrief-only leg has none, and
+    that pairing-with-SimBrief merge is exactly what this function exists
+    to allow — see the docstring above)."""
     flight_number = (flight_number or "").strip()
     if not flight_number:
         return None
     query = Leg.query.filter_by(user_id=current_user.id, flight_number=flight_number)
     exact = query.filter_by(dep_date=dep_date).first()
-    if exact:
+    if exact and (not seq or not exact.data.get("seq") or exact.data.get("seq") == seq):
         return exact
     if not origin or not destination:
         return None
@@ -582,7 +596,8 @@ def _find(flight_number, dep_date, origin=None, destination=None):
     for row in query.all():
         if _airport_icao(row.data.get("origin", "")) == origin_icao \
                 and _airport_icao(row.data.get("destination", "")) == dest_icao \
-                and _dates_match(row.dep_date, dep_date):
+                and _dates_match(row.dep_date, dep_date) \
+                and (not seq or not row.data.get("seq") or row.data.get("seq") == seq):
             return row
     return None
 
@@ -648,7 +663,7 @@ def _store_leg(leg):
     """Shared by /generate and the PBS import path: dedupe-or-insert + archive."""
     leg = {**DEFAULT_LEG, **leg}
     leg.pop("id", None)
-    existing = _find(leg.get("flight_number"), leg.get("dep_date"), leg.get("origin"), leg.get("destination"))
+    existing = _find(leg.get("flight_number"), leg.get("dep_date"), leg.get("origin"), leg.get("destination"), leg.get("seq"))
     if existing:
         # Merge, don't overwrite: neither a PBS re-import nor a SimBrief
         # regenerate carries every field the other source does (PBS has
@@ -1190,22 +1205,20 @@ def sequence_mot_log(seq_number):
 
 @app.route("/pbs/sequences/<seq_number>/pick-up", methods=["POST"])
 def pick_up_sequence(seq_number):
-    """Marks this sequence as the pilot's one active trip — requires a
-    Trip Check-In signature first (separate from per-leg FFD), and refuses
-    to pick up a second trip while one's already active."""
+    """Marks this sequence as the pilot's one active trip — a plain
+    one-tap check-in, no signature (that requirement was cut: FFD already
+    covers the real per-leg attestation, and Pick Up needs to work
+    independently of whether legs have been generated to SimBrief yet, in
+    either order). Refuses to pick up a second trip while one's already
+    active. Still logs a TripCheckIn row for the audit trail."""
     seq = next((s for s in _pbs_sequences() if s["seq"] == seq_number), None)
     if not seq:
         return jsonify({"error": "sequence not found"}), 404
     if current_user.active_seq and current_user.active_seq != seq_number:
         return jsonify({"error": f"Close SEQ {current_user.active_seq} before picking up a new trip"}), 400
 
-    body = request.get_json(silent=True) or {}
-    signature = body.get("signature")
-    if not signature or not signature.startswith("data:image/"):
-        return jsonify({"error": "trip check-in signature required"}), 400
-
     signed_at = datetime.now(timezone.utc).isoformat()
-    db.session.add(TripCheckIn(user_id=current_user.id, seq=seq_number, signature=signature, signed_at=signed_at))
+    db.session.add(TripCheckIn(user_id=current_user.id, seq=seq_number, signed_at=signed_at))
     current_user.active_seq = seq_number
     db.session.commit()
     LOG.info(f"TRIP CHECK-IN seq={seq_number} user={current_user.id} at={signed_at}")
@@ -1372,7 +1385,7 @@ def generate_from_pbs(seq_number):
 
     existing = _find(
         fos_leg.get("flight_number"), fos_leg.get("dep_date"),
-        fos_leg.get("origin"), fos_leg.get("destination"),
+        fos_leg.get("origin"), fos_leg.get("destination"), fos_leg.get("seq"),
     )
 
     # Before touching anything, check whether the pilot's CURRENT SimBrief
@@ -2598,13 +2611,6 @@ def render_fos_html(leg):
     ctx["app_version"] = APP_VERSION
     ctx["mot_display"] = _mot_display(ctx.get("mot") or "", ctx.get("origin") or "", current_user.timezone)
     ctx["timezone_options"] = _timezone_options_html(current_user.timezone)
-    # Trip Recovery only works against a sequence that still exists in the
-    # active pool (recover_leg/shift_day both 404 otherwise) — hiding it
-    # here instead of leaving a dead entry point that silently fails on
-    # submit. See pairing_engine_and_recovery notes: Drop Trip can delete
-    # the sequence backing an already-open leg without touching the leg.
-    seq_still_active = bool(ctx.get("seq")) and any(s["seq"] == ctx["seq"] for s in _pbs_sequences())
-    ctx["recovery_card_style"] = "" if seq_still_active else "display:none;"
     str_ctx = {k: ("" if v is None else str(v)) for k, v in ctx.items() if k != "signature"}
     return Template(FOS_TEMPLATE).safe_substitute(**str_ctx)
 
@@ -3468,16 +3474,6 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           <div class="panel-card">
             <div class="panel-card-hdr">Mandatory Off Time</div>
             <div class="mot-row" style="cursor:pointer;" onclick="showMotLog()"><span class="mot-time">$mot_display</span></div>
-          </div>
-          <div class="panel-card" style="$recovery_card_style">
-            <div class="panel-card-hdr">Trip Recovery</div>
-            <div class="doc-row" style="border-bottom:none;cursor:pointer;" onclick="showView('recovery')">
-              <div style="display:flex;align-items:center;gap:10px;">
-                <svg class="lead-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v5"/><path d="M12 16h.01"/></svg>
-                <div><div class="code">Report a Disruption</div><div class="desc">Diverted or timed out? Find a legal way back.</div></div>
-              </div>
-              <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></div>
-            </div>
           </div>
           <div class="panel-card">
             <div class="panel-card-hdr">External Apps</div>
@@ -4557,22 +4553,12 @@ async function showMotLog(){
 // effect (fit_for_duty=True server-side, see sign_leg) this particular
 // signing session is for.
 let _signKind = 'eflightplan';
-// Trip Check-In (Pick Up) reuses this same pad but isn't leg-scoped —
-// _signTripSeq/_signTripCallback carry the sequence number and the
-// "now actually run the pick-up side-effects" callback through the
-// generic submitSignature() flow below.
-let _signTripSeq = null, _signTripCallback = null;
 const _SIGN_KIND_COPY = {
   ffd: {title: 'Sign Fit for Duty Declaration', line: 'Attests you are fit for duty on this flight'},
   eflightplan: {title: 'Sign eFlight Plan', line: 'Acknowledges receipt of the current release'},
-  tripcheckin: {title: 'Trip Check-In', line: 'Confirms you are checking in for this trip'},
 };
-function openSignPad(kind, opts){
+function openSignPad(kind){
   _signKind = kind || 'eflightplan';
-  if(_signKind === 'tripcheckin'){
-    _signTripSeq = opts && opts.seq;
-    _signTripCallback = (opts && opts.onSuccess) || null;
-  }
   const copy = _SIGN_KIND_COPY[_signKind] || _SIGN_KIND_COPY.eflightplan;
   document.getElementById('sign-title').textContent = copy.title;
   document.getElementById('sign-status-line').textContent = copy.line;
@@ -4630,23 +4616,6 @@ async function submitSignature(){
   el.textContent = 'Submitting…';
   el.style.color = '';
   const dataUrl = document.getElementById('sign-pad').toDataURL('image/png');
-  if(_signKind === 'tripcheckin'){
-    try {
-      const r = await fetch('/pbs/sequences/' + encodeURIComponent(_signTripSeq) + '/pick-up', {
-        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({signature: dataUrl}),
-      });
-      const data = await r.json();
-      btn.disabled = false;
-      if(!r.ok){ el.textContent = data.error || 'Check-in failed'; el.style.color = '#c0392b'; return; }
-      showToast('Trip picked up');
-      if(_signTripCallback) _signTripCallback();
-    } catch(e) {
-      btn.disabled = false;
-      el.textContent = 'Request failed: ' + e;
-      el.style.color = '#c0392b';
-    }
-    return;
-  }
   try {
     const r = await fetch('/fos/' + LEG_ID + '/sign', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({signature: dataUrl, kind: _signKind})});
     const data = await r.json();
@@ -4903,31 +4872,44 @@ function renderPairing(seqData){
   summary.textContent = summaryBits.filter(Boolean).join('  ·  ');
   body.appendChild(summary);
 
+  // Pick Up (trip check-in) and generating legs to SimBrief are
+  // independent actions now, usable in either order — Pick Up is a plain
+  // one-tap check-in (no signature; that requirement was cut), and
+  // Generate & Cache is always available whether or not the trip has
+  // been picked up yet.
+  const pickupWrap = document.createElement('div');
+  pickupWrap.style.cssText = 'padding:11px 14px;background:var(--card);border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:8px;';
+  const pickupBtn = document.createElement('button');
+  if(seqData.active){
+    pickupBtn.textContent = 'Close Trip';
+    pickupBtn.style.cssText = 'margin:0;width:100%;background:var(--label);color:#fff;border:none;padding:10px;border-radius:5px;font-size:13.5px;font-weight:600;cursor:pointer;';
+    pickupBtn.onclick = () => closeTrip(seqData.seq);
+  } else {
+    pickupBtn.textContent = 'Pick Up';
+    pickupBtn.style.cssText = 'margin:0;width:100%;background:var(--blue);color:#fff;border:none;padding:10px;border-radius:5px;font-size:13.5px;font-weight:600;cursor:pointer;';
+    pickupBtn.onclick = () => pickUpTrip(seqData.seq);
+  }
+  pickupWrap.appendChild(pickupBtn);
+  if(seqData.active && firstLeg){
+    // The one clear path from "picked up" to the actual flight page —
+    // previously there was no obvious way to get from a checked-in trip
+    // in Schedule to that trip's real /fos/<id> Overview.
+    const goBtn = document.createElement('button');
+    goBtn.textContent = 'Go to Flight';
+    goBtn.style.cssText = 'margin:0;width:100%;background:var(--green,#34c759);color:#fff;border:none;padding:10px;border-radius:5px;font-size:13.5px;font-weight:600;cursor:pointer;';
+    goBtn.onclick = () => generatePairingLeg(seqData.seq, dutyDays[0].duty_day, 0, position);
+    pickupWrap.appendChild(goBtn);
+  }
+  body.appendChild(pickupWrap);
+
   const cacheWrap = document.createElement('div');
   cacheWrap.style.cssText = 'padding:11px 14px;background:var(--card);border-bottom:1px solid var(--border);';
   const cacheBtn = document.createElement('button');
+  cacheBtn.textContent = 'Generate & Cache All Legs in Sequence';
+  cacheBtn.style.cssText = 'margin:0;width:100%;background:var(--card);color:var(--blue);border:1px solid var(--blue);padding:10px;border-radius:5px;font-size:13.5px;font-weight:600;cursor:pointer;';
   const cacheMsg = document.createElement('div');
   cacheMsg.style.cssText = 'margin-top:8px;font-size:12.5px;color:var(--label);';
-  if(seqData.active){
-    cacheBtn.textContent = 'Close Trip';
-    cacheBtn.style.cssText = 'margin:0;width:100%;background:var(--label);color:#fff;border:none;padding:10px;border-radius:5px;font-size:13.5px;font-weight:600;cursor:pointer;';
-    cacheBtn.onclick = () => closeTrip(seqData.seq);
-  } else {
-    cacheBtn.textContent = 'Pick Up';
-    cacheBtn.style.cssText = 'margin:0;width:100%;background:var(--blue);color:#fff;border:none;padding:10px;border-radius:5px;font-size:13.5px;font-weight:600;cursor:pointer;';
-    // Picking up a trip requires a Trip Check-In signature first — the
-    // sign pad opens, and only on a successful submit does the legacy
-    // "generate & cache every leg" side effect run, followed by a
-    // re-render so the button flips to Close Trip.
-    cacheBtn.onclick = () => openSignPad('tripcheckin', {
-      seq: seqData.seq,
-      onSuccess: async () => {
-        showView('pairing');
-        await cacheAllPairingLegs(seqData, position, cacheMsg);
-        myTripShowDetail(seqData.seq, true);
-      },
-    });
-  }
+  cacheBtn.onclick = () => cacheAllPairingLegs(seqData, position, cacheMsg);
   cacheWrap.appendChild(cacheBtn);
   cacheWrap.appendChild(cacheMsg);
   body.appendChild(cacheWrap);
@@ -4958,6 +4940,17 @@ async function dropTrip(seq){
     if(!r.ok){ showToast(data.error || 'Could not drop this trip'); return; }
     showToast('Trip dropped');
     initPairingView();
+  } catch(e) { showToast('Request failed: ' + e); }
+}
+async function pickUpTrip(seq){
+  // A plain one-tap check-in — no signature. Independent of Generate &
+  // Cache, which stays its own separate button: either can be done first.
+  try {
+    const r = await fetch('/pbs/sequences/' + encodeURIComponent(seq) + '/pick-up', {method: 'POST'});
+    const data = await r.json();
+    if(!r.ok){ showToast(data.error || 'Could not pick up this trip'); return; }
+    showToast('Trip picked up');
+    myTripShowDetail(seq, true);
   } catch(e) { showToast('Request failed: ' + e); }
 }
 async function closeTrip(seq){
