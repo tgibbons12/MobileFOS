@@ -907,6 +907,11 @@ def _layer_matches(seq, summary, properties):
         return False
     if exclude and (layover_stations & exclude):
         return False
+    # Full-route avoid — unlike layover_exclude, this drops a pairing for
+    # so much as touching a station same-day, not just overnighting there.
+    avoid = set(p.get("avoid_stations") or [])
+    if avoid and (set(summary["routing"]) & avoid):
+        return False
     return True
 
 
@@ -914,19 +919,61 @@ def _bid_layer(layer_id):
     return next((l for l in (current_user.bid_layers or []) if l["id"] == layer_id), None)
 
 
+def _count_layer_matches(opr, base, fleet, properties):
+    """Shared by the layer list (persisted layers) and the live preview
+    (a not-yet-saved property set) — one pass over one pack's sequences."""
+    pack = _pack_row(opr, base, fleet)
+    if not pack:
+        return None
+    count = 0
+    for s in (pack.sequences or []):
+        summary = _summarize_sequence(s)
+        if _layer_matches(s, summary, properties):
+            count += 1
+    return count
+
+
+@app.route("/pbs/layers/preview")
+def preview_bid_layer():
+    """Live count for the form, before a layer is saved — GET with query
+    params so the frontend can debounce plain fetches, no JSON body typing
+    needed for a handful of scalar/csv fields."""
+    opr = (request.args.get("opr") or "").strip().upper()
+    base = (request.args.get("base") or "").strip().upper()
+    fleet = (request.args.get("fleet") or "").strip().upper()
+    if not opr or not base or not fleet:
+        return jsonify({"error": "opr, base, and fleet are all required"}), 400
+
+    def _num(key):
+        v = request.args.get(key)
+        return float(v) if v not in (None, "") else None
+
+    def _stations(key):
+        v = request.args.get(key) or ""
+        return [s.strip().upper() for s in v.split(",") if s.strip()]
+
+    properties = {
+        "min_days": _num("min_days"), "max_days": _num("max_days"),
+        "min_block": _num("min_block"), "min_tafb": _num("min_tafb"),
+        "max_legs_per_day": _num("max_legs_per_day"),
+        "exclude_red_eye": request.args.get("exclude_red_eye") == "1",
+        "layover_include": _stations("layover_include"),
+        "layover_exclude": _stations("layover_exclude"),
+        "avoid_stations": _stations("avoid_stations"),
+    }
+    count = _count_layer_matches(opr, base, fleet, properties)
+    if count is None:
+        return jsonify({"error": "no pack found for that operator/base/fleet"}), 404
+    return jsonify({"count": count})
+
+
 @app.route("/pbs/layers")
 def list_bid_layers():
     layers = current_user.bid_layers or []
     out = []
     for layer in layers:
-        pack = _pack_row(layer["opr"], layer["base"], layer["fleet"])
-        count = 0
-        if pack:
-            for s in (pack.sequences or []):
-                summary = _summarize_sequence(s)
-                if _layer_matches(s, summary, layer.get("properties")):
-                    count += 1
-        out.append({**layer, "count": count})
+        count = _count_layer_matches(layer["opr"], layer["base"], layer["fleet"], layer.get("properties"))
+        out.append({**layer, "count": count or 0})
     return jsonify(out)
 
 
@@ -5021,6 +5068,9 @@ async function layerShowForm(existing){
     '<input class="lf-layover-include" type="text" placeholder="e.g. MIA, LAX" value="' + ((p.layover_include || []).join(', ')) + '">' +
     '<label>Layover Exclude (station codes, comma separated)</label>' +
     '<input class="lf-layover-exclude" type="text" placeholder="e.g. JAC" value="' + ((p.layover_exclude || []).join(', ')) + '">' +
+    '<label>Avoid Entirely (any stop, not just an overnight — comma separated)</label>' +
+    '<input class="lf-avoid" type="text" placeholder="e.g. ORD" value="' + ((p.avoid_stations || []).join(', ')) + '">' +
+    '<div class="lf-live-count" style="margin-top:12px;padding:10px 12px;border-radius:8px;background:var(--bg);font-size:13px;font-weight:600;color:var(--label);"></div>' +
     '<div style="display:flex;gap:8px;margin-top:14px;">' +
       (existing ? '<button type="button" class="lf-delete" style="margin:0;flex:1;background:var(--red);">Delete</button>' : '') +
       '<button type="button" class="lf-save" style="margin:0;flex:2;">Save</button>' +
@@ -5028,7 +5078,10 @@ async function layerShowForm(existing){
     '<div class="lf-msg" style="margin-top:8px;font-size:12.5px;color:var(--label);"></div>';
   body.appendChild(panel);
 
-  if(!existing){
+  let getScope;
+  if(existing){
+    getScope = () => ({opr: existing.opr, base: existing.base, fleet: existing.fleet});
+  } else {
     const oprSel = panel.querySelector('.lf-opr');
     const baseSel = panel.querySelector('.lf-base');
     const fleetSel = panel.querySelector('.lf-fleet');
@@ -5047,11 +5100,24 @@ async function layerShowForm(existing){
     const refreshFleets = () => {
       const fleets = packs.filter(pk => pk.opr === oprSel.value && pk.base === baseSel.value).map(pk => pk.fleet).sort();
       fillSelect(fleetSel, fleets);
+      _queueLayerPreview(panel, getScope);
     };
     oprSel.onchange = refreshBases;
     baseSel.onchange = refreshFleets;
+    getScope = () => ({opr: oprSel.value, base: baseSel.value, fleet: fleetSel.value});
     refreshBases();
   }
+
+  // Live count while editing — every property input re-runs a debounced
+  // /pbs/layers/preview fetch so the match count updates as you type,
+  // before anything is saved. Name doesn't affect matches, so it's the
+  // one field left out.
+  panel.querySelectorAll('input, select').forEach(el => {
+    if(el.classList.contains('lf-name')) return;
+    el.addEventListener('input', () => _queueLayerPreview(panel, getScope));
+    el.addEventListener('change', () => _queueLayerPreview(panel, getScope));
+  });
+  _queueLayerPreview(panel, getScope);
 
   const msgEl = panel.querySelector('.lf-msg');
   panel.querySelector('.lf-save').onclick = () => layerSaveForm(panel, existing, msgEl);
@@ -5061,10 +5127,8 @@ async function layerShowForm(existing){
 }
 function _numOrNull(v){ return v === '' || v === null || v === undefined ? null : Number(v); }
 function _stationList(v){ return (v || '').split(',').map(s => s.trim().toUpperCase()).filter(Boolean); }
-async function layerSaveForm(panel, existing, msgEl){
-  const name = panel.querySelector('.lf-name').value.trim();
-  if(!name){ msgEl.textContent = 'Name is required.'; msgEl.style.color = 'var(--red)'; return; }
-  const properties = {
+function _gatherLayerProperties(panel){
+  return {
     min_days: _numOrNull(panel.querySelector('.lf-min-days').value),
     max_days: _numOrNull(panel.querySelector('.lf-max-days').value),
     min_block: _numOrNull(panel.querySelector('.lf-min-block').value),
@@ -5073,7 +5137,44 @@ async function layerSaveForm(panel, existing, msgEl){
     exclude_red_eye: panel.querySelector('.lf-no-redeye').checked,
     layover_include: _stationList(panel.querySelector('.lf-layover-include').value),
     layover_exclude: _stationList(panel.querySelector('.lf-layover-exclude').value),
+    avoid_stations: _stationList(panel.querySelector('.lf-avoid').value),
   };
+}
+let _layerPreviewTimer = null;
+let _layerPreviewSeq = 0;
+function _queueLayerPreview(panel, getScope){
+  const countEl = panel.querySelector('.lf-live-count');
+  clearTimeout(_layerPreviewTimer);
+  countEl.textContent = 'Checking…';
+  _layerPreviewTimer = setTimeout(async () => {
+    const mySeq = ++_layerPreviewSeq;
+    const {opr, base, fleet} = getScope();
+    if(!opr || !base || !fleet){ countEl.textContent = ''; return; }
+    const props = _gatherLayerProperties(panel);
+    const params = new URLSearchParams({
+      opr, base, fleet,
+      min_days: props.min_days ?? '', max_days: props.max_days ?? '',
+      min_block: props.min_block ?? '', min_tafb: props.min_tafb ?? '',
+      max_legs_per_day: props.max_legs_per_day ?? '',
+      exclude_red_eye: props.exclude_red_eye ? '1' : '0',
+      layover_include: props.layover_include.join(','),
+      layover_exclude: props.layover_exclude.join(','),
+      avoid_stations: props.avoid_stations.join(','),
+    });
+    try {
+      const r = await fetch('/pbs/layers/preview?' + params.toString());
+      const data = await r.json();
+      if(mySeq !== _layerPreviewSeq) return; // a newer edit already superseded this request
+      countEl.textContent = r.ok ? (data.count + ' pairing' + (data.count === 1 ? '' : 's') + ' match right now') : (data.error || 'Could not check');
+    } catch(e) {
+      if(mySeq === _layerPreviewSeq) countEl.textContent = '';
+    }
+  }, 400);
+}
+async function layerSaveForm(panel, existing, msgEl){
+  const name = panel.querySelector('.lf-name').value.trim();
+  if(!name){ msgEl.textContent = 'Name is required.'; msgEl.style.color = 'var(--red)'; return; }
+  const properties = _gatherLayerProperties(panel);
   try {
     let r;
     if(existing){
