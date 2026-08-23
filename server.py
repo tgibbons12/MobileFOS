@@ -2281,6 +2281,25 @@ def set_timezone():
     return jsonify({"ok": True})
 
 
+@app.route("/settings/password", methods=["POST"])
+def set_password():
+    """Requires the current password (not just being logged in — a
+    session cookie left signed-in on a shared/unlocked device shouldn't
+    be enough on its own to take over the account) before setting a new
+    one via the same set_password()/check_password() the login/register
+    routes already use."""
+    body = request.get_json(silent=True) or {}
+    current = body.get("current_password") or ""
+    new = body.get("new_password") or ""
+    if not current_user.check_password(current):
+        return jsonify({"error": "Current password is incorrect"}), 400
+    if len(new) < 8:
+        return jsonify({"error": "New password must be at least 8 characters"}), 400
+    current_user.set_password(new)
+    db.session.commit()
+    return jsonify({"ok": True})
+
+
 @app.route("/settings/bid-shortcut")
 def get_bid_shortcut():
     return jsonify(current_user.bid_shortcut or None)
@@ -3838,6 +3857,13 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           <button type="button" class="theme-opt" data-theme-opt="dark" onclick="setThemePref('dark')">Dark</button>
         </div>
       </div>
+      <div class="search-block">
+        <label for="pw-current">Change Password</label>
+        <input id="pw-current" type="password" placeholder="Current password" autocomplete="current-password">
+        <input id="pw-new" type="password" placeholder="New password (min. 8 characters)" autocomplete="new-password" style="margin-top:8px;">
+        <button type="button" onclick="changePassword()" style="margin-top:10px;width:100%;background:var(--blue);color:#fff;border:none;padding:10px;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;">Update Password</button>
+        <div id="password-msg" style="margin-top:8px;font-size:12.5px;color:var(--label);"></div>
+      </div>
       <div id="settings-msg" class="placeholder-note"></div>
       <div style="text-align:center;padding:18px 0 4px;font-size:12px;color:var(--label);">Version $app_version</div>
     </section>
@@ -4024,6 +4050,23 @@ function saveTimezone(value){
   fetch('/settings/timezone', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({timezone: value})})
     .then(()=>{ document.getElementById('settings-msg').textContent = 'Saved.'; })
     .catch(()=>{ document.getElementById('settings-msg').textContent = 'Could not save — try again.'; });
+}
+async function changePassword(){
+  const el = document.getElementById('password-msg');
+  const currentEl = document.getElementById('pw-current');
+  const newEl = document.getElementById('pw-new');
+  const current = currentEl.value;
+  const next = newEl.value;
+  if(!current || !next){ el.textContent = 'Enter both your current and new password.'; el.style.color = 'var(--red)'; return; }
+  if(next.length < 8){ el.textContent = 'New password must be at least 8 characters.'; el.style.color = 'var(--red)'; return; }
+  el.textContent = 'Updating…'; el.style.color = '';
+  try {
+    const r = await fetch('/settings/password', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({current_password: current, new_password: next})});
+    const data = await r.json();
+    if(!r.ok){ el.textContent = data.error || 'Could not update password'; el.style.color = 'var(--red)'; return; }
+    currentEl.value = ''; newEl.value = '';
+    el.textContent = 'Password updated.'; el.style.color = 'var(--blue-dark)';
+  } catch(e) { el.textContent = 'Request failed: ' + e; el.style.color = 'var(--red)'; }
 }
 function setThemePref(pref){
   if(pref === 'auto'){
