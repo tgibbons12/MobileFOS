@@ -1275,7 +1275,7 @@ def sequence_mot_log(seq_number):
             row = rows_by_key.get(key)
             mot = pbs_parser.mot_for_leg(day, i)
             legs_out.append({
-                "duty_day": day["duty_day"], "flight_number": leg.get("flight_number"),
+                "duty_day": day["duty_day"], "da": leg.get("da"), "flight_number": leg.get("flight_number"),
                 "origin": leg.get("origin"), "destination": leg.get("destination"),
                 "mot_display": _mot_display(mot or "", leg.get("origin") or "", current_user.timezone),
                 "fdp_remaining": fdp_remaining,
@@ -3032,7 +3032,7 @@ function renderLegPicker(seqData){
   (seqData.duty_days || []).forEach(day => {
     const heading = document.createElement('div');
     heading.style.cssText = 'font-size:13px;font-weight:600;color:var(--blue-dark);margin:14px 0 6px;';
-    heading.textContent = 'Day ' + day.duty_day + ' — RPT ' + (day.report || '');
+    heading.textContent = 'Day ' + _dayCalendarNumber(day) + ' — RPT ' + (day.report || '');
     list.appendChild(heading);
     (day.legs || []).forEach((leg, i) => {
       const row = document.createElement('a');
@@ -4653,7 +4653,7 @@ async function showMotLog(){
         const hdr = document.createElement('div');
         hdr.className = 'panel-card-hdr';
         hdr.style.cssText = 'padding:14px 17px 6px;';
-        hdr.textContent = 'Day ' + leg.duty_day;
+        hdr.textContent = 'Day ' + _dayCalendarNumber({legs: [leg], duty_day: leg.duty_day});
         body.appendChild(hdr);
       }
       const row = document.createElement('div');
@@ -4884,6 +4884,26 @@ async function myTripShowDetail(seqNumber, showBack){
 // Pairing Library comment above initLibraryView for why (Python's
 // string.Template silently eats a bare ${identifier} that collides with a
 // real template context key).
+// Real calendar-day number for a duty-day header — day.duty_day is the
+// sequential duty-PERIOD index (1, 2, 3, ...) and stays that way on
+// purpose (it's the identifier every /generate, /sign, and edit route
+// keys off), but a 24+ hour layover can swallow a whole calendar day with
+// no duty at all, which never gets its own duty_day number — so labeling
+// the card strictly by duty_day silently skips a day (e.g. "Day 2", "Day
+// 3" when the trip is really on calendar day 2, then day 4). Each leg's
+// own "da" field ("duty_day/calendar_day", e.g. "3/4") already carries
+// the real calendar day the airline assigned it — same source used
+// server-side by pbs_parser.sequence_calendar_days for the trip's overall
+// day count.
+function _dayCalendarNumber(day){
+  const leg = (day.legs || [])[0];
+  const da = leg && leg.da;
+  if(da && da.indexOf('/') !== -1){
+    const n = parseInt(da.split('/')[1], 10);
+    if(!isNaN(n)) return n;
+  }
+  return day.duty_day;
+}
 function dutyDayCardHtml(day, withEditIcons){
   const legs = day.legs || [];
   const colCount = 6;
@@ -4919,7 +4939,7 @@ function dutyDayCardHtml(day, withEditIcons){
     day.duty ? ('Duty <b>' + day.duty + '</b>') : '',
   ].filter(Boolean).join(' &middot; ');
   return '<div class="dd-card">' +
-    '<div class="dd-hdr">Day ' + day.duty_day + '</div>' +
+    '<div class="dd-hdr">Day ' + _dayCalendarNumber(day) + '</div>' +
     '<div class="dd-table-wrap"><table class="dd-table"><thead><tr>' +
       '<th>Dp</th><th>D/A</th><th>Flt/Eq</th>' +
       '<th>STA<br>DLCL/DHBT</th><th>STA<br>ALCL/AHBT</th><th>Blk/Gnd</th>' +
