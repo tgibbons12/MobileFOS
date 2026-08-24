@@ -4751,6 +4751,20 @@ async function submitSignature(){
     const checkId = _signKind === 'ffd' ? 'ffd-doc-check' : 'sign-check';
     const check = document.getElementById(checkId);
     if(check) check.classList.add('signed');
+    if(_signKind === 'ffd'){
+      // The signature itself always persists server-side (sign_leg sets
+      // fit_for_duty=True unconditionally) — the "signature doesn't save,
+      // downloads stay locked" reports were this stale client cache: once
+      // a release had been generated/viewed BEFORE signing, _releaseCache
+      // (and the Confirm view's already-rendered download links) kept
+      // serving that pre-sign fit_for_duty=false forever, since nothing
+      // ever invalidated them after a later sign. Dropping the cache and
+      // re-pulling the release (server-side still instant — it's already
+      // cached, this just re-reads the now-true flag) unlocks downloads
+      // immediately instead of requiring a page reload to notice.
+      _releaseCache = null;
+      if(document.getElementById('release-user')) generateRelease();
+    }
     showToast('Signed');
     showView('allcommands');
   } catch(e) {
