@@ -921,7 +921,17 @@ def _layer_matches(seq, summary, properties):
         return False
     if p.get("max_legs_per_day") is not None and _seq_max_legs_per_day(seq) > p["max_legs_per_day"]:
         return False
-    if p.get("exclude_red_eye") and _seq_has_red_eye(seq):
+    # Tri-state: "any" (no filter, default) / "exclude" / "only". Reads
+    # the new key first, falls back to the old boolean exclude_red_eye
+    # for layers saved before this was a tri-state (still an "exclude"
+    # meaning, so no data migration needed).
+    red_eye_mode = p.get("red_eye")
+    if red_eye_mode is None:
+        red_eye_mode = "exclude" if p.get("exclude_red_eye") else "any"
+    has_red_eye = _seq_has_red_eye(seq)
+    if red_eye_mode == "exclude" and has_red_eye:
+        return False
+    if red_eye_mode == "only" and not has_red_eye:
         return False
     # Two independent axes: Layover Include is the strict, overnight-only
     # version ("I want to lay over in one of these cities"); Include/Avoid
@@ -947,17 +957,39 @@ def _bid_layer(layer_id):
     return next((l for l in (current_user.bid_layers or []) if l["id"] == layer_id), None)
 
 
+# "(ALL)" as a value for opr/base/fleet — a layer (or a preview) can span
+# every pack on that dimension instead of being pinned to one exact pack,
+# e.g. every base for one operator/fleet, or genuinely every pack there
+# is. Bare string sentinel (not None) so it round-trips through the same
+# plain-string opr/base/fleet fields every other pack-scoped route uses.
+ALL_SCOPE = "ALL"
+
+
+def _packs_for_scope(opr, base, fleet):
+    q = PairingPack.query
+    if opr and opr != ALL_SCOPE:
+        q = q.filter_by(opr=opr.upper())
+    if base and base != ALL_SCOPE:
+        q = q.filter_by(base=base.upper())
+    if fleet and fleet != ALL_SCOPE:
+        q = q.filter_by(fleet=fleet.upper())
+    return q.all()
+
+
 def _count_layer_matches(opr, base, fleet, properties):
     """Shared by the layer list (persisted layers) and the live preview
-    (a not-yet-saved property set) — one pass over one pack's sequences."""
-    pack = _pack_row(opr, base, fleet)
-    if not pack:
+    (a not-yet-saved property set) — one pass over every pack the scope
+    resolves to (one pack in the common case, more when any of
+    opr/base/fleet is ALL_SCOPE)."""
+    packs = _packs_for_scope(opr, base, fleet)
+    if not packs:
         return None
     count = 0
-    for s in (pack.sequences or []):
-        summary = _summarize_sequence(s)
-        if _layer_matches(s, summary, properties):
-            count += 1
+    for pack in packs:
+        for s in (pack.sequences or []):
+            summary = _summarize_sequence(s)
+            if _layer_matches(s, summary, properties):
+                count += 1
     return count
 
 
@@ -984,7 +1016,7 @@ def preview_bid_layer():
         "min_days": _num("min_days"), "max_days": _num("max_days"),
         "min_block": _num("min_block"), "min_tafb": _num("min_tafb"),
         "max_legs_per_day": _num("max_legs_per_day"),
-        "exclude_red_eye": request.args.get("exclude_red_eye") == "1",
+        "red_eye": request.args.get("red_eye") or "any",
         "layover_include": _stations("layover_include"),
         "include_stations": _stations("include_stations"),
         "avoid_stations": _stations("avoid_stations"),
@@ -1014,7 +1046,7 @@ def create_bid_layer():
     fleet = (body.get("fleet") or "").strip().upper()
     if not name or not opr or not base or not fleet:
         return jsonify({"error": "name, opr, base, and fleet are all required"}), 400
-    if not _pack_row(opr, base, fleet):
+    if not _packs_for_scope(opr, base, fleet):
         return jsonify({"error": "no pack found for that operator/base/fleet"}), 404
     layer = {
         "id": uuid.uuid4().hex[:8], "name": name,
@@ -1067,19 +1099,50 @@ def delete_bid_layer(layer_id):
     return jsonify({"ok": True})
 
 
+_SORT_KEYS = {"seq", "days", "block", "tafb", "tpay"}
+
+
+def _sort_summaries(summaries, sort):
+    """sort is a key name from _SORT_KEYS, optionally prefixed "-" for
+    descending (e.g. "-block"). Missing/non-numeric values sort last
+    regardless of direction, rather than crashing or landing first."""
+    if not sort:
+        return summaries
+    desc = sort.startswith("-")
+    key = sort[1:] if desc else sort
+    if key not in _SORT_KEYS:
+        return summaries
+
+    def sort_val(s):
+        v = s.get(key)
+        try:
+            fv = float(v)
+            return (0, -fv if desc else fv)
+        except (TypeError, ValueError):
+            return (1, 0.0)
+    return sorted(summaries, key=sort_val)
+
+
 @app.route("/pbs/layers/<layer_id>/pairings")
 def list_bid_layer_pairings(layer_id):
     layer = _bid_layer(layer_id)
     if not layer:
         return jsonify({"error": "not found"}), 404
-    pack = _pack_row(layer["opr"], layer["base"], layer["fleet"])
-    if not pack:
+    packs = _packs_for_scope(layer["opr"], layer["base"], layer["fleet"])
+    if not packs:
         return jsonify({"error": "no pack found for that operator/base/fleet"}), 404
     matches = []
-    for s in (pack.sequences or []):
-        summary = _summarize_sequence(s)
-        if _layer_matches(s, summary, layer.get("properties")):
-            matches.append(summary)
+    for pack in packs:
+        for s in (pack.sequences or []):
+            summary = _summarize_sequence(s)
+            if _layer_matches(s, summary, layer.get("properties")):
+                # Tagged per-match rather than trusting the layer's own
+                # opr/base/fleet — those can be ALL_SCOPE, spanning
+                # several packs, so each result needs its own real pack
+                # identity for detail/promote navigation.
+                summary["opr"], summary["base"], summary["fleet"] = pack.opr, pack.base, pack.fleet
+                matches.append(summary)
+    matches = _sort_summaries(matches, request.args.get("sort"))
     return jsonify({"layer": layer, "pairings": matches})
 
 
@@ -5472,9 +5535,12 @@ async function layerShowForm(existing){
     '<select class="lf-min-tafb">' + _rangeOptionsHtml(_rangeArray(0, 150, 10), p.min_tafb) + '</select>' +
     '<label>Max Legs Per Day</label>' +
     '<select class="lf-max-legs">' + _rangeOptionsHtml(_rangeArray(1, 6, 1), p.max_legs_per_day) + '</select>' +
-    '<label style="display:flex;align-items:center;gap:8px;margin-top:10px;">' +
-      '<input class="lf-no-redeye" type="checkbox"' + (p.exclude_red_eye ? ' checked' : '') + '> Exclude red-eyes' +
-    '</label>' +
+    '<label>Red-Eyes</label>' +
+    '<select class="lf-redeye">' +
+      '<option value="any"' + ((_redEyeMode(p) === 'any') ? ' selected' : '') + '>Any</option>' +
+      '<option value="exclude"' + ((_redEyeMode(p) === 'exclude') ? ' selected' : '') + '>Exclude Red-Eyes</option>' +
+      '<option value="only"' + ((_redEyeMode(p) === 'only') ? ' selected' : '') + '>Only Red-Eyes</option>' +
+    '</select>' +
     '<label>Layover Include (must overnight here — station codes, comma separated)</label>' +
     '<input class="lf-layover-include" type="text" placeholder="e.g. MIA, LAX" value="' + ((p.layover_include || []).join(', ')) + '">' +
     '<label>Include (touches this stop at all, same-day or overnight)</label>' +
@@ -5498,18 +5564,25 @@ async function layerShowForm(existing){
     const fleetSel = panel.querySelector('.lf-fleet');
     const r = await fetch('/pbs/packs');
     const packs = await r.json();
+    // (ALL) is always the first option at every level — picking it drops
+    // that dimension from the scope entirely (server-side: ALL_SCOPE),
+    // so a layer can span every base for one operator, or genuinely
+    // every pack there is, instead of being pinned to one exact pack.
     const fillSelect = (sel, values) => {
-      sel.innerHTML = values.map(v => '<option value="' + v + '">' + v + '</option>').join('');
+      sel.innerHTML = '<option value="ALL">(ALL)</option>' + values.map(v => '<option value="' + v + '">' + v + '</option>').join('');
     };
     const oprs = [...new Set(packs.map(pk => pk.opr))].sort();
     fillSelect(oprSel, oprs);
     const refreshBases = () => {
-      const bases = [...new Set(packs.filter(pk => pk.opr === oprSel.value).map(pk => pk.base))].sort();
+      const scoped = oprSel.value === 'ALL' ? packs : packs.filter(pk => pk.opr === oprSel.value);
+      const bases = [...new Set(scoped.map(pk => pk.base))].sort();
       fillSelect(baseSel, bases);
       refreshFleets();
     };
     const refreshFleets = () => {
-      const fleets = packs.filter(pk => pk.opr === oprSel.value && pk.base === baseSel.value).map(pk => pk.fleet).sort();
+      let scoped = oprSel.value === 'ALL' ? packs : packs.filter(pk => pk.opr === oprSel.value);
+      scoped = baseSel.value === 'ALL' ? scoped : scoped.filter(pk => pk.base === baseSel.value);
+      const fleets = [...new Set(scoped.map(pk => pk.fleet))].sort();
       fillSelect(fleetSel, fleets);
       _queueLayerPreview(panel, getScope);
     };
@@ -5538,6 +5611,12 @@ async function layerShowForm(existing){
 }
 function _numOrNull(v){ return v === '' || v === null || v === undefined ? null : Number(v); }
 function _stationList(v){ return (v || '').split(',').map(s => s.trim().toUpperCase()).filter(Boolean); }
+// Old saved layers only ever have the boolean exclude_red_eye — reads
+// the new tri-state key first, falls back to that boolean otherwise.
+function _redEyeMode(p){
+  if(p.red_eye) return p.red_eye;
+  return p.exclude_red_eye ? 'exclude' : 'any';
+}
 function _gatherLayerProperties(panel){
   return {
     min_days: _numOrNull(panel.querySelector('.lf-min-days').value),
@@ -5545,7 +5624,7 @@ function _gatherLayerProperties(panel){
     min_block: _numOrNull(panel.querySelector('.lf-min-block').value),
     min_tafb: _numOrNull(panel.querySelector('.lf-min-tafb').value),
     max_legs_per_day: _numOrNull(panel.querySelector('.lf-max-legs').value),
-    exclude_red_eye: panel.querySelector('.lf-no-redeye').checked,
+    red_eye: panel.querySelector('.lf-redeye').value,
     layover_include: _stationList(panel.querySelector('.lf-layover-include').value),
     include_stations: _stationList(panel.querySelector('.lf-include').value),
     avoid_stations: _stationList(panel.querySelector('.lf-avoid').value),
@@ -5567,7 +5646,7 @@ function _queueLayerPreview(panel, getScope){
       min_days: props.min_days ?? '', max_days: props.max_days ?? '',
       min_block: props.min_block ?? '', min_tafb: props.min_tafb ?? '',
       max_legs_per_day: props.max_legs_per_day ?? '',
-      exclude_red_eye: props.exclude_red_eye ? '1' : '0',
+      red_eye: props.red_eye,
       layover_include: props.layover_include.join(','),
       include_stations: props.include_stations.join(','),
       avoid_stations: props.avoid_stations.join(','),
@@ -5619,11 +5698,18 @@ async function layerDeleteLayer(id){
     layerShowList();
   } catch(e) { showToast('Request failed: ' + e); }
 }
-async function layerShowPairings(layer){
+const _LAYER_SORT_OPTIONS = [
+  ['', 'Default'], ['-block', 'Block (high→low)'], ['block', 'Block (low→high)'],
+  ['-tafb', 'TAFB (high→low)'], ['tafb', 'TAFB (low→high)'],
+  ['-days', 'Days (high→low)'], ['days', 'Days (low→high)'],
+  ['seq', 'SEQ'],
+];
+async function layerShowPairings(layer, sort){
+  sort = sort || '';
   const body = document.getElementById('layers-body');
   body.innerHTML = '<p class="placeholder-note">Loading…</p>';
   try {
-    const r = await fetch('/pbs/layers/' + layer.id + '/pairings');
+    const r = await fetch('/pbs/layers/' + layer.id + '/pairings' + (sort ? ('?sort=' + encodeURIComponent(sort)) : ''));
     const data = await r.json();
     if(!r.ok){ body.innerHTML = '<p class="placeholder-note">' + (data.error || 'Failed to load') + '</p>'; return; }
     body.innerHTML = '';
@@ -5633,19 +5719,33 @@ async function layerShowPairings(layer){
     editBtn.textContent = 'Edit';
     editBtn.onclick = (e) => { e.stopPropagation(); layerShowForm(layer); };
     const {pane, list} = libraryPane(layer.name + ' (' + data.pairings.length + ')', layerShowList, editBtn);
-    if(!data.pairings.length){
+    if(data.pairings.length){
+      const sortWrap = document.createElement('div');
+      sortWrap.style.cssText = 'padding:10px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;';
+      const sortLabel = document.createElement('span');
+      sortLabel.textContent = 'Sort'; sortLabel.style.cssText = 'font-size:12.5px;color:var(--label);';
+      const sortSel = document.createElement('select');
+      sortSel.style.cssText = 'flex:1;';
+      sortSel.innerHTML = _LAYER_SORT_OPTIONS.map(([v, label]) => '<option value="' + v + '"' + (v === sort ? ' selected' : '') + '>' + label + '</option>').join('');
+      sortSel.onchange = () => layerShowPairings(layer, sortSel.value);
+      sortWrap.appendChild(sortLabel); sortWrap.appendChild(sortSel);
+      list.parentNode.insertBefore(sortWrap, list);
+    } else {
       list.innerHTML = '<p class="placeholder-note" style="padding:14px;">Nothing in this pack matches this layer’s filters.</p>';
     }
-    data.pairings.forEach(s => list.appendChild(sequenceListRow(s, () => layerShowSequenceDetail(layer, s.seq))));
+    data.pairings.forEach(s => list.appendChild(sequenceListRow(s, () => layerShowSequenceDetail(layer, s))));
     body.appendChild(pane);
   } catch(e) { body.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>'; }
 }
 // Structurally parallel to libraryShowSequenceDetail — same detail route,
 // same Fly/Save buttons, same duty-day cards — just targeting layers-body
 // and backing out to this layer's own matches list instead of the
-// Library's own Sequences list.
-async function layerShowSequenceDetail(layer, seqNumber){
-  const {opr, base, fleet} = layer;
+// Library's own Sequences list. Takes the matched pairing's OWN opr/base/
+// fleet (not the layer's) — a layer scoped to (ALL) spans several packs,
+// so each match carries its real pack identity, tagged server-side.
+async function layerShowSequenceDetail(layer, match){
+  const {opr, base, fleet} = match;
+  const seqNumber = match.seq;
   const body = document.getElementById('layers-body');
   body.innerHTML = '<p class="placeholder-note">Loading…</p>';
   try {
