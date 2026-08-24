@@ -849,14 +849,24 @@ def _layover_indices(s):
 def _summarize_sequence(s):
     """The compact {seq, days, routing, ...} shape both /pbs/sequences and
     the pack-browsing routes list sequences with."""
-    first_day = s["duty_days"][0]
-    last_day = s["duty_days"][-1]
+    duty_days = s["duty_days"]
+    first_day = duty_days[0]
+    last_day = duty_days[-1]
     first_leg = first_day["legs"][0] if first_day["legs"] else None
     last_leg = last_day["legs"][-1] if last_day["legs"] else None
+    try:
+        _block_f = float(s.get("block") or 0)
+    except (TypeError, ValueError):
+        _block_f = 0.0
+    num_days = len(duty_days)
     return {
-        "seq": s["seq"], "days": len(s["duty_days"]),
+        "seq": s["seq"], "days": num_days,
         "positions": s["positions"], "ops_per_period": s["ops_per_period"],
         "report": first_day["report"],
+        # Last day's release, alongside first day's report above — lets the
+        # pairing list show "on duty from X to Y" without opening the detail
+        # view for every candidate.
+        "release": last_day["release"],
         "origin": first_leg["origin"] if first_leg else None,
         "final_destination": last_leg["destination"] if last_leg else None,
         "routing": _sequence_routing(s),
@@ -864,6 +874,9 @@ def _summarize_sequence(s):
         # Pairing totals from the bid-pack's own TTL row — cumulative for
         # the whole trip, distinct from any one day's own block/tpay/tafb.
         "block": s.get("block"), "tpay": s.get("tpay"), "tafb": s.get("tafb"),
+        # Block hours per day worked — the same "value density" metric
+        # pairing_edit.py's recovery-candidate ranking already uses.
+        "dacv": round(_block_f / num_days, 3) if num_days else 0.0,
     }
 
 
@@ -1099,7 +1112,7 @@ def delete_bid_layer(layer_id):
     return jsonify({"ok": True})
 
 
-_SORT_KEYS = {"seq", "days", "block", "tafb", "tpay"}
+_SORT_KEYS = {"seq", "days", "block", "tafb", "tpay", "report", "release", "dacv"}
 
 
 def _sort_summaries(summaries, sort):
@@ -1372,7 +1385,8 @@ def list_pack_sequences(opr, base, fleet):
     row = _pack_row(opr, base, fleet)
     if not row:
         return jsonify({"error": "pack not found"}), 404
-    return jsonify([_summarize_sequence(s) for s in (row.sequences or [])])
+    summaries = [_summarize_sequence(s) for s in (row.sequences or [])]
+    return jsonify(_sort_summaries(summaries, request.args.get("sort")))
 
 
 @app.route("/pbs/packs/<opr>/<base>/<fleet>/sequences/<seq_number>")
@@ -5352,6 +5366,14 @@ function sequenceListRow(s, onClick){
   desc.innerHTML = libraryRoutingHtml(s.routing, s.layover_indices);
   left.appendChild(code); left.appendChild(desc);
   const stats = document.createElement('div'); stats.className = 'lib-stats';
+  // Raw HHMM, no colon inserted — matches the RPT/RLS convention already
+  // used on the duty-day cards themselves (e.g. "RPT 1705").
+  const timeBits = [s.report ? ('RPT ' + s.report) : '', s.release ? ('RLS ' + s.release) : ''].filter(Boolean);
+  if(timeBits.length){
+    const timeLine = document.createElement('div');
+    timeLine.textContent = timeBits.join(' · ');
+    stats.appendChild(timeLine);
+  }
   const payBits = [s.tafb ? ('TAFB ' + s.tafb) : '', s.tpay ? ('TPAY ' + s.tpay) : ''].filter(Boolean);
   if(payBits.length){
     const payLine = document.createElement('div');
@@ -5365,18 +5387,20 @@ function sequenceListRow(s, onClick){
   row.onclick = onClick;
   return row;
 }
-async function libraryShowSequences(){
+async function libraryShowSequences(sort){
+  sort = sort || '';
   const {opr, base, fleet} = _libraryPath;
   const body = document.getElementById('library-body');
   body.innerHTML = '<p class="placeholder-note">Loading…</p>';
   try {
-    const r = await fetch('/pbs/packs/' + opr + '/' + base + '/' + fleet + '/sequences');
+    const r = await fetch('/pbs/packs/' + opr + '/' + base + '/' + fleet + '/sequences' + (sort ? ('?sort=' + encodeURIComponent(sort)) : ''));
     const seqs = await r.json();
     if(!r.ok){ body.innerHTML = '<p class="placeholder-note">' + (seqs.error || 'Failed to load') + '</p>'; return; }
     body.innerHTML = '';
     body.appendChild(libraryCrumb());
     if(!seqs.length){ body.innerHTML += '<p class="placeholder-note">No sequences in this pack.</p>'; return; }
     const {pane, list} = libraryPane('Sequences', libraryShowFleets);
+    list.parentNode.insertBefore(_pairingSortControl(sort, (v) => libraryShowSequences(v)), list);
     seqs.forEach(s => list.appendChild(sequenceListRow(s, () => libraryShowSequenceDetail(s.seq))));
     body.appendChild(pane);
   } catch(e) { body.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>'; }
@@ -5698,12 +5722,35 @@ async function layerDeleteLayer(id){
     layerShowList();
   } catch(e) { showToast('Request failed: ' + e); }
 }
-const _LAYER_SORT_OPTIONS = [
-  ['', 'Default'], ['-block', 'Block (high→low)'], ['block', 'Block (low→high)'],
+// Shared by the Bid Layers pairings list and the Pairing Library's own
+// Sequences list — same options, same look, same query-param contract
+// against _sort_summaries() in server.py.
+const _PAIRING_SORT_OPTIONS = [
+  ['', 'Default'],
+  ['-block', 'Block (high→low)'], ['block', 'Block (low→high)'],
   ['-tafb', 'TAFB (high→low)'], ['tafb', 'TAFB (low→high)'],
   ['-days', 'Days (high→low)'], ['days', 'Days (low→high)'],
+  ['report', 'Report Time (earliest)'], ['-report', 'Report Time (latest)'],
+  ['release', 'Release Time (earliest)'], ['-release', 'Release Time (latest)'],
+  ['-dacv', 'DACV — Block/Day (high→low)'], ['dacv', 'DACV — Block/Day (low→high)'],
   ['seq', 'SEQ'],
 ];
+// Styled to match .panel select (server.py's global form-select rule)
+// rather than a bare unstyled <select>, which read as a stray native
+// control that didn't match the rest of the app's UI.
+function _pairingSortControl(sort, onChange){
+  const wrap = document.createElement('div');
+  wrap.style.cssText = 'padding:10px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;';
+  const label = document.createElement('span');
+  label.textContent = 'Sort';
+  label.style.cssText = 'font-size:12.5px;color:var(--label);font-weight:600;flex-shrink:0;';
+  const sel = document.createElement('select');
+  sel.style.cssText = 'flex:1;font-family:inherit;font-size:13.5px;padding:9px 10px;border:1px solid var(--border);border-radius:5px;box-sizing:border-box;background:var(--card);color:var(--value);';
+  sel.innerHTML = _PAIRING_SORT_OPTIONS.map(([v, lbl]) => '<option value="' + v + '"' + (v === (sort || '') ? ' selected' : '') + '>' + lbl + '</option>').join('');
+  sel.onchange = () => onChange(sel.value);
+  wrap.appendChild(label); wrap.appendChild(sel);
+  return wrap;
+}
 async function layerShowPairings(layer, sort){
   sort = sort || '';
   const body = document.getElementById('layers-body');
@@ -5720,16 +5767,7 @@ async function layerShowPairings(layer, sort){
     editBtn.onclick = (e) => { e.stopPropagation(); layerShowForm(layer); };
     const {pane, list} = libraryPane(layer.name + ' (' + data.pairings.length + ')', layerShowList, editBtn);
     if(data.pairings.length){
-      const sortWrap = document.createElement('div');
-      sortWrap.style.cssText = 'padding:10px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;';
-      const sortLabel = document.createElement('span');
-      sortLabel.textContent = 'Sort'; sortLabel.style.cssText = 'font-size:12.5px;color:var(--label);';
-      const sortSel = document.createElement('select');
-      sortSel.style.cssText = 'flex:1;';
-      sortSel.innerHTML = _LAYER_SORT_OPTIONS.map(([v, label]) => '<option value="' + v + '"' + (v === sort ? ' selected' : '') + '>' + label + '</option>').join('');
-      sortSel.onchange = () => layerShowPairings(layer, sortSel.value);
-      sortWrap.appendChild(sortLabel); sortWrap.appendChild(sortSel);
-      list.parentNode.insertBefore(sortWrap, list);
+      list.parentNode.insertBefore(_pairingSortControl(sort, (v) => layerShowPairings(layer, v)), list);
     } else {
       list.innerHTML = '<p class="placeholder-note" style="padding:14px;">Nothing in this pack matches this layer’s filters.</p>';
     }
