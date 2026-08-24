@@ -490,6 +490,12 @@ DEFAULT_LEG = {
     "tz_diff": "", "hotel_details": "", "limo_details": "",
     "signed_in": False, "fit_for_duty": False,
     "signature": "", "signed_at": "",
+    # Per-attestation signing details — FFD and eFlight Plan used to share
+    # this same signature/signed_at pair, so signing either one silently
+    # marked BOTH as "signed" and overwrote whichever had signed first.
+    # Split so each has its own record of who signed it and when.
+    "ffd_signature": "", "ffd_signed_at": "", "ffd_signed_by": "",
+    "eflightplan_signature": "", "eflightplan_signed_at": "", "eflightplan_signed_by": "",
     "block_fuel": "", "takeoff_fuel": "", "landing_fuel": "", "trip_fuel": "",
     "taxi_fuel": "", "reserve_fuel": "", "alternate_fuel": "", "contingency_fuel": "", "extra_fuel": "",
 }
@@ -1280,7 +1286,8 @@ def sequence_mot_log(seq_number):
                 "mot_display": _mot_display(mot or "", leg.get("origin") or "", current_user.timezone),
                 "fdp_remaining": fdp_remaining,
                 "generated": row is not None,
-                "signed_at": (row.data.get("signed_at") if row else "") or "",
+                "signed_at": (row.data.get("ffd_signed_at") if row else "") or "",
+                "signed_by": (row.data.get("ffd_signed_by") if row else "") or "",
                 "fit_for_duty": bool(row.data.get("fit_for_duty")) if row else False,
             })
     return jsonify({"seq": seq_number, "legs": legs_out})
@@ -2130,12 +2137,23 @@ def sign_leg(leg_id):
     if not signature or not signature.startswith("data:image/"):
         return jsonify({"error": "no signature image given"}), 400
 
+    # FFD and eFlight Plan each get their own signature/signed_at/signed_by
+    # trio — they used to share one signature/signed_at pair, so signing
+    # either one silently marked BOTH "signed" and clobbered whichever had
+    # signed first with the other's time.
+    kind = "ffd" if body.get("kind") == "ffd" else "eflightplan"
     signed_at = datetime.now(timezone.utc).isoformat()
-    new_data = {**row.data, "signature": signature, "signed_at": signed_at}
+    signed_by = current_user.username
+    new_data = {
+        **row.data,
+        f"{kind}_signature": signature,
+        f"{kind}_signed_at": signed_at,
+        f"{kind}_signed_by": signed_by,
+    }
     # Fit for Duty is a real attestation, not a bare checkbox — signing it
     # here sets the flag directly (not toggle_ffd's flip) so re-signing
     # can never accidentally turn an already-true declaration back off.
-    if body.get("kind") == "ffd":
+    if kind == "ffd":
         new_data["fit_for_duty"] = True
     data = _save_leg(row, new_data)
 
@@ -2145,9 +2163,9 @@ def sign_leg(leg_id):
         signed_at=signed_at,
     ))
     db.session.commit()
-    LOG.info(f"SIGNATURE leg={leg_id} flight={data.get('flight_number')} at={signed_at}")
+    LOG.info(f"SIGNATURE leg={leg_id} kind={kind} by={signed_by} at={signed_at}")
 
-    return jsonify({"signed_at": signed_at})
+    return jsonify({"signed_at": signed_at, "signed_by": signed_by, "kind": kind})
 
 
 @app.route("/signatures")
@@ -2543,6 +2561,42 @@ def _timezone_options_html(selected):
     return ''.join(opts)
 
 
+def _hhmmz(iso_str):
+    """'HH:MMZ' from a stored *_signed_at ISO8601 UTC timestamp."""
+    if not iso_str:
+        return ""
+    try:
+        dt = datetime.fromisoformat(iso_str)
+    except ValueError:
+        return ""
+    return dt.strftime("%H:%M") + "Z"
+
+
+def _sign_row_html(ctx, kind, elem_id, unsigned_desc, signed):
+    """Renders one FFD/EFLIGHT PLAN doc-row's desc + primary action —
+    "Signed by <user> at HH:MMZ" plus a Re-sign link once signed, instead
+    of just leaving a checkmark as the only trace of who actually signed
+    and when. Falls back to a plain "Signed" (no by-line) for legs signed
+    before this per-kind signed_by/signed_at existed."""
+    signed_at = ctx.get(f"{kind}_signed_at")
+    signed_by = ctx.get(f"{kind}_signed_by")
+    check_svg = (
+        f'<svg id="{elem_id}" class="check{" signed" if signed else ""}" viewBox="0 0 24 24" '
+        f'fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" '
+        f'onclick="openSignPad(\'{kind}\')"><path d="M20 6L9 17l-5-5"/></svg>'
+    )
+    if not signed:
+        return html.escape(unsigned_desc), check_svg
+    if signed_by and signed_at:
+        desc_html = f'Signed by <b>{html.escape(signed_by)}</b> at <b>{_hhmmz(signed_at)}</b>'
+    elif signed_at:
+        desc_html = f'Signed at <b>{_hhmmz(signed_at)}</b>'
+    else:
+        desc_html = 'Signed'
+    action_html = check_svg + '<a href="#" class="resign-link" onclick="openSignPad(\'' + kind + '\');return false;">Re-sign</a>'
+    return desc_html, action_html
+
+
 def _mot_display(mot_raw, origin, pilot_tz):
     """MOT as HH:MM (L), shifted into the pilot's saved timezone when one's
     set. mot_raw is wall-clock local to `origin` (no real date exists in
@@ -2688,7 +2742,7 @@ def render_fos_html(leg):
     # not data either source has. Derive one locally from what this app
     # actually tracks rather than leaving it permanently blank.
     if not ctx.get("status"):
-        if ctx.get("signature"):
+        if ctx.get("eflightplan_signed_at"):
             ctx["status"] = "Released & Signed"
         elif ctx.get("signed_in") and ctx.get("fit_for_duty"):
             ctx["status"] = "Ready for Departure"
@@ -2698,14 +2752,15 @@ def render_fos_html(leg):
             ctx["status"] = "Scheduled"
     ctx["signed_in_class"] = "" if ctx.get("signed_in") else "inactive"
     ctx["ffd_class"] = "" if ctx.get("fit_for_duty") else "inactive"
-    # Same fit_for_duty value, different CSS convention: the Overview badge
-    # (ffd_class above) defaults to green and needs "inactive" to grey out;
-    # the Documents row's check mark (.doc-row .check) is the opposite —
-    # defaults grey, needs "signed" to go green, matching the sign-pad
-    # check's own convention right below. Reusing ffd_class on that
-    # checkmark meant it could only ever render grey, signed or not.
-    ctx["ffd_check_class"] = "signed" if ctx.get("fit_for_duty") else ""
-    ctx["signed_class"] = "signed" if ctx.get("signature") else ""
+    # FFD and eFlight Plan each get their own doc-row desc/action markup —
+    # a plain checkmark was the only trace that either had been signed at
+    # all, with no record of who or when visible anywhere on the row. Once
+    # signed, the row shows "Signed by <user> at HH:MMZ" plus an explicit
+    # Re-sign action instead of just relying on the check going green.
+    ctx["ffd_desc_html"], ctx["ffd_action_html"] = _sign_row_html(
+        ctx, "ffd", "ffd-doc-check", "Fit for Duty Declaration", bool(ctx.get("fit_for_duty")))
+    ctx["eflightplan_desc_html"], ctx["eflightplan_action_html"] = _sign_row_html(
+        ctx, "eflightplan", "sign-check", "eFlight Plan", bool(ctx.get("eflightplan_signed_at")))
     # Raw user-typed account settings, not OFP/PBS data — escaped before
     # landing in an HTML attribute since, unlike the rest of ctx, a pilot
     # can type anything here.
@@ -2714,7 +2769,8 @@ def render_fos_html(leg):
     ctx["app_version"] = APP_VERSION
     ctx["mot_display"] = _mot_display(ctx.get("mot") or "", ctx.get("origin") or "", current_user.timezone)
     ctx["timezone_options"] = _timezone_options_html(current_user.timezone)
-    str_ctx = {k: ("" if v is None else str(v)) for k, v in ctx.items() if k != "signature"}
+    _SIG_IMAGE_KEYS = {"signature", "ffd_signature", "eflightplan_signature"}
+    str_ctx = {k: ("" if v is None else str(v)) for k, v in ctx.items() if k not in _SIG_IMAGE_KEYS}
     return Template(FOS_TEMPLATE).safe_substitute(**str_ctx)
 
 
@@ -3390,6 +3446,8 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .doc-row .check{color:var(--inactive,#9aa1ab);cursor:pointer;}
   .ffd-banner{background:var(--red);color:#fff;font-size:13px;font-weight:600;line-height:1.4;padding:11px 17px;}
   .doc-row .check.signed{color:var(--blue-dark);}
+  .doc-row .resign-link{font-size:12.5px;font-weight:600;color:var(--blue);cursor:pointer;text-decoration:none;white-space:nowrap;}
+  .doc-row .primary-action{display:inline-flex;align-items:center;gap:10px;}
   .doc-row .actions svg.bookmark-icon.bookmarked{color:var(--blue);fill:var(--blue);}
   .doc-row .actions svg.ext-link{color:var(--blue);}
   .lib-crumb{padding:0 14px 10px;font-size:12.5px;color:var(--label);display:flex;flex-wrap:wrap;gap:4px;align-items:center;}
@@ -3658,16 +3716,16 @@ FOS_TEMPLATE = """<!DOCTYPE html>
       <div class="panel-card">
         <div class="ffd-banner" style="$ffd_banner_style">Fit for Duty not signed \u2014 sign below to unlock release and document downloads.</div>
         <div class="doc-row">
-          <div><div class="code">FFD</div><div class="desc">Fit for Duty Declaration</div></div>
+          <div><div class="code">FFD</div><div class="desc" id="ffd-desc">$ffd_desc_html</div></div>
           <div class="actions">
-            <svg id="ffd-doc-check" class="check $ffd_check_class" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" onclick="openSignPad('ffd')"><path d="M20 6L9 17l-5-5"/></svg>
+            <span id="ffd-primary-action" class="primary-action">$ffd_action_html</span>
             <svg class="bookmark-icon" data-doc="FFD" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="toggleBookmark('FFD', this)"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>
           </div>
         </div>
         <div class="doc-row">
-          <div><div class="code">EFLIGHT PLAN</div><div class="desc">eFlight Plan</div></div>
+          <div><div class="code">EFLIGHT PLAN</div><div class="desc" id="eflightplan-desc">$eflightplan_desc_html</div></div>
           <div class="actions">
-            <svg id="sign-check" class="check $signed_class" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" onclick="openSignPad('eflightplan')"><path d="M20 6L9 17l-5-5"/></svg>
+            <span id="eflightplan-primary-action" class="primary-action">$eflightplan_action_html</span>
             <svg class="bookmark-icon" data-doc="EFLIGHT PLAN" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="toggleBookmark('EFLIGHT PLAN', this)"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('rls','eFlight Plan')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg>
           </div>
@@ -4660,7 +4718,9 @@ async function showMotLog(){
       row.className = 'doc-row';
       row.style.cssText = 'display:block;';
       const signedText = leg.generated
-        ? (leg.fit_for_duty ? ('FFD signed ' + new Date(leg.signed_at).toLocaleString()) : 'Generated — FFD not signed')
+        ? (leg.fit_for_duty
+            ? ('FFD signed' + (leg.signed_by ? (' by ' + leg.signed_by) : '') + (leg.signed_at ? (' at ' + new Date(leg.signed_at).toLocaleString()) : ''))
+            : 'Generated — FFD not signed')
         : 'Not generated yet';
       row.innerHTML =
         '<div style="display:flex;justify-content:space-between;align-items:baseline;">' +
@@ -4684,6 +4744,29 @@ const _SIGN_KIND_COPY = {
   ffd: {title: 'Sign Fit for Duty Declaration', line: 'Attests you are fit for duty on this flight'},
   eflightplan: {title: 'Sign eFlight Plan', line: 'Acknowledges receipt of the current release'},
 };
+// Same "Signed by <user> at HH:MMZ" + Re-sign markup _sign_row_html()
+// renders server-side — kept in sync so a fresh sign updates the row
+// in place (no reload needed) with exactly what a reload would show.
+const _SIGN_ROW_IDS = {ffd: 'ffd-doc-check', eflightplan: 'sign-check'};
+function _applySignedRow(kind, signedBy, signedAtIso){
+  const desc = document.getElementById(kind + '-desc');
+  const action = document.getElementById(kind + '-primary-action');
+  if(!desc || !action) return;
+  const d = new Date(signedAtIso);
+  const hhmm = String(d.getUTCHours()).padStart(2, '0') + ':' + String(d.getUTCMinutes()).padStart(2, '0');
+  desc.innerHTML = signedBy
+    ? ('Signed by <b>' + signedBy.replace(/</g, '&lt;') + '</b> at <b>' + hhmm + '</b>Z')
+    : ('Signed at <b>' + hhmm + '</b>Z');
+  const elemId = _SIGN_ROW_IDS[kind] || (kind + '-doc-check');
+  // Template literal deliberately, not quote-concatenation — this file's
+  // standing rule (a bare \' inside a Python triple-quoted string silently
+  // collapses to a literal ', breaking a JS string boundary) makes nested
+  // single/double quoting in these onclick attributes an easy way to
+  // corrupt this exact script block.
+  action.innerHTML =
+    `<svg id="${elemId}" class="check signed" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" onclick="openSignPad('${kind}')"><path d="M20 6L9 17l-5-5"/></svg>` +
+    `<a href="#" class="resign-link" onclick="openSignPad('${kind}');return false;">Re-sign</a>`;
+}
 function openSignPad(kind){
   _signKind = kind || 'eflightplan';
   const copy = _SIGN_KIND_COPY[_signKind] || _SIGN_KIND_COPY.eflightplan;
@@ -4748,9 +4831,7 @@ async function submitSignature(){
     const data = await r.json();
     btn.disabled = false;
     if(!r.ok){ el.textContent = data.error || 'Sign failed'; el.style.color = '#c0392b'; return; }
-    const checkId = _signKind === 'ffd' ? 'ffd-doc-check' : 'sign-check';
-    const check = document.getElementById(checkId);
-    if(check) check.classList.add('signed');
+    _applySignedRow(_signKind, data.signed_by, data.signed_at);
     if(_signKind === 'ffd'){
       // The signature itself always persists server-side (sign_leg sets
       // fit_for_duty=True unconditionally) — the "signature doesn't save,
