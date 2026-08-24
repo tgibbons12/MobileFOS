@@ -105,6 +105,34 @@ def _parse_leg_line(line):
     }
 
 
+def sequence_calendar_days(s):
+    """Real calendar-day span of the trip, including any fully "dead" day
+    with no duty at all. A duty_days entry only exists where there's an
+    RPT line, so a layover long enough to swallow a whole calendar day
+    (24+ hours — the crew simply has a reserve day at the layover
+    station with nothing scheduled) leaves no trace in duty_days itself:
+    len(duty_days) silently undercounts the trip by one or more days.
+
+    Each leg's own "da" field ("duty_day/calendar_day", e.g. "2/3" — see
+    _parse_leg_line) already carries the true calendar day the airline's
+    own pairing builder assigned that leg to, dead days included, since
+    it jumps (2 -> 3, not 2 -> 2) across one. This is just the max of
+    that second number across every leg in the trip — falls back to
+    len(duty_days) only if no leg has a parseable "da" (shouldn't happen
+    with real data, but a duty day with zero legs is technically
+    possible if a day's legs failed to parse)."""
+    max_day = 0
+    for day in s["duty_days"]:
+        for leg in day["legs"]:
+            da = leg.get("da") or ""
+            if "/" in da:
+                try:
+                    max_day = max(max_day, int(da.split("/")[1]))
+                except ValueError:
+                    pass
+    return max_day or len(s["duty_days"])
+
+
 def parse_pbs(text):
     """Returns a list of sequence dicts:
     {seq, ops_per_period, positions, tafb, tpay, block, duty_days: [

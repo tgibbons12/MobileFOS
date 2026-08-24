@@ -858,7 +858,10 @@ def _summarize_sequence(s):
         _block_f = float(s.get("block") or 0)
     except (TypeError, ValueError):
         _block_f = 0.0
-    num_days = len(duty_days)
+    # Real calendar-day span, NOT len(duty_days) — a 24+ hour layover can
+    # swallow a whole "dead" day with no duty at all, which never gets its
+    # own duty_days entry to count. See pbs_parser.sequence_calendar_days.
+    num_days = pbs_parser.sequence_calendar_days(s)
     return {
         "seq": s["seq"], "days": num_days,
         "positions": s["positions"], "ops_per_period": s["ops_per_period"],
@@ -886,6 +889,10 @@ def _decorate_sequence(seq, operator_iata):
     out = dict(seq)
     out["operator"] = _IATA_TO_ICAO.get(operator_iata, operator_iata)
     out["operator_iata"] = operator_iata
+    # Real calendar-day span — see _summarize_sequence's own "days" field
+    # and pbs_parser.sequence_calendar_days for why this isn't just
+    # len(duty_days) (a 24+ hour layover can hide a whole dead day).
+    out["days"] = pbs_parser.sequence_calendar_days(seq)
     out["duty_days"] = [
         {**day, "legs": [
             {
@@ -4981,8 +4988,9 @@ function renderPairing(seqData){
   const summary = document.createElement('div');
   summary.className = 'flight-summary';
   summary.style.flexWrap = 'wrap';
+  const tripDays = seqData.days || dutyDays.length;
   const summaryBits = [
-    dutyDays.length + ' day' + (dutyDays.length === 1 ? '' : 's'),
+    tripDays + ' day' + (tripDays === 1 ? '' : 's'),
     totalLegs + ' leg' + (totalLegs === 1 ? '' : 's'),
     (seqData.positions || []).join('/'),
   ];
