@@ -1035,6 +1035,104 @@ def _layer_matches(seq, summary, properties):
     return True
 
 
+# One bid layer = an ORDERED STACK of individual criteria, matching how a
+# real PBS bid is built: each numbered layer states exactly one thing
+# ("Layer 1: 1 day", "Layer 2: min block 7 hours", "Layer 3: include STT",
+# "Layer 4: release before 2240"), rather than one flat form holding every
+# filter at once. A sequence must satisfy every layer to match; the layer
+# NUMBERING is what makes the stack readable and gives _layer_funnel()
+# somewhere meaningful to report "your bid got too narrow at Layer 3".
+#
+# Numeric fields carry an op (min/max/exact); the rest are their own field
+# types whose value shape is specific to them (a mode string, or a station
+# list). Legacy `properties`-dict layers keep working untouched — see
+# _layer_matches_any below for how the two coexist.
+_CRITERION_VALUE_FOR = {
+    "days": lambda seq, summary: summary["days"],
+    "block": lambda seq, summary: _num_or_none(summary.get("block")) or 0.0,
+    "tafb": lambda seq, summary: _num_or_none(summary.get("tafb")) or 0.0,
+    "tpay": lambda seq, summary: _num_or_none(summary.get("tpay")) or 0.0,
+    "report": lambda seq, summary: _hhmm_int(summary.get("report")),
+    "release": lambda seq, summary: _hhmm_int(summary.get("release")),
+    "legs_per_day": lambda seq, summary: _seq_max_legs_per_day(seq),
+}
+_STATION_CRITERIA = {"layover_include", "include_stations", "avoid_stations"}
+
+
+def _criterion_matches(seq, summary, criterion):
+    """One layer's single criterion against one sequence. Unknown fields and
+    blank/unparseable values pass rather than fail — an incomplete layer the
+    pilot is still building shouldn't silently zero out their whole list."""
+    c = criterion or {}
+    field = c.get("field")
+    value = c.get("value")
+
+    if field == "red_eye":
+        mode = value or "any"
+        if mode == "any":
+            return True
+        has_red_eye = _seq_has_red_eye(seq)
+        return has_red_eye if mode == "only" else not has_red_eye
+
+    if field in _STATION_CRITERIA:
+        wanted = {s.strip().upper() for s in (value or []) if s and s.strip()}
+        if not wanted:
+            return True
+        if field == "layover_include":
+            # Strict overnight-only sense, vs include/avoid's route-wide
+            # "touches this stop at all" — same two axes the flat form had.
+            layovers = {summary["routing"][i] for i in summary["layover_indices"]}
+            return bool(layovers & wanted)
+        route = set(summary["routing"])
+        return bool(route & wanted) if field == "include_stations" else not (route & wanted)
+
+    getter = _CRITERION_VALUE_FOR.get(field)
+    if getter is None:
+        return True
+    threshold = _num_or_none(value)
+    if threshold is None:
+        return True
+    actual = getter(seq, summary)
+    if actual is None:
+        return False
+    op = c.get("op") or "min"
+    if op == "max":
+        return actual <= threshold
+    if op == "exact":
+        return actual == threshold
+    return actual >= threshold
+
+
+def _criteria_matches(seq, summary, criteria):
+    return all(_criterion_matches(seq, summary, c) for c in (criteria or []))
+
+
+def _layer_matches_any(seq, summary, layer_or_props):
+    """Dispatch for either layer shape. A layer with a `criteria` list uses
+    the ordered stack; anything else falls back to the legacy flat
+    `properties` dict, so layers saved before this change keep matching
+    exactly as they did with no migration step."""
+    if isinstance(layer_or_props, dict) and layer_or_props.get("criteria") is not None:
+        return _criteria_matches(seq, summary, layer_or_props.get("criteria"))
+    props = (layer_or_props or {}).get("properties", layer_or_props) if isinstance(layer_or_props, dict) else layer_or_props
+    return _layer_matches(seq, summary, props)
+
+
+def _layer_funnel(sequences_by_pack, criteria):
+    """Per-layer match counts down the stack: how many survive Layer 1, then
+    Layers 1-2, then 1-3... The whole point of numbering the layers — it
+    shows exactly which layer took the bid from "plenty" to "nothing", which
+    a single final count never can."""
+    counts = []
+    for depth in range(1, len(criteria or []) + 1):
+        prefix = criteria[:depth]
+        counts.append(sum(
+            1 for seq, summary in sequences_by_pack
+            if _criteria_matches(seq, summary, prefix)
+        ))
+    return counts
+
+
 def _bid_layer(layer_id):
     return next((l for l in (current_user.bid_layers or []) if l["id"] == layer_id), None)
 
@@ -1058,59 +1156,51 @@ def _packs_for_scope(opr, base, fleet):
     return q.all()
 
 
-def _count_layer_matches(opr, base, fleet, properties):
-    """Shared by the layer list (persisted layers) and the live preview
-    (a not-yet-saved property set) — one pass over every pack the scope
-    resolves to (one pack in the common case, more when any of
-    opr/base/fleet is ALL_SCOPE)."""
+def _scope_sequences(opr, base, fleet):
+    """Every (sequence, summary) pair in scope, or None when the scope
+    resolves to no packs at all. Summaries are built once here so a funnel
+    pass (which re-tests the same sequences at every depth) never re-runs
+    _summarize_sequence per layer."""
     packs = _packs_for_scope(opr, base, fleet)
     if not packs:
         return None
-    count = 0
-    for pack in packs:
-        for s in (pack.sequences or []):
-            summary = _summarize_sequence(s)
-            if _layer_matches(s, summary, properties):
-                count += 1
-    return count
+    return [(s, _summarize_sequence(s)) for pack in packs for s in (pack.sequences or [])]
 
 
-@app.route("/pbs/layers/preview")
+def _count_layer_matches(opr, base, fleet, layer_or_props):
+    """Shared by the layer list (persisted layers) and the live preview (a
+    not-yet-saved layer) — one pass over every pack the scope resolves to
+    (one pack in the common case, more when any of opr/base/fleet is
+    ALL_SCOPE)."""
+    scoped = _scope_sequences(opr, base, fleet)
+    if scoped is None:
+        return None
+    return sum(1 for seq, summary in scoped if _layer_matches_any(seq, summary, layer_or_props))
+
+
+@app.route("/pbs/layers/preview", methods=["POST"])
 def preview_bid_layer():
-    """Live count for the form, before a layer is saved — GET with query
-    params so the frontend can debounce plain fetches, no JSON body typing
-    needed for a handful of scalar/csv fields."""
-    opr = (request.args.get("opr") or "").strip().upper()
-    base = (request.args.get("base") or "").strip().upper()
-    fleet = (request.args.get("fleet") or "").strip().upper()
+    """Live count for the form, before a layer is saved. POST (not GET with
+    query params like the old flat-properties version) because a layer is
+    now an ordered list of criterion objects — a shape that doesn't survive
+    a query string cleanly. Returns the per-layer funnel alongside the final
+    count so the form can show exactly where the stack narrows to nothing."""
+    body = request.get_json(silent=True) or {}
+    opr = (body.get("opr") or "").strip().upper()
+    base = (body.get("base") or "").strip().upper()
+    fleet = (body.get("fleet") or "").strip().upper()
     if not opr or not base or not fleet:
         return jsonify({"error": "opr, base, and fleet are all required"}), 400
-
-    def _num(key):
-        v = request.args.get(key)
-        return float(v) if v not in (None, "") else None
-
-    def _stations(key):
-        v = request.args.get(key) or ""
-        return [s.strip().upper() for s in v.split(",") if s.strip()]
-
-    properties = {
-        "min_days": _num("min_days"), "max_days": _num("max_days"),
-        "min_block": _num("min_block"), "max_block": _num("max_block"),
-        "min_tafb": _num("min_tafb"), "max_tafb": _num("max_tafb"),
-        "min_tpay": _num("min_tpay"), "max_tpay": _num("max_tpay"),
-        "max_legs_per_day": _num("max_legs_per_day"),
-        "min_report": _num("min_report"), "max_report": _num("max_report"),
-        "min_release": _num("min_release"), "max_release": _num("max_release"),
-        "red_eye": request.args.get("red_eye") or "any",
-        "layover_include": _stations("layover_include"),
-        "include_stations": _stations("include_stations"),
-        "avoid_stations": _stations("avoid_stations"),
-    }
-    count = _count_layer_matches(opr, base, fleet, properties)
-    if count is None:
+    criteria = body.get("criteria") or []
+    scoped = _scope_sequences(opr, base, fleet)
+    if scoped is None:
         return jsonify({"error": "no pack found for that operator/base/fleet"}), 404
-    return jsonify({"count": count})
+    count = sum(1 for seq, summary in scoped if _criteria_matches(seq, summary, criteria))
+    return jsonify({
+        "count": count,
+        "funnel": _layer_funnel(scoped, criteria),
+        "total_in_scope": len(scoped),
+    })
 
 
 @app.route("/pbs/layers")
@@ -1118,7 +1208,7 @@ def list_bid_layers():
     layers = current_user.bid_layers or []
     out = []
     for layer in layers:
-        count = _count_layer_matches(layer["opr"], layer["base"], layer["fleet"], layer.get("properties"))
+        count = _count_layer_matches(layer["opr"], layer["base"], layer["fleet"], layer)
         out.append({**layer, "count": count or 0})
     return jsonify(out)
 
@@ -1137,7 +1227,7 @@ def create_bid_layer():
     layer = {
         "id": uuid.uuid4().hex[:8], "name": name,
         "opr": opr, "base": base, "fleet": fleet,
-        "properties": body.get("properties") or {},
+        "criteria": body.get("criteria") or [],
     }
     layers = list(current_user.bid_layers or [])
     layers.append(layer)
@@ -1167,6 +1257,13 @@ def update_bid_layer(layer_id):
         updated["name"] = (body.get("name") or "").strip() or updated["name"]
     if "properties" in body:
         updated["properties"] = body.get("properties") or {}
+    if "criteria" in body:
+        # Saving a criteria stack retires this layer's legacy flat
+        # properties dict — leaving both would make which one actually
+        # filters depend on _layer_matches_any's precedence rather than on
+        # anything the pilot can see in the form.
+        updated["criteria"] = body.get("criteria") or []
+        updated.pop("properties", None)
     # Saved layers used to lock opr/base/fleet at creation — a real bid
     # sometimes needs a rescoped layer (moved to a different fleet, or
     # widened to ALL) without losing its saved filters/name/position.
@@ -1245,11 +1342,12 @@ def list_bid_layer_pairings(layer_id):
     packs = _packs_for_scope(layer["opr"], layer["base"], layer["fleet"])
     if not packs:
         return jsonify({"error": "no pack found for that operator/base/fleet"}), 404
-    matches = []
+    matches, scoped = [], []
     for pack in packs:
         for s in (pack.sequences or []):
             summary = _summarize_sequence(s)
-            if _layer_matches(s, summary, layer.get("properties")):
+            scoped.append((s, summary))
+            if _layer_matches_any(s, summary, layer):
                 # Tagged per-match rather than trusting the layer's own
                 # opr/base/fleet — those can be ALL_SCOPE, spanning
                 # several packs, so each result needs its own real pack
@@ -1257,7 +1355,14 @@ def list_bid_layer_pairings(layer_id):
                 summary["opr"], summary["base"], summary["fleet"] = pack.opr, pack.base, pack.fleet
                 matches.append(summary)
     matches = _sort_summaries(matches, request.args.get("sort"))
-    return jsonify({"layer": layer, "pairings": matches})
+    return jsonify({
+        "layer": layer,
+        "pairings": matches,
+        # Empty for a legacy properties-only layer, which has no stack to
+        # walk — the frontend only renders a funnel when there is one.
+        "funnel": _layer_funnel(scoped, layer.get("criteria") or []),
+        "total_in_scope": len(scoped),
+    })
 
 
 @app.route("/pbs/sequences")
@@ -3555,8 +3660,22 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .doc-row .desc.lib-routing b{font-weight:700;}
   .lib-stats{text-align:right;font-size:12px;color:var(--label);flex:0 0 auto;line-height:1.45;white-space:nowrap;}
   .layer-reorder{display:flex;flex-direction:column;gap:2px;flex:0 0 auto;margin-right:4px;}
-  .layer-move-btn{margin:0;padding:2px 6px;font-size:10px;line-height:1;background:var(--bg);color:var(--label);border:1px solid var(--border);border-radius:4px;cursor:pointer;}
-  .layer-move-btn:disabled{opacity:.3;cursor:default;}
+  /* .panel button (0,1,1) outranks a bare .layer-move-btn (0,1,0), so the
+     in-panel copy needs the extra qualifier or these render as full-size
+     blue primary buttons inside the layer stack. */
+  .layer-move-btn,.panel .layer-move-btn{margin:0;padding:3px 7px;font-size:10px;line-height:1;background:var(--bg);color:var(--label);border:1px solid var(--border);border-radius:4px;cursor:pointer;font-weight:600;}
+  .layer-move-btn:disabled,.panel .layer-move-btn:disabled{opacity:.3;cursor:default;}
+  /* One criterion layer inside a bid — numbered header with its running
+     match count, then that layer's own field/op/value controls. */
+  .lf-layer-row{border:1px solid var(--border);border-radius:8px;padding:9px 10px;margin-top:8px;background:var(--bg);}
+  .lf-layer-hdr{display:flex;align-items:center;gap:8px;margin-bottom:7px;}
+  .lf-layer-num{font-size:12px;font-weight:700;color:var(--blue);letter-spacing:.02em;}
+  .lf-layer-count{font-size:11.5px;color:var(--label);font-variant-numeric:tabular-nums;}
+  .lf-layer-tools{margin-left:auto;display:flex;gap:3px;}
+  .lf-layer-controls{display:flex;gap:6px;flex-wrap:wrap;}
+  /* width:auto overrides .panel select's own width:100%, which would
+     otherwise force each control onto its own line inside this flex row. */
+  .lf-layer-controls select,.lf-layer-controls input[type=text]{flex:1 1 90px;width:auto;min-width:0;margin:0;}
   .lib-stats .days{color:var(--value);font-weight:600;font-size:12.5px;}
   .lib-total{padding:0 14px 10px;font-size:12.5px;color:var(--label);}
   .fly-row{display:flex;gap:8px;padding:0 14px 12px;}
@@ -5687,12 +5806,13 @@ async function promoteAndFly(opr, base, fleet, seqNumber){
   } catch(e) { showToast('Request failed: ' + e); }
 }
 
-// Bid Layers — saved filter criteria over one Pairing Library pack
-// (PairingPack), for sorting through a pack's own hundreds of sequences
-// instead of scrolling all of them. Every route lives under /pbs/layers;
-// see _layer_matches() in server.py for what "properties" supports.
-// Reuses libraryPane/libraryGroupRow/sequenceListRow/renderDutyDayCards —
-// only the list/form/matches rendering here is new.
+// Bid Layers — saved bids over the Pairing Library, for sorting through
+// hundreds of sequences instead of scrolling all of them. Each saved bid
+// scopes to opr/base/fleet and holds an ordered stack of single-criterion
+// LAYERS (see _CRITERION_FIELDS below and _criterion_matches() in
+// server.py). Every route lives under /pbs/layers. Reuses libraryPane/
+// libraryGroupRow/sequenceListRow/renderDutyDayCards — only the list/form/
+// matches rendering here is new.
 let _layersLoaded = false;
 async function layerShowList(){
   const body = document.getElementById('layers-body');
@@ -5714,18 +5834,20 @@ async function layerShowList(){
     body.appendChild(pane);
   } catch(e) { body.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>'; }
 }
-// Real PBS is worked as a priority stack — Layer 1, Layer 2, Layer 3 —
-// so saved layers carry that same explicit position, not just a bare
-// name. Position is just the layer's index in its own saved list
-// (bid_layers is already an ordered array server-side); the up/down
-// arrows PUT a reordered id list to /pbs/layers/reorder.
+// One saved bid in the list. Deliberately NOT labelled "Layer N" — the
+// numbered layers live INSIDE a bid (its criterion stack), so numbering
+// the saved bids too would overload the word against how a real PBS bid
+// reads. The up/down arrows just order the pilot's own saved list, via
+// /pbs/layers/reorder.
 function layerRow(layer, index, total){
   const row = document.createElement('div');
   row.className = 'doc-row lib-row';
   const left = document.createElement('div');
-  const code = document.createElement('div'); code.className = 'code'; code.textContent = 'Layer ' + (index + 1) + ' — ' + layer.name;
+  const code = document.createElement('div'); code.className = 'code'; code.textContent = layer.name;
   const desc = document.createElement('div'); desc.className = 'desc';
-  desc.textContent = layer.opr + ' ' + layer.base + '/' + layer.fleet;
+  const layerCount = (layer.criteria || _criteriaFromLegacyProperties(layer.properties)).length;
+  desc.textContent = layer.opr + ' ' + layer.base + '/' + layer.fleet
+    + ' · ' + layerCount + ' layer' + (layerCount === 1 ? '' : 's');
   left.appendChild(code); left.appendChild(desc);
   const stats = document.createElement('div'); stats.className = 'lib-stats';
   const countLine = document.createElement('div');
@@ -5781,21 +5903,98 @@ function _rangeOptionsHtml(values, current){
   });
   return html;
 }
-// 15-minute HHMM steps (0000..2345) — same "round-number dropdown, not a
+// 5-minute HHMM steps (0000..2355) — same "round-number dropdown, not a
 // free-typed field" reasoning as _rangeOptionsHtml, just clock-valued.
-// 15 minutes (not 30) so a real published time like "1145" is actually
-// selectable, not just the nearest half hour.
+// 5 minutes rather than 15: a real cutoff a pilot actually wants to bid
+// (e.g. "released before 2240") is routinely off a quarter-hour grid, and
+// a coarser step silently makes their own stated cutoff unselectable.
+// 288 options is fine for the native scroll-wheel picker this renders as
+// on iOS.
 function _timeOptionsHtml(current){
   const cur = (current === null || current === undefined || current === '') ? '' : String(current).padStart(4, '0');
   let html = '<option value=""' + (cur === '' ? ' selected' : '') + '>Any</option>';
+  let seen = cur === '';
   for(let h = 0; h < 24; h++){
-    for(let m = 0; m < 60; m += 15){
+    for(let m = 0; m < 60; m += 5){
       const v = String(h).padStart(2, '0') + String(m).padStart(2, '0');
       const label = String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
+      if(v === cur) seen = true;
       html += '<option value="' + v + '"' + (v === cur ? ' selected' : '') + '>' + label + '</option>';
     }
   }
+  // A saved value off the 5-minute grid (from an older save, or any API
+  // caller) gets its own option rather than silently rendering as "Any" —
+  // which would look like the layer had no cutoff at all.
+  if(!seen){
+    html += '<option value="' + cur + '" selected>' + _hhmmLabel(cur) + '</option>';
+  }
   return html;
+}
+// A bid layer is an ORDERED STACK of single-criterion layers, the way a
+// real PBS bid reads — "Layer 1: 1 day / Layer 2: min block 7 hours /
+// Layer 3: include STT / Layer 4: release before 2240". Each row states
+// exactly one thing; the running count beside each row shows how many
+// pairings survive down to that layer, which is the whole reason the
+// layers are numbered rather than being one flat form of every filter.
+const _CRITERION_FIELDS = [
+  {v: 'days',             label: 'Days',            kind: 'num',  range: [1, 10, 1]},
+  {v: 'block',            label: 'Block Hours',     kind: 'num',  range: [0, 60, 1]},
+  {v: 'tafb',             label: 'TAFB Hours',      kind: 'num',  range: [0, 150, 5]},
+  {v: 'tpay',             label: 'TPAY Hours',      kind: 'num',  range: [0, 60, 1]},
+  {v: 'legs_per_day',     label: 'Legs Per Day',    kind: 'num',  range: [1, 6, 1]},
+  {v: 'report',           label: 'Report Time',     kind: 'time'},
+  {v: 'release',          label: 'Release Time',    kind: 'time'},
+  {v: 'red_eye',          label: 'Red-Eyes',        kind: 'mode'},
+  {v: 'layover_include',  label: 'Layover At',      kind: 'stations', ph: 'e.g. MIA, LAX'},
+  {v: 'include_stations', label: 'Include Station', kind: 'stations', ph: 'e.g. STT'},
+  {v: 'avoid_stations',   label: 'Avoid Station',   kind: 'stations', ph: 'e.g. ORD'},
+];
+const _CRITERION_OPS = {
+  num:  [['min', 'at least'], ['max', 'at most'], ['exact', 'exactly']],
+  time: [['max', 'before'], ['min', 'after'], ['exact', 'exactly']],
+};
+function _criterionField(v){ return _CRITERION_FIELDS.find(f => f.v === v) || _CRITERION_FIELDS[0]; }
+function _hhmmLabel(v){
+  const s = String(v).padStart(4, '0');
+  return s.slice(0, 2) + ':' + s.slice(2);
+}
+// One layer as a single readable line — "Block Hours at least 7",
+// "Release Time before 22:40", "Include Station STT". Used by the funnel
+// readout so each row names the criterion that trimmed the count.
+function _criterionLabel(c){
+  const f = _criterionField(c && c.field);
+  if(f.kind === 'mode'){
+    return f.label + ': ' + ({any: 'Any', exclude: 'Exclude', only: 'Only'}[(c || {}).value] || 'Any');
+  }
+  if(f.kind === 'stations'){
+    return f.label + ' ' + (((c || {}).value || []).join('/') || '—');
+  }
+  const op = (_CRITERION_OPS[f.kind] || []).find(o => o[0] === ((c || {}).op || 'min'));
+  const raw = (c || {}).value;
+  const shown = (raw === '' || raw === null || raw === undefined)
+    ? '—' : (f.kind === 'time' ? _hhmmLabel(raw) : raw);
+  return f.label + ' ' + (op ? op[1] : '') + ' ' + shown;
+}
+// A layer saved under the old flat-properties shape opens as the
+// equivalent stack, so editing one isn't a start-over. Mirrors
+// _layer_matches's own field list server-side, in a stable order.
+function _criteriaFromLegacyProperties(p){
+  if(!p) return [];
+  const out = [];
+  const num = (field, op, v) => { if(v !== null && v !== undefined && v !== '') out.push({field, op, value: v}); };
+  num('days', 'min', p.min_days);          num('days', 'max', p.max_days);
+  num('block', 'min', p.min_block);        num('block', 'max', p.max_block);
+  num('tafb', 'min', p.min_tafb);          num('tafb', 'max', p.max_tafb);
+  num('tpay', 'min', p.min_tpay);          num('tpay', 'max', p.max_tpay);
+  num('report', 'min', p.min_report);      num('report', 'max', p.max_report);
+  num('release', 'min', p.min_release);    num('release', 'max', p.max_release);
+  num('legs_per_day', 'max', p.max_legs_per_day);
+  const mode = p.red_eye || (p.exclude_red_eye ? 'exclude' : null);
+  if(mode && mode !== 'any') out.push({field: 'red_eye', value: mode});
+  if((p.layover_include || []).length) out.push({field: 'layover_include', value: p.layover_include});
+  if((p.include_stations || []).length) out.push({field: 'include_stations', value: p.include_stations});
+  if((p.avoid_stations || []).length) out.push({field: 'avoid_stations', value: p.avoid_stations});
+  return out;
 }
 async function layerShowForm(existing){
   const body = document.getElementById('layers-body');
@@ -5803,60 +6002,18 @@ async function layerShowForm(existing){
   body.appendChild(libraryBackLink('Back to Bid Layers', layerShowList));
   const panel = document.createElement('div');
   panel.className = 'panel';
-  const p = (existing && existing.properties) || {};
   panel.innerHTML =
-    '<label>Layer Name (only needed to Save)</label>' +
-    '<input class="lf-name" type="text" placeholder="Adjust filters freely — name it when you’re ready to save" value="' + (existing ? existing.name.replace(/"/g, '&quot;') : '') + '">' +
-    // Operator/Base/Fleet are always editable now, even on a saved layer —
-    // a real bid sometimes needs a layer rescoped to a different fleet/base
-    // (or widened to ALL) without recreating it and losing its position.
+    '<label>Bid Name (only needed to Save)</label>' +
+    '<input class="lf-name" type="text" placeholder="Build your stack freely — name it when you’re ready to save" value="' + (existing ? existing.name.replace(/"/g, '&quot;') : '') + '">' +
+    // Operator/Base/Fleet are always editable, even on a saved bid — a real
+    // bid sometimes needs rescoping to a different fleet/base (or widening
+    // to ALL) without recreating it and losing its layers.
     '<label>Operator</label><select class="lf-opr"></select>' +
     '<label>Base</label><select class="lf-base"></select>' +
     '<label>Fleet</label><select class="lf-fleet"></select>' +
-    '<label>Days (min / max)</label>' +
-    '<div style="display:flex;gap:8px;">' +
-      '<select class="lf-min-days">' + _rangeOptionsHtml(_rangeArray(1, 10, 1), p.min_days) + '</select>' +
-      '<select class="lf-max-days">' + _rangeOptionsHtml(_rangeArray(1, 10, 1), p.max_days) + '</select>' +
-    '</div>' +
-    '<label>Block Hours (min / max)</label>' +
-    '<div style="display:flex;gap:8px;">' +
-      '<select class="lf-min-block">' + _rangeOptionsHtml(_rangeArray(0, 60, 5), p.min_block) + '</select>' +
-      '<select class="lf-max-block">' + _rangeOptionsHtml(_rangeArray(0, 60, 5), p.max_block) + '</select>' +
-    '</div>' +
-    '<label>TAFB Hours (min / max)</label>' +
-    '<div style="display:flex;gap:8px;">' +
-      '<select class="lf-min-tafb">' + _rangeOptionsHtml(_rangeArray(0, 150, 10), p.min_tafb) + '</select>' +
-      '<select class="lf-max-tafb">' + _rangeOptionsHtml(_rangeArray(0, 150, 10), p.max_tafb) + '</select>' +
-    '</div>' +
-    '<label>TPAY Hours (min / max)</label>' +
-    '<div style="display:flex;gap:8px;">' +
-      '<select class="lf-min-tpay">' + _rangeOptionsHtml(_rangeArray(0, 60, 5), p.min_tpay) + '</select>' +
-      '<select class="lf-max-tpay">' + _rangeOptionsHtml(_rangeArray(0, 60, 5), p.max_tpay) + '</select>' +
-    '</div>' +
-    '<label>Report Time (min / max)</label>' +
-    '<div style="display:flex;gap:8px;">' +
-      '<select class="lf-min-report">' + _timeOptionsHtml(p.min_report) + '</select>' +
-      '<select class="lf-max-report">' + _timeOptionsHtml(p.max_report) + '</select>' +
-    '</div>' +
-    '<label>Release Time (min / max)</label>' +
-    '<div style="display:flex;gap:8px;">' +
-      '<select class="lf-min-release">' + _timeOptionsHtml(p.min_release) + '</select>' +
-      '<select class="lf-max-release">' + _timeOptionsHtml(p.max_release) + '</select>' +
-    '</div>' +
-    '<label>Max Legs Per Day</label>' +
-    '<select class="lf-max-legs">' + _rangeOptionsHtml(_rangeArray(1, 6, 1), p.max_legs_per_day) + '</select>' +
-    '<label>Red-Eyes</label>' +
-    '<select class="lf-redeye">' +
-      '<option value="any"' + ((_redEyeMode(p) === 'any') ? ' selected' : '') + '>Any</option>' +
-      '<option value="exclude"' + ((_redEyeMode(p) === 'exclude') ? ' selected' : '') + '>Exclude Red-Eyes</option>' +
-      '<option value="only"' + ((_redEyeMode(p) === 'only') ? ' selected' : '') + '>Only Red-Eyes</option>' +
-    '</select>' +
-    '<label>Layover Include (must overnight here — station codes, comma separated)</label>' +
-    '<input class="lf-layover-include" type="text" placeholder="e.g. MIA, LAX" value="' + ((p.layover_include || []).join(', ')) + '">' +
-    '<label>Include (touches this stop at all, same-day or overnight)</label>' +
-    '<input class="lf-include" type="text" placeholder="e.g. MIA, LAX" value="' + ((p.include_stations || []).join(', ')) + '">' +
-    '<label>Avoid (never touches this stop, same-day or overnight)</label>' +
-    '<input class="lf-avoid" type="text" placeholder="e.g. ORD" value="' + ((p.avoid_stations || []).join(', ')) + '">' +
+    '<label style="margin-top:16px;">Layers (each one criterion, in priority order)</label>' +
+    '<div class="lf-stack"></div>' +
+    '<button type="button" class="lf-add" style="margin-top:8px;width:100%;background:transparent;color:var(--blue);border:1px dashed var(--border);">+ Add Layer</button>' +
     '<div class="lf-live-count" style="margin-top:12px;padding:10px 12px;border-radius:8px;background:var(--bg);font-size:13px;font-weight:600;color:var(--label);"></div>' +
     '<div style="display:flex;gap:8px;margin-top:14px;">' +
       (existing ? '<button type="button" class="lf-delete" style="margin:0;flex:1;background:var(--red);">Delete</button>' : '') +
@@ -5865,17 +6022,19 @@ async function layerShowForm(existing){
     '<div class="lf-msg" style="margin-top:8px;font-size:12.5px;color:var(--label);"></div>';
   body.appendChild(panel);
 
+  const criteria = (existing && existing.criteria)
+    ? existing.criteria.map(c => ({...c}))
+    : _criteriaFromLegacyProperties(existing && existing.properties);
+
   const oprSel = panel.querySelector('.lf-opr');
   const baseSel = panel.querySelector('.lf-base');
   const fleetSel = panel.querySelector('.lf-fleet');
-  const r = await fetch('/pbs/packs');
-  const packs = await r.json();
+  const packsResp = await fetch('/pbs/packs');
+  const packs = await packsResp.json();
   // (ALL) is always the first option at every level — picking it drops
   // that dimension from the scope entirely (server-side: ALL_SCOPE), so a
-  // layer can span every base for one operator, or genuinely every pack
-  // there is, instead of being pinned to one exact pack. Same cascade for
-  // both a new layer and an existing one now — existing.opr/base/fleet
-  // just pre-select each level's option instead of being locked/hidden.
+  // bid can span every base for one operator, or genuinely every pack
+  // there is, instead of being pinned to one exact pack.
   const fillSelect = (sel, values, selectedVal) => {
     sel.innerHTML = '<option value="ALL">(ALL)</option>' + values.map(v => '<option value="' + v + '">' + v + '</option>').join('');
     if(selectedVal && [...sel.options].some(o => o.value === selectedVal)) sel.value = selectedVal;
@@ -5884,107 +6043,174 @@ async function layerShowForm(existing){
   fillSelect(oprSel, oprs, existing && existing.opr);
   const refreshBases = (preselect) => {
     const scoped = oprSel.value === 'ALL' ? packs : packs.filter(pk => pk.opr === oprSel.value);
-    const bases = [...new Set(scoped.map(pk => pk.base))].sort();
-    fillSelect(baseSel, bases, preselect);
+    fillSelect(baseSel, [...new Set(scoped.map(pk => pk.base))].sort(), preselect);
     refreshFleets(preselect ? (existing && existing.fleet) : null);
   };
   const refreshFleets = (preselect) => {
     let scoped = oprSel.value === 'ALL' ? packs : packs.filter(pk => pk.opr === oprSel.value);
     scoped = baseSel.value === 'ALL' ? scoped : scoped.filter(pk => pk.base === baseSel.value);
-    const fleets = [...new Set(scoped.map(pk => pk.fleet))].sort();
-    fillSelect(fleetSel, fleets, preselect);
-    _queueLayerPreview(panel, getScope);
+    fillSelect(fleetSel, [...new Set(scoped.map(pk => pk.fleet))].sort(), preselect);
+    queuePreview();
   };
   oprSel.onchange = () => refreshBases(null);
   baseSel.onchange = () => refreshFleets(null);
   const getScope = () => ({opr: oprSel.value, base: baseSel.value, fleet: fleetSel.value});
+
+  const stackEl = panel.querySelector('.lf-stack');
+  const countEl = panel.querySelector('.lf-live-count');
+  let funnel = [];
+
+  function criterionRow(c, i){
+    const row = document.createElement('div');
+    row.className = 'lf-layer-row';
+    const hdr = document.createElement('div');
+    hdr.className = 'lf-layer-hdr';
+    const num = document.createElement('span');
+    num.className = 'lf-layer-num';
+    num.textContent = 'Layer ' + (i + 1);
+    const cnt = document.createElement('span');
+    cnt.className = 'lf-layer-count';
+    const tools = document.createElement('span');
+    tools.className = 'lf-layer-tools';
+    const toolBtn = (txt, disabled, fn) => {
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = 'layer-move-btn'; b.textContent = txt;
+      b.disabled = disabled; b.onclick = fn;
+      return b;
+    };
+    tools.appendChild(toolBtn('▲', i === 0, () => {
+      [criteria[i - 1], criteria[i]] = [criteria[i], criteria[i - 1]];
+      renderStack(); queuePreview();
+    }));
+    tools.appendChild(toolBtn('▼', i === criteria.length - 1, () => {
+      [criteria[i + 1], criteria[i]] = [criteria[i], criteria[i + 1]];
+      renderStack(); queuePreview();
+    }));
+    tools.appendChild(toolBtn('✕', false, () => {
+      criteria.splice(i, 1);
+      renderStack(); queuePreview();
+    }));
+    hdr.appendChild(num); hdr.appendChild(cnt); hdr.appendChild(tools);
+    row.appendChild(hdr);
+
+    const controls = document.createElement('div');
+    controls.className = 'lf-layer-controls';
+    const fieldSel = document.createElement('select');
+    fieldSel.innerHTML = _CRITERION_FIELDS.map(f => '<option value="' + f.v + '">' + f.label + '</option>').join('');
+    fieldSel.value = c.field || 'days';
+    fieldSel.onchange = () => {
+      const f = _criterionField(fieldSel.value);
+      // Switching field resets this layer's value — an op/value from the
+      // previous field (a station list under "Block Hours", say) would
+      // never match anything and reads as a broken layer.
+      criteria[i] = {
+        field: f.v,
+        op: f.kind === 'time' ? 'max' : 'min',
+        value: f.kind === 'stations' ? [] : (f.kind === 'mode' ? 'any' : ''),
+      };
+      renderStack(); queuePreview();
+    };
+    controls.appendChild(fieldSel);
+
+    const f = _criterionField(c.field);
+    if(f.kind === 'num' || f.kind === 'time'){
+      const opSel = document.createElement('select');
+      opSel.innerHTML = _CRITERION_OPS[f.kind].map(o => '<option value="' + o[0] + '">' + o[1] + '</option>').join('');
+      opSel.value = c.op || (f.kind === 'time' ? 'max' : 'min');
+      opSel.onchange = () => { criteria[i].op = opSel.value; queuePreview(); };
+      controls.appendChild(opSel);
+      const valSel = document.createElement('select');
+      valSel.innerHTML = f.kind === 'time'
+        ? _timeOptionsHtml(c.value)
+        : _rangeOptionsHtml(_rangeArray(f.range[0], f.range[1], f.range[2]), c.value);
+      valSel.onchange = () => { criteria[i].value = valSel.value; queuePreview(); };
+      controls.appendChild(valSel);
+    } else if(f.kind === 'mode'){
+      const modeSel = document.createElement('select');
+      modeSel.innerHTML = '<option value="any">Any</option><option value="exclude">Exclude Red-Eyes</option><option value="only">Only Red-Eyes</option>';
+      modeSel.value = c.value || 'any';
+      modeSel.onchange = () => { criteria[i].value = modeSel.value; queuePreview(); };
+      controls.appendChild(modeSel);
+    } else {
+      const txt = document.createElement('input');
+      txt.type = 'text';
+      txt.placeholder = f.ph || 'e.g. STT';
+      txt.value = (c.value || []).join(', ');
+      txt.oninput = () => { criteria[i].value = _stationList(txt.value); queuePreview(); };
+      controls.appendChild(txt);
+    }
+    row.appendChild(controls);
+    return row;
+  }
+
+  function renderStack(){
+    stackEl.innerHTML = '';
+    if(!criteria.length){
+      const empty = document.createElement('p');
+      empty.className = 'placeholder-note';
+      empty.style.cssText = 'padding:10px 2px;margin:0;';
+      empty.textContent = 'No layers yet — add one to start narrowing this pack.';
+      stackEl.appendChild(empty);
+      return;
+    }
+    criteria.forEach((c, i) => stackEl.appendChild(criterionRow(c, i)));
+    paintFunnel();
+  }
+  // Counts are painted onto the existing rows rather than re-rendering the
+  // stack — a re-render mid-preview would destroy and rebuild the station
+  // text input the pilot is actively typing into, losing focus every time
+  // the debounce fires.
+  function paintFunnel(){
+    stackEl.querySelectorAll('.lf-layer-count').forEach((el, i) => {
+      el.textContent = funnel.length > i ? (funnel[i] + ' match') : '';
+      el.style.color = (funnel.length > i && funnel[i] === 0) ? 'var(--red)' : '';
+    });
+  }
+
+  let previewTimer = null, previewSeq = 0;
+  function queuePreview(){
+    clearTimeout(previewTimer);
+    countEl.textContent = 'Checking…';
+    previewTimer = setTimeout(async () => {
+      const mySeq = ++previewSeq;
+      const scope = getScope();
+      if(!scope.opr || !scope.base || !scope.fleet){ countEl.textContent = ''; return; }
+      try {
+        const resp = await fetch('/pbs/layers/preview', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({opr: scope.opr, base: scope.base, fleet: scope.fleet, criteria}),
+        });
+        const data = await resp.json();
+        if(mySeq !== previewSeq) return; // a newer edit already superseded this request
+        if(!resp.ok){ countEl.textContent = data.error || 'Could not check'; return; }
+        funnel = data.funnel || [];
+        countEl.textContent = criteria.length
+          ? (data.count + ' of ' + data.total_in_scope + ' pairings match all ' + criteria.length + ' layer' + (criteria.length === 1 ? '' : 's'))
+          : (data.total_in_scope + ' pairings in scope — add a layer to narrow it');
+        paintFunnel();
+      } catch(e) {
+        if(mySeq === previewSeq) countEl.textContent = '';
+      }
+    }, 400);
+  }
+
+  panel.querySelector('.lf-add').onclick = () => {
+    criteria.push({field: 'days', op: 'exact', value: ''});
+    renderStack(); queuePreview();
+  };
+  renderStack();
   refreshBases(existing && existing.base);
 
-  // Live count while editing — every property input re-runs a debounced
-  // /pbs/layers/preview fetch so the match count updates as you type,
-  // before anything is saved. Name doesn't affect matches, so it's the
-  // one field left out.
-  panel.querySelectorAll('input, select').forEach(el => {
-    if(el.classList.contains('lf-name')) return;
-    el.addEventListener('input', () => _queueLayerPreview(panel, getScope));
-    el.addEventListener('change', () => _queueLayerPreview(panel, getScope));
-  });
-  _queueLayerPreview(panel, getScope);
-
   const msgEl = panel.querySelector('.lf-msg');
-  panel.querySelector('.lf-save').onclick = () => layerSaveForm(panel, existing, msgEl);
+  panel.querySelector('.lf-save').onclick = () => layerSaveForm(panel, existing, criteria, msgEl);
   if(existing){
     panel.querySelector('.lf-delete').onclick = () => layerDeleteLayer(existing.id);
   }
 }
-function _numOrNull(v){ return v === '' || v === null || v === undefined ? null : Number(v); }
 function _stationList(v){ return (v || '').split(',').map(s => s.trim().toUpperCase()).filter(Boolean); }
-// Old saved layers only ever have the boolean exclude_red_eye — reads
-// the new tri-state key first, falls back to that boolean otherwise.
-function _redEyeMode(p){
-  if(p.red_eye) return p.red_eye;
-  return p.exclude_red_eye ? 'exclude' : 'any';
-}
-function _gatherLayerProperties(panel){
-  return {
-    min_days: _numOrNull(panel.querySelector('.lf-min-days').value),
-    max_days: _numOrNull(panel.querySelector('.lf-max-days').value),
-    min_block: _numOrNull(panel.querySelector('.lf-min-block').value),
-    max_block: _numOrNull(panel.querySelector('.lf-max-block').value),
-    min_tafb: _numOrNull(panel.querySelector('.lf-min-tafb').value),
-    max_tafb: _numOrNull(panel.querySelector('.lf-max-tafb').value),
-    min_tpay: _numOrNull(panel.querySelector('.lf-min-tpay').value),
-    max_tpay: _numOrNull(panel.querySelector('.lf-max-tpay').value),
-    min_report: _numOrNull(panel.querySelector('.lf-min-report').value),
-    max_report: _numOrNull(panel.querySelector('.lf-max-report').value),
-    min_release: _numOrNull(panel.querySelector('.lf-min-release').value),
-    max_release: _numOrNull(panel.querySelector('.lf-max-release').value),
-    max_legs_per_day: _numOrNull(panel.querySelector('.lf-max-legs').value),
-    red_eye: panel.querySelector('.lf-redeye').value,
-    layover_include: _stationList(panel.querySelector('.lf-layover-include').value),
-    include_stations: _stationList(panel.querySelector('.lf-include').value),
-    avoid_stations: _stationList(panel.querySelector('.lf-avoid').value),
-  };
-}
-let _layerPreviewTimer = null;
-let _layerPreviewSeq = 0;
-function _queueLayerPreview(panel, getScope){
-  const countEl = panel.querySelector('.lf-live-count');
-  clearTimeout(_layerPreviewTimer);
-  countEl.textContent = 'Checking…';
-  _layerPreviewTimer = setTimeout(async () => {
-    const mySeq = ++_layerPreviewSeq;
-    const {opr, base, fleet} = getScope();
-    if(!opr || !base || !fleet){ countEl.textContent = ''; return; }
-    const props = _gatherLayerProperties(panel);
-    const params = new URLSearchParams({
-      opr, base, fleet,
-      min_days: props.min_days ?? '', max_days: props.max_days ?? '',
-      min_block: props.min_block ?? '', max_block: props.max_block ?? '',
-      min_tafb: props.min_tafb ?? '', max_tafb: props.max_tafb ?? '',
-      min_tpay: props.min_tpay ?? '', max_tpay: props.max_tpay ?? '',
-      min_report: props.min_report ?? '', max_report: props.max_report ?? '',
-      min_release: props.min_release ?? '', max_release: props.max_release ?? '',
-      max_legs_per_day: props.max_legs_per_day ?? '',
-      red_eye: props.red_eye,
-      layover_include: props.layover_include.join(','),
-      include_stations: props.include_stations.join(','),
-      avoid_stations: props.avoid_stations.join(','),
-    });
-    try {
-      const r = await fetch('/pbs/layers/preview?' + params.toString());
-      const data = await r.json();
-      if(mySeq !== _layerPreviewSeq) return; // a newer edit already superseded this request
-      countEl.textContent = r.ok ? (data.count + ' pairing' + (data.count === 1 ? '' : 's') + ' match right now') : (data.error || 'Could not check');
-    } catch(e) {
-      if(mySeq === _layerPreviewSeq) countEl.textContent = '';
-    }
-  }, 400);
-}
-async function layerSaveForm(panel, existing, msgEl){
+async function layerSaveForm(panel, existing, criteria, msgEl){
   const name = panel.querySelector('.lf-name').value.trim();
   if(!name){ msgEl.textContent = 'Name is required.'; msgEl.style.color = 'var(--red)'; return; }
-  const properties = _gatherLayerProperties(panel);
   const opr = panel.querySelector('.lf-opr').value;
   const base = panel.querySelector('.lf-base').value;
   const fleet = panel.querySelector('.lf-fleet').value;
@@ -5994,12 +6220,12 @@ async function layerSaveForm(panel, existing, msgEl){
     if(existing){
       r = await fetch('/pbs/layers/' + existing.id, {
         method: 'PUT', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({name, opr, base, fleet, properties}),
+        body: JSON.stringify({name, opr, base, fleet, criteria}),
       });
     } else {
       r = await fetch('/pbs/layers', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({name, opr, base, fleet, properties}),
+        body: JSON.stringify({name, opr, base, fleet, criteria}),
       });
     }
     const data = await r.json();
@@ -6062,10 +6288,32 @@ async function layerShowPairings(layer, sort){
     editBtn.textContent = 'Edit';
     editBtn.onclick = (e) => { e.stopPropagation(); layerShowForm(layer); };
     const {pane, list} = libraryPane(layer.name + ' (' + data.pairings.length + ')', layerShowList, editBtn);
+    // The funnel is the payoff for numbering the layers — when a bid comes
+    // back empty (or thinner than expected), this says which layer did it
+    // rather than leaving the pilot to bisect their own stack by hand.
+    const criteria = layer.criteria || [];
+    if(criteria.length && (data.funnel || []).length === criteria.length){
+      const funnelEl = document.createElement('div');
+      funnelEl.style.cssText = 'padding:10px 14px;border-bottom:1px solid var(--border);font-size:12px;color:var(--label);line-height:1.7;';
+      funnelEl.appendChild(Object.assign(document.createElement('div'), {
+        textContent: data.total_in_scope + ' in scope',
+        style: 'font-weight:600;',
+      }));
+      criteria.forEach((c, i) => {
+        const line = document.createElement('div');
+        const n = data.funnel[i];
+        const dropped = i === 0 ? (data.total_in_scope - n) : (data.funnel[i - 1] - n);
+        line.textContent = 'Layer ' + (i + 1) + ' · ' + _criterionLabel(c) + ' → ' + n
+          + (dropped > 0 ? ('  (−' + dropped + ')') : '');
+        if(n === 0) line.style.color = 'var(--red)';
+        funnelEl.appendChild(line);
+      });
+      list.parentNode.insertBefore(funnelEl, list);
+    }
     if(data.pairings.length){
       list.parentNode.insertBefore(_pairingSortControl(sort, (v) => layerShowPairings(layer, v)), list);
     } else {
-      list.innerHTML = '<p class="placeholder-note" style="padding:14px;">Nothing in this pack matches this layer’s filters.</p>';
+      list.innerHTML = '<p class="placeholder-note" style="padding:14px;">Nothing matches every layer in this bid.</p>';
     }
     data.pairings.forEach(s => list.appendChild(sequenceListRow(s, () => layerShowSequenceDetail(layer, s))));
     body.appendChild(pane);
