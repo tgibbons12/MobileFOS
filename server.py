@@ -852,6 +852,14 @@ def _layover_indices(s):
     return indices
 
 
+def _hhmm_int(v):
+    """Plain int from a 4-digit HHMM string ("1145" -> 1145), or None."""
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def _summarize_sequence(s):
     """The compact {seq, days, routing, ...} shape both /pbs/sequences and
     the pack-browsing routes list sequences with."""
@@ -931,21 +939,69 @@ def _seq_has_red_eye(s):
     return False
 
 
+def _num_or_none(v):
+    """float(v), or None for a blank/missing/unparseable value — same
+    "tolerate anything, never throw" contract as _hhmm_int. properties
+    dicts round-trip through JSON and arbitrary API callers, so a
+    threshold showing up as a string (or junk) shouldn't 500 every layer
+    in the list — just treat it as "no filter" instead of failing closed."""
+    try:
+        return float(v) if v not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _layer_matches(seq, summary, properties):
     """True if `seq` (raw parsed sequence) satisfies a bid layer's saved
     filter criteria. `summary` is this seq's own _summarize_sequence()
     output, reused so routing/layover_indices aren't recomputed twice."""
     p = properties or {}
+
+    def num(key):
+        return _num_or_none(p.get(key))
+
     days = summary["days"]
-    if p.get("min_days") is not None and days < p["min_days"]:
+    min_days, max_days = num("min_days"), num("max_days")
+    if min_days is not None and days < min_days:
         return False
-    if p.get("max_days") is not None and days > p["max_days"]:
+    if max_days is not None and days > max_days:
         return False
-    if p.get("min_block") is not None and float(summary.get("block") or 0) < p["min_block"]:
+    block = float(summary.get("block") or 0)
+    min_block, max_block = num("min_block"), num("max_block")
+    if min_block is not None and block < min_block:
         return False
-    if p.get("min_tafb") is not None and float(summary.get("tafb") or 0) < p["min_tafb"]:
+    if max_block is not None and block > max_block:
         return False
-    if p.get("max_legs_per_day") is not None and _seq_max_legs_per_day(seq) > p["max_legs_per_day"]:
+    tafb = float(summary.get("tafb") or 0)
+    min_tafb, max_tafb = num("min_tafb"), num("max_tafb")
+    if min_tafb is not None and tafb < min_tafb:
+        return False
+    if max_tafb is not None and tafb > max_tafb:
+        return False
+    tpay = float(summary.get("tpay") or 0)
+    min_tpay, max_tpay = num("min_tpay"), num("max_tpay")
+    if min_tpay is not None and tpay < min_tpay:
+        return False
+    if max_tpay is not None and tpay > max_tpay:
+        return False
+    max_legs = num("max_legs_per_day")
+    if max_legs is not None and _seq_max_legs_per_day(seq) > max_legs:
+        return False
+    # Report (first day RPT) / Release (last day RLS) cutoffs — e.g. "5 day
+    # trip, released by 1145". Both stored/compared as plain HHMM ints, no
+    # real calendar date exists in this data so a straight numeric compare
+    # is exactly as meaningful as the rest of this app's HHMM handling.
+    report_val = _hhmm_int(summary.get("report"))
+    min_report, max_report = num("min_report"), num("max_report")
+    if min_report is not None and (report_val is None or report_val < min_report):
+        return False
+    if max_report is not None and (report_val is None or report_val > max_report):
+        return False
+    release_val = _hhmm_int(summary.get("release"))
+    min_release, max_release = num("min_release"), num("max_release")
+    if min_release is not None and (release_val is None or release_val < min_release):
+        return False
+    if max_release is not None and (release_val is None or release_val > max_release):
         return False
     # Tri-state: "any" (no filter, default) / "exclude" / "only". Reads
     # the new key first, falls back to the old boolean exclude_red_eye
@@ -1040,8 +1096,12 @@ def preview_bid_layer():
 
     properties = {
         "min_days": _num("min_days"), "max_days": _num("max_days"),
-        "min_block": _num("min_block"), "min_tafb": _num("min_tafb"),
+        "min_block": _num("min_block"), "max_block": _num("max_block"),
+        "min_tafb": _num("min_tafb"), "max_tafb": _num("max_tafb"),
+        "min_tpay": _num("min_tpay"), "max_tpay": _num("max_tpay"),
         "max_legs_per_day": _num("max_legs_per_day"),
+        "min_report": _num("min_report"), "max_report": _num("max_report"),
+        "min_release": _num("min_release"), "max_release": _num("max_release"),
         "red_eye": request.args.get("red_eye") or "any",
         "layover_include": _stations("layover_include"),
         "include_stations": _stations("include_stations"),
@@ -1107,11 +1167,39 @@ def update_bid_layer(layer_id):
         updated["name"] = (body.get("name") or "").strip() or updated["name"]
     if "properties" in body:
         updated["properties"] = body.get("properties") or {}
+    # Saved layers used to lock opr/base/fleet at creation — a real bid
+    # sometimes needs a rescoped layer (moved to a different fleet, or
+    # widened to ALL) without losing its saved filters/name/position.
+    if "opr" in body or "base" in body or "fleet" in body:
+        new_opr = (body.get("opr") or updated["opr"]).strip().upper()
+        new_base = (body.get("base") or updated["base"]).strip().upper()
+        new_fleet = (body.get("fleet") or updated["fleet"]).strip().upper()
+        if not _packs_for_scope(new_opr, new_base, new_fleet):
+            return jsonify({"error": "no pack found for that operator/base/fleet"}), 404
+        updated["opr"], updated["base"], updated["fleet"] = new_opr, new_base, new_fleet
     new_layers = list(layers)
     new_layers[idx] = updated
     current_user.bid_layers = new_layers
     db.session.commit()
     return jsonify(updated)
+
+
+@app.route("/pbs/layers/reorder", methods=["PUT"])
+def reorder_bid_layers():
+    """Real PBS bids are worked as a priority stack — Layer 1, Layer 2,
+    Layer 3 — so saved layers need the same explicit ordering, not just an
+    alphabetical or creation-order list. bid_layers is already a plain
+    ordered JSON array, so "Layer N" is just its 1-based position; this
+    route only reorders that array to a caller-supplied id sequence."""
+    body = request.get_json(silent=True) or {}
+    order = body.get("order") or []
+    layers = current_user.bid_layers or []
+    by_id = {l["id"]: l for l in layers}
+    if set(order) != set(by_id.keys()):
+        return jsonify({"error": "order must list exactly the current layer ids"}), 400
+    current_user.bid_layers = [by_id[i] for i in order]
+    db.session.commit()
+    return jsonify({"ok": True})
 
 
 @app.route("/pbs/layers/<layer_id>", methods=["DELETE"])
@@ -3466,6 +3554,9 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .doc-row .desc.lib-routing{color:var(--value);}
   .doc-row .desc.lib-routing b{font-weight:700;}
   .lib-stats{text-align:right;font-size:12px;color:var(--label);flex:0 0 auto;line-height:1.45;white-space:nowrap;}
+  .layer-reorder{display:flex;flex-direction:column;gap:2px;flex:0 0 auto;margin-right:4px;}
+  .layer-move-btn{margin:0;padding:2px 6px;font-size:10px;line-height:1;background:var(--bg);color:var(--label);border:1px solid var(--border);border-radius:4px;cursor:pointer;}
+  .layer-move-btn:disabled{opacity:.3;cursor:default;}
   .lib-stats .days{color:var(--value);font-weight:600;font-size:12.5px;}
   .lib-total{padding:0 14px 10px;font-size:12.5px;color:var(--label);}
   .fly-row{display:flex;gap:8px;padding:0 14px 12px;}
@@ -5619,15 +5710,20 @@ async function layerShowList(){
     if(!layers.length){
       list.innerHTML = '<p class="placeholder-note" style="padding:14px;">No layers yet — save a filter to start sorting a pack’s pairings.</p>';
     }
-    layers.forEach(layer => list.appendChild(layerRow(layer)));
+    layers.forEach((layer, i) => list.appendChild(layerRow(layer, i, layers.length)));
     body.appendChild(pane);
   } catch(e) { body.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>'; }
 }
-function layerRow(layer){
+// Real PBS is worked as a priority stack — Layer 1, Layer 2, Layer 3 —
+// so saved layers carry that same explicit position, not just a bare
+// name. Position is just the layer's index in its own saved list
+// (bid_layers is already an ordered array server-side); the up/down
+// arrows PUT a reordered id list to /pbs/layers/reorder.
+function layerRow(layer, index, total){
   const row = document.createElement('div');
   row.className = 'doc-row lib-row';
   const left = document.createElement('div');
-  const code = document.createElement('div'); code.className = 'code'; code.textContent = layer.name;
+  const code = document.createElement('div'); code.className = 'code'; code.textContent = 'Layer ' + (index + 1) + ' — ' + layer.name;
   const desc = document.createElement('div'); desc.className = 'desc';
   desc.textContent = layer.opr + ' ' + layer.base + '/' + layer.fleet;
   left.appendChild(code); left.appendChild(desc);
@@ -5635,9 +5731,38 @@ function layerRow(layer){
   const countLine = document.createElement('div');
   countLine.textContent = layer.count + ' pairing' + (layer.count === 1 ? '' : 's');
   stats.appendChild(countLine);
-  row.appendChild(left); row.appendChild(stats);
+  const reorder = document.createElement('div');
+  reorder.className = 'layer-reorder';
+  const upBtn = document.createElement('button');
+  upBtn.type = 'button'; upBtn.className = 'layer-move-btn'; upBtn.textContent = '▲';
+  upBtn.disabled = index === 0;
+  upBtn.onclick = (e) => { e.stopPropagation(); moveLayer(layer.id, -1); };
+  const downBtn = document.createElement('button');
+  downBtn.type = 'button'; downBtn.className = 'layer-move-btn'; downBtn.textContent = '▼';
+  downBtn.disabled = index === total - 1;
+  downBtn.onclick = (e) => { e.stopPropagation(); moveLayer(layer.id, 1); };
+  reorder.appendChild(upBtn); reorder.appendChild(downBtn);
+  row.appendChild(reorder); row.appendChild(left); row.appendChild(stats);
   row.onclick = () => layerShowPairings(layer);
   return row;
+}
+async function moveLayer(id, delta){
+  try {
+    const r = await fetch('/pbs/layers');
+    const layers = await r.json();
+    if(!r.ok) return;
+    const ids = layers.map(l => l.id);
+    const i = ids.indexOf(id);
+    const j = i + delta;
+    if(i === -1 || j < 0 || j >= ids.length) return;
+    [ids[i], ids[j]] = [ids[j], ids[i]];
+    const r2 = await fetch('/pbs/layers/reorder', {
+      method: 'PUT', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({order: ids}),
+    });
+    if(!r2.ok) { showToast('Could not reorder'); return; }
+    layerShowList();
+  } catch(e) { showToast('Request failed: ' + e); }
 }
 // Round-number dropdowns instead of free-typed numbers — less error-prone
 // (no fat-fingered "45" meant to be "4.5"), and on iOS a plain <select>
@@ -5656,6 +5781,22 @@ function _rangeOptionsHtml(values, current){
   });
   return html;
 }
+// 15-minute HHMM steps (0000..2345) — same "round-number dropdown, not a
+// free-typed field" reasoning as _rangeOptionsHtml, just clock-valued.
+// 15 minutes (not 30) so a real published time like "1145" is actually
+// selectable, not just the nearest half hour.
+function _timeOptionsHtml(current){
+  const cur = (current === null || current === undefined || current === '') ? '' : String(current).padStart(4, '0');
+  let html = '<option value=""' + (cur === '' ? ' selected' : '') + '>Any</option>';
+  for(let h = 0; h < 24; h++){
+    for(let m = 0; m < 60; m += 15){
+      const v = String(h).padStart(2, '0') + String(m).padStart(2, '0');
+      const label = String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
+      html += '<option value="' + v + '"' + (v === cur ? ' selected' : '') + '>' + label + '</option>';
+    }
+  }
+  return html;
+}
 async function layerShowForm(existing){
   const body = document.getElementById('layers-body');
   body.innerHTML = '';
@@ -5666,20 +5807,42 @@ async function layerShowForm(existing){
   panel.innerHTML =
     '<label>Layer Name (only needed to Save)</label>' +
     '<input class="lf-name" type="text" placeholder="Adjust filters freely — name it when you’re ready to save" value="' + (existing ? existing.name.replace(/"/g, '&quot;') : '') + '">' +
-    (existing
-      ? ''
-      : '<label>Operator</label><select class="lf-opr"></select>' +
-        '<label>Base</label><select class="lf-base"></select>' +
-        '<label>Fleet</label><select class="lf-fleet"></select>') +
+    // Operator/Base/Fleet are always editable now, even on a saved layer —
+    // a real bid sometimes needs a layer rescoped to a different fleet/base
+    // (or widened to ALL) without recreating it and losing its position.
+    '<label>Operator</label><select class="lf-opr"></select>' +
+    '<label>Base</label><select class="lf-base"></select>' +
+    '<label>Fleet</label><select class="lf-fleet"></select>' +
     '<label>Days (min / max)</label>' +
     '<div style="display:flex;gap:8px;">' +
       '<select class="lf-min-days">' + _rangeOptionsHtml(_rangeArray(1, 10, 1), p.min_days) + '</select>' +
       '<select class="lf-max-days">' + _rangeOptionsHtml(_rangeArray(1, 10, 1), p.max_days) + '</select>' +
     '</div>' +
-    '<label>Min Block Hours</label>' +
-    '<select class="lf-min-block">' + _rangeOptionsHtml(_rangeArray(0, 60, 5), p.min_block) + '</select>' +
-    '<label>Min TAFB Hours</label>' +
-    '<select class="lf-min-tafb">' + _rangeOptionsHtml(_rangeArray(0, 150, 10), p.min_tafb) + '</select>' +
+    '<label>Block Hours (min / max)</label>' +
+    '<div style="display:flex;gap:8px;">' +
+      '<select class="lf-min-block">' + _rangeOptionsHtml(_rangeArray(0, 60, 5), p.min_block) + '</select>' +
+      '<select class="lf-max-block">' + _rangeOptionsHtml(_rangeArray(0, 60, 5), p.max_block) + '</select>' +
+    '</div>' +
+    '<label>TAFB Hours (min / max)</label>' +
+    '<div style="display:flex;gap:8px;">' +
+      '<select class="lf-min-tafb">' + _rangeOptionsHtml(_rangeArray(0, 150, 10), p.min_tafb) + '</select>' +
+      '<select class="lf-max-tafb">' + _rangeOptionsHtml(_rangeArray(0, 150, 10), p.max_tafb) + '</select>' +
+    '</div>' +
+    '<label>TPAY Hours (min / max)</label>' +
+    '<div style="display:flex;gap:8px;">' +
+      '<select class="lf-min-tpay">' + _rangeOptionsHtml(_rangeArray(0, 60, 5), p.min_tpay) + '</select>' +
+      '<select class="lf-max-tpay">' + _rangeOptionsHtml(_rangeArray(0, 60, 5), p.max_tpay) + '</select>' +
+    '</div>' +
+    '<label>Report Time (min / max)</label>' +
+    '<div style="display:flex;gap:8px;">' +
+      '<select class="lf-min-report">' + _timeOptionsHtml(p.min_report) + '</select>' +
+      '<select class="lf-max-report">' + _timeOptionsHtml(p.max_report) + '</select>' +
+    '</div>' +
+    '<label>Release Time (min / max)</label>' +
+    '<div style="display:flex;gap:8px;">' +
+      '<select class="lf-min-release">' + _timeOptionsHtml(p.min_release) + '</select>' +
+      '<select class="lf-max-release">' + _timeOptionsHtml(p.max_release) + '</select>' +
+    '</div>' +
     '<label>Max Legs Per Day</label>' +
     '<select class="lf-max-legs">' + _rangeOptionsHtml(_rangeArray(1, 6, 1), p.max_legs_per_day) + '</select>' +
     '<label>Red-Eyes</label>' +
@@ -5702,42 +5865,40 @@ async function layerShowForm(existing){
     '<div class="lf-msg" style="margin-top:8px;font-size:12.5px;color:var(--label);"></div>';
   body.appendChild(panel);
 
-  let getScope;
-  if(existing){
-    getScope = () => ({opr: existing.opr, base: existing.base, fleet: existing.fleet});
-  } else {
-    const oprSel = panel.querySelector('.lf-opr');
-    const baseSel = panel.querySelector('.lf-base');
-    const fleetSel = panel.querySelector('.lf-fleet');
-    const r = await fetch('/pbs/packs');
-    const packs = await r.json();
-    // (ALL) is always the first option at every level — picking it drops
-    // that dimension from the scope entirely (server-side: ALL_SCOPE),
-    // so a layer can span every base for one operator, or genuinely
-    // every pack there is, instead of being pinned to one exact pack.
-    const fillSelect = (sel, values) => {
-      sel.innerHTML = '<option value="ALL">(ALL)</option>' + values.map(v => '<option value="' + v + '">' + v + '</option>').join('');
-    };
-    const oprs = [...new Set(packs.map(pk => pk.opr))].sort();
-    fillSelect(oprSel, oprs);
-    const refreshBases = () => {
-      const scoped = oprSel.value === 'ALL' ? packs : packs.filter(pk => pk.opr === oprSel.value);
-      const bases = [...new Set(scoped.map(pk => pk.base))].sort();
-      fillSelect(baseSel, bases);
-      refreshFleets();
-    };
-    const refreshFleets = () => {
-      let scoped = oprSel.value === 'ALL' ? packs : packs.filter(pk => pk.opr === oprSel.value);
-      scoped = baseSel.value === 'ALL' ? scoped : scoped.filter(pk => pk.base === baseSel.value);
-      const fleets = [...new Set(scoped.map(pk => pk.fleet))].sort();
-      fillSelect(fleetSel, fleets);
-      _queueLayerPreview(panel, getScope);
-    };
-    oprSel.onchange = refreshBases;
-    baseSel.onchange = refreshFleets;
-    getScope = () => ({opr: oprSel.value, base: baseSel.value, fleet: fleetSel.value});
-    refreshBases();
-  }
+  const oprSel = panel.querySelector('.lf-opr');
+  const baseSel = panel.querySelector('.lf-base');
+  const fleetSel = panel.querySelector('.lf-fleet');
+  const r = await fetch('/pbs/packs');
+  const packs = await r.json();
+  // (ALL) is always the first option at every level — picking it drops
+  // that dimension from the scope entirely (server-side: ALL_SCOPE), so a
+  // layer can span every base for one operator, or genuinely every pack
+  // there is, instead of being pinned to one exact pack. Same cascade for
+  // both a new layer and an existing one now — existing.opr/base/fleet
+  // just pre-select each level's option instead of being locked/hidden.
+  const fillSelect = (sel, values, selectedVal) => {
+    sel.innerHTML = '<option value="ALL">(ALL)</option>' + values.map(v => '<option value="' + v + '">' + v + '</option>').join('');
+    if(selectedVal && [...sel.options].some(o => o.value === selectedVal)) sel.value = selectedVal;
+  };
+  const oprs = [...new Set(packs.map(pk => pk.opr))].sort();
+  fillSelect(oprSel, oprs, existing && existing.opr);
+  const refreshBases = (preselect) => {
+    const scoped = oprSel.value === 'ALL' ? packs : packs.filter(pk => pk.opr === oprSel.value);
+    const bases = [...new Set(scoped.map(pk => pk.base))].sort();
+    fillSelect(baseSel, bases, preselect);
+    refreshFleets(preselect ? (existing && existing.fleet) : null);
+  };
+  const refreshFleets = (preselect) => {
+    let scoped = oprSel.value === 'ALL' ? packs : packs.filter(pk => pk.opr === oprSel.value);
+    scoped = baseSel.value === 'ALL' ? scoped : scoped.filter(pk => pk.base === baseSel.value);
+    const fleets = [...new Set(scoped.map(pk => pk.fleet))].sort();
+    fillSelect(fleetSel, fleets, preselect);
+    _queueLayerPreview(panel, getScope);
+  };
+  oprSel.onchange = () => refreshBases(null);
+  baseSel.onchange = () => refreshFleets(null);
+  const getScope = () => ({opr: oprSel.value, base: baseSel.value, fleet: fleetSel.value});
+  refreshBases(existing && existing.base);
 
   // Live count while editing — every property input re-runs a debounced
   // /pbs/layers/preview fetch so the match count updates as you type,
@@ -5769,7 +5930,15 @@ function _gatherLayerProperties(panel){
     min_days: _numOrNull(panel.querySelector('.lf-min-days').value),
     max_days: _numOrNull(panel.querySelector('.lf-max-days').value),
     min_block: _numOrNull(panel.querySelector('.lf-min-block').value),
+    max_block: _numOrNull(panel.querySelector('.lf-max-block').value),
     min_tafb: _numOrNull(panel.querySelector('.lf-min-tafb').value),
+    max_tafb: _numOrNull(panel.querySelector('.lf-max-tafb').value),
+    min_tpay: _numOrNull(panel.querySelector('.lf-min-tpay').value),
+    max_tpay: _numOrNull(panel.querySelector('.lf-max-tpay').value),
+    min_report: _numOrNull(panel.querySelector('.lf-min-report').value),
+    max_report: _numOrNull(panel.querySelector('.lf-max-report').value),
+    min_release: _numOrNull(panel.querySelector('.lf-min-release').value),
+    max_release: _numOrNull(panel.querySelector('.lf-max-release').value),
     max_legs_per_day: _numOrNull(panel.querySelector('.lf-max-legs').value),
     red_eye: panel.querySelector('.lf-redeye').value,
     layover_include: _stationList(panel.querySelector('.lf-layover-include').value),
@@ -5791,7 +5960,11 @@ function _queueLayerPreview(panel, getScope){
     const params = new URLSearchParams({
       opr, base, fleet,
       min_days: props.min_days ?? '', max_days: props.max_days ?? '',
-      min_block: props.min_block ?? '', min_tafb: props.min_tafb ?? '',
+      min_block: props.min_block ?? '', max_block: props.max_block ?? '',
+      min_tafb: props.min_tafb ?? '', max_tafb: props.max_tafb ?? '',
+      min_tpay: props.min_tpay ?? '', max_tpay: props.max_tpay ?? '',
+      min_report: props.min_report ?? '', max_report: props.max_report ?? '',
+      min_release: props.min_release ?? '', max_release: props.max_release ?? '',
       max_legs_per_day: props.max_legs_per_day ?? '',
       red_eye: props.red_eye,
       layover_include: props.layover_include.join(','),
@@ -5812,18 +5985,18 @@ async function layerSaveForm(panel, existing, msgEl){
   const name = panel.querySelector('.lf-name').value.trim();
   if(!name){ msgEl.textContent = 'Name is required.'; msgEl.style.color = 'var(--red)'; return; }
   const properties = _gatherLayerProperties(panel);
+  const opr = panel.querySelector('.lf-opr').value;
+  const base = panel.querySelector('.lf-base').value;
+  const fleet = panel.querySelector('.lf-fleet').value;
+  if(!opr || !base || !fleet){ msgEl.textContent = 'Pick an operator/base/fleet.'; msgEl.style.color = 'var(--red)'; return; }
   try {
     let r;
     if(existing){
       r = await fetch('/pbs/layers/' + existing.id, {
         method: 'PUT', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({name, properties}),
+        body: JSON.stringify({name, opr, base, fleet, properties}),
       });
     } else {
-      const opr = panel.querySelector('.lf-opr').value;
-      const base = panel.querySelector('.lf-base').value;
-      const fleet = panel.querySelector('.lf-fleet').value;
-      if(!opr || !base || !fleet){ msgEl.textContent = 'Pick an operator/base/fleet.'; msgEl.style.color = 'var(--red)'; return; }
       r = await fetch('/pbs/layers', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({name, opr, base, fleet, properties}),
