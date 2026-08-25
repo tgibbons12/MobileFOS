@@ -1281,24 +1281,6 @@ def update_bid_layer(layer_id):
     return jsonify(updated)
 
 
-@app.route("/pbs/layers/reorder", methods=["PUT"])
-def reorder_bid_layers():
-    """Real PBS bids are worked as a priority stack — Layer 1, Layer 2,
-    Layer 3 — so saved layers need the same explicit ordering, not just an
-    alphabetical or creation-order list. bid_layers is already a plain
-    ordered JSON array, so "Layer N" is just its 1-based position; this
-    route only reorders that array to a caller-supplied id sequence."""
-    body = request.get_json(silent=True) or {}
-    order = body.get("order") or []
-    layers = current_user.bid_layers or []
-    by_id = {l["id"]: l for l in layers}
-    if set(order) != set(by_id.keys()):
-        return jsonify({"error": "order must list exactly the current layer ids"}), 400
-    current_user.bid_layers = [by_id[i] for i in order]
-    db.session.commit()
-    return jsonify({"ok": True})
-
-
 @app.route("/pbs/layers/<layer_id>", methods=["DELETE"])
 def delete_bid_layer(layer_id):
     layers = list(current_user.bid_layers or [])
@@ -3659,7 +3641,6 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .doc-row .desc.lib-routing{color:var(--value);}
   .doc-row .desc.lib-routing b{font-weight:700;}
   .lib-stats{text-align:right;font-size:12px;color:var(--label);flex:0 0 auto;line-height:1.45;white-space:nowrap;}
-  .layer-reorder{display:flex;flex-direction:column;gap:2px;flex:0 0 auto;margin-right:4px;}
   /* .panel button (0,1,1) outranks a bare .layer-move-btn (0,1,0), so the
      in-panel copy needs the extra qualifier or these render as full-size
      blue primary buttons inside the layer stack. */
@@ -5830,16 +5811,16 @@ async function layerShowList(){
     if(!layers.length){
       list.innerHTML = '<p class="placeholder-note" style="padding:14px;">No layers yet — save a filter to start sorting a pack’s pairings.</p>';
     }
-    layers.forEach((layer, i) => list.appendChild(layerRow(layer, i, layers.length)));
+    layers.forEach(layer => list.appendChild(layerRow(layer)));
     body.appendChild(pane);
   } catch(e) { body.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>'; }
 }
-// One saved bid in the list. Deliberately NOT labelled "Layer N" — the
-// numbered layers live INSIDE a bid (its criterion stack), so numbering
-// the saved bids too would overload the word against how a real PBS bid
-// reads. The up/down arrows just order the pilot's own saved list, via
-// /pbs/layers/reorder.
-function layerRow(layer, index, total){
+// One saved bid in the list. No ordering controls and no "Layer N" label
+// here on purpose: the numbered, reorderable layers live INSIDE a bid
+// (its criterion stack), and priority only means anything there. Saved
+// bids are just independent saved searches — ordering them would imply a
+// precedence between whole bids that nothing in this app acts on.
+function layerRow(layer){
   const row = document.createElement('div');
   row.className = 'doc-row lib-row';
   const left = document.createElement('div');
@@ -5853,38 +5834,9 @@ function layerRow(layer, index, total){
   const countLine = document.createElement('div');
   countLine.textContent = layer.count + ' pairing' + (layer.count === 1 ? '' : 's');
   stats.appendChild(countLine);
-  const reorder = document.createElement('div');
-  reorder.className = 'layer-reorder';
-  const upBtn = document.createElement('button');
-  upBtn.type = 'button'; upBtn.className = 'layer-move-btn'; upBtn.textContent = '▲';
-  upBtn.disabled = index === 0;
-  upBtn.onclick = (e) => { e.stopPropagation(); moveLayer(layer.id, -1); };
-  const downBtn = document.createElement('button');
-  downBtn.type = 'button'; downBtn.className = 'layer-move-btn'; downBtn.textContent = '▼';
-  downBtn.disabled = index === total - 1;
-  downBtn.onclick = (e) => { e.stopPropagation(); moveLayer(layer.id, 1); };
-  reorder.appendChild(upBtn); reorder.appendChild(downBtn);
-  row.appendChild(reorder); row.appendChild(left); row.appendChild(stats);
+  row.appendChild(left); row.appendChild(stats);
   row.onclick = () => layerShowPairings(layer);
   return row;
-}
-async function moveLayer(id, delta){
-  try {
-    const r = await fetch('/pbs/layers');
-    const layers = await r.json();
-    if(!r.ok) return;
-    const ids = layers.map(l => l.id);
-    const i = ids.indexOf(id);
-    const j = i + delta;
-    if(i === -1 || j < 0 || j >= ids.length) return;
-    [ids[i], ids[j]] = [ids[j], ids[i]];
-    const r2 = await fetch('/pbs/layers/reorder', {
-      method: 'PUT', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({order: ids}),
-    });
-    if(!r2.ok) { showToast('Could not reorder'); return; }
-    layerShowList();
-  } catch(e) { showToast('Request failed: ' + e); }
 }
 // Round-number dropdowns instead of free-typed numbers — less error-prone
 // (no fat-fingered "45" meant to be "4.5"), and on iOS a plain <select>
