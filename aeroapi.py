@@ -80,19 +80,30 @@ def _get(path, api_key, params=None):
 
 def _is_aa_flight(f):
     """True if this flight is American — flown by mainline AA (operator_icao
-    "AAL"), or flown by a regional partner (Envoy, SkyWest, PSA, etc.) under
-    an American Eagle codeshare. Filtering on operator_icao alone only ever
-    caught mainline nonstops: most short/thin AA markets (e.g. PHX-RNO) are
-    flown entirely by a regional partner, whose own ICAO shows up as the
-    operator while "AAL" only appears in that flight's codeshares — so an
-    operator_icao-only filter reported AA doesn't serve them at all. Per
-    AeroAPI's flight schema, `codeshares`/`codeshares_iata` list the other
-    carriers selling seats on a flight actually operated by someone else."""
+    "AAL"), or flown by a regional partner (Envoy, SkyWest, PSA, Republic,
+    etc.) under an American Eagle codeshare. Filtering on operator_icao
+    alone only ever caught mainline nonstops: most short/thin AA markets
+    (e.g. PHX-RNO, LGA-ROA) are flown entirely by a regional partner, whose
+    own ICAO shows up as the operator while "AAL" only appears in that
+    flight's codeshares — so an operator_icao-only filter reported AA
+    doesn't serve them at all.
+
+    Confirmed 2026-08-24 against a real Republic-operated LGA-ROA flight
+    (GET /flights/AA4688): `codeshares`/`codeshares_iata` don't hold bare
+    airline codes ("AAL"/"AA") the way an exact-membership check assumed —
+    they hold the OTHER carrier's full flight ident, e.g.
+    codeshares=["AAL4688"], codeshares_iata=["AA4688"]. `"AAL" in
+    {"AAL4688"}` is False, so that exact-match check silently matched
+    nothing, ever, on any regionally-operated AA flight — this is why AA
+    regional routes like LGA-ROA showed no AA service at all. Matching by
+    ident PREFIX instead: both "AAL" (ICAO, 3 chars) and "AA" (IATA, 2
+    chars) are uniquely American's own codes, so a startswith check can't
+    false-positive on an unrelated carrier."""
     if (f.get("operator_icao") or "").upper() == AA_ICAO:
         return True
-    if AA_ICAO in {(c or "").upper() for c in (f.get("codeshares") or [])}:
+    if any((c or "").upper().startswith(AA_ICAO) for c in (f.get("codeshares") or [])):
         return True
-    return "AA" in {(c or "").upper() for c in (f.get("codeshares_iata") or [])}
+    return any((c or "").upper().startswith("AA") for c in (f.get("codeshares_iata") or []))
 
 
 def _aa_airport_flights(api_key, airport, direction):
