@@ -122,12 +122,17 @@ def _airport_icao(code):
 # PBS's equipment codes are keyed by exact sub-fleet code, not a shared
 # prefix — a prefix scheme can't work here since it collides on real codes
 # (21A/21C/21D/21S are A321ceo but 21Q is A321neo; 73G is a 737-700 but
-# 73S/73W are 737-800; 39E is a 767 but 39N is an A330; E70 is an E170 but
-# E7L/E7S/E7W are E175s; E90 is an E190 but E95 is an E195). Table below is
-# straight off the operator's own OPERATOR/FLEET sub-fleet reference
-# (equipment code -> aircraft), not guessed. Extend as more codes get
-# confirmed; anything unmapped (including already-ICAO codes like "B738"
-# from a SimBrief-loaded leg) passes through unchanged.
+# 73S/73W are 737-800; 39E is a 737-900 but 39N is an A330; E70 is an E170
+# but E7L/E7S/E7W are E175s; E90 is an E190 but E95 is an E195; 738K/738R
+# are 737-800s but 738M is a MAX 8; H319 is an A319 but H205 is an A320,
+# so even the digits in a code aren't reliable). Table below is straight
+# off the operator's own OPERATOR/FLEET sub-fleet reference (equipment
+# code -> aircraft), not guessed. Extend as more codes get confirmed;
+# anything unmapped (including already-ICAO codes like "B738" or "A320"
+# from a SimBrief-loaded leg) passes through unchanged — which is why a
+# genuinely unknown code is left OUT of this table rather than given a
+# best guess: an unmapped code fails visibly, a wrong one silently feeds
+# SimBrief the wrong airframe and returns plausible but wrong performance.
 _FLEET_TYPE_ICAO = {
     "19E": "A319", "19F": "A319", "19S": "A319",
     "1NX": "A21N",
@@ -152,6 +157,25 @@ _FLEET_TYPE_ICAO = {
     "E7L": "E175", "E7S": "E175", "E7W": "E175",
     "E90": "E190",
     "E95": "E195",
+    # --- 4-character sub-fleet codes (Smart Routes "AC CODE" column) ---
+    # Same reference, newer scheme — most of the network moved to 4-char
+    # codes while the 3-char ones above stayed in use, so both forms have
+    # to resolve.
+    "319S": "A319", "319W": "A319", "H319": "A319",
+    # F320 (CFM sharklet), 320S (IAE sharklet) and H205 are all A320ceo —
+    # engine/winglet sub-variants, which the ICAO type code doesn't
+    # distinguish. Worth knowing if SimBrief airframe selection ever needs
+    # to tell a CFM56 A320 from a V2500 one: that detail is lost here.
+    "320S": "A320", "F320": "A320", "H205": "A320",
+    "320N": "A20N",
+    "321F": "A321", "321K": "A321", "321R": "A321", "321T": "A321",
+    "F321": "A321",
+    "321E": "A21N", "321L": "A21N", "321N": "A21N", "321X": "A21N",
+    "330N": "A339",
+    "738K": "B738", "738R": "B738",
+    "738M": "B38M",
+    "E4X": "E45X",
+    "EMJ": "E145", "ERD": "E145",
 }
 
 
