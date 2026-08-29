@@ -57,6 +57,15 @@ class User(UserMixin, db.Model):
     # current trip (Schedule > My Trip's Pick Up button) — not leg-scoped
     # like current_leg_id, and only cleared by an explicit Close Trip.
     active_seq = db.Column(db.String(32))
+    # Company-document publishing rights. Deliberately nullable with no DB
+    # default so the migration is one portable ALTER on both SQLite and
+    # Postgres (a BOOLEAN DEFAULT 0 is rejected by Postgres, DEFAULT FALSE
+    # by older SQLite) — read it as bool(user.is_admin) everywhere, where
+    # NULL means "not an admin". This is the app's first real role: unlike
+    # pairing packs (uploaded on the honor system, user_id audit-only), a
+    # published doc forces an acknowledgement on every other pilot, so who
+    # can publish one is enforced rather than assumed.
+    is_admin = db.Column(db.Boolean, default=False)
     created_at = db.Column(db.DateTime(timezone=True), default=_now)
 
     def set_password(self, password):
@@ -165,3 +174,49 @@ class TripCheckIn(db.Model):
     seq = db.Column(db.String(32), nullable=False, index=True)
     signature = db.Column(db.Text)
     signed_at = db.Column(db.String(64))
+
+
+class Document(db.Model):
+    """One company document published to every pilot on this instance —
+    same instance-wide sharing model as PairingPack (upload once, everyone
+    sees it), but publishing is admin-gated because every pilot has to
+    acknowledge it.
+
+    `slug` is the stable identity across revisions (derived from the
+    filename, the same way a pack is keyed by opr/base/fleet rather than by
+    row id): re-uploading the same slug bumps `revision` and clears that
+    document's acknowledgements, so a revised manual has to be
+    re-acknowledged rather than silently inheriting the old sign-offs.
+
+    The PDF rides as base64 in a Text column, matching ReleaseCache's
+    already-proven approach for storing generated PDFs — keeps this to one
+    table with no filesystem/object-store dependency, which matters on
+    Railway where the app's own disk is ephemeral."""
+    __tablename__ = "documents"
+    id = db.Column(db.Integer, primary_key=True)
+    slug = db.Column(db.String(160), unique=True, nullable=False, index=True)
+    title = db.Column(db.String(200), nullable=False)
+    filename = db.Column(db.String(200), nullable=False)
+    category = db.Column(db.String(64))
+    pdf_b64 = db.Column(db.Text, nullable=False)
+    size_bytes = db.Column(db.Integer, default=0)
+    revision = db.Column(db.Integer, nullable=False, default=1)
+    uploaded_by = db.Column(db.Integer, db.ForeignKey("users.id"))
+    uploaded_at = db.Column(db.DateTime(timezone=True), default=_now)
+
+
+class DocumentAck(db.Model):
+    """One pilot's acknowledgement of one document revision. `revision` is
+    stored on the ack (not just inferred) so the audit trail still says
+    which version was actually acknowledged after the doc is revised —
+    a re-upload deletes the outstanding acks, but this row's revision
+    records what the pilot saw when they signed off."""
+    __tablename__ = "document_acks"
+    id = db.Column(db.Integer, primary_key=True)
+    document_id = db.Column(db.Integer, db.ForeignKey("documents.id"), nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    revision = db.Column(db.Integer, nullable=False, default=1)
+    acknowledged_at = db.Column(db.String(64))
+    __table_args__ = (
+        db.UniqueConstraint("document_id", "user_id", name="uq_ack_doc_user"),
+    )

@@ -20,6 +20,7 @@ import io
 import json
 import logging
 import os
+import re
 import time
 import uuid
 import xml.etree.ElementTree as ET
@@ -38,7 +39,10 @@ import pbs_format
 import pbs_parser
 import release_engine
 from fos_pages import AIRLINE_IATA, synthesize_crew
-from models import db, User, Leg, PbsImport, PairingPack, SignatureLog, ReleaseCache, TripCheckIn
+from models import (
+    db, User, Leg, PbsImport, PairingPack, SignatureLog, ReleaseCache, TripCheckIn,
+    Document, DocumentAck,
+)
 import simbrief_ofp
 
 # ICAO -> IANA timezone name (e.g. "America/Phoenix"), used to convert a PBS
@@ -330,6 +334,14 @@ def _ensure_columns():
         with db.engine.begin() as conn:
             conn.execute(sa_text("ALTER TABLE users ADD COLUMN active_seq VARCHAR(32)"))
         LOG.info("Migrated: added users.active_seq")
+    if "is_admin" not in existing:
+        # No DB-level default on purpose — "BOOLEAN DEFAULT 0" is rejected
+        # by Postgres and "DEFAULT FALSE" by older SQLite, so a bare
+        # nullable column is the one form that migrates cleanly on both.
+        # Existing rows land as NULL, which bool() reads as not-an-admin.
+        with db.engine.begin() as conn:
+            conn.execute(sa_text("ALTER TABLE users ADD COLUMN is_admin BOOLEAN"))
+        LOG.info("Migrated: added users.is_admin")
     existing_pbs = {c["name"] for c in inspector.get_columns("pbs_imports")}
     if "pending_edits" not in existing_pbs:
         with db.engine.begin() as conn:
@@ -1345,6 +1357,177 @@ def list_bid_layer_pairings(layer_id):
         "funnel": _layer_funnel(scoped, layer.get("criteria") or []),
         "total_in_scope": len(scoped),
     })
+
+
+# ---------------------------------------------------------------------------
+# Company documents — instance-wide PDFs (ops manuals, bulletins, revisions)
+# published by an admin and acknowledged by every pilot.
+#
+# Same "upload once, everyone sees it" model as PairingPack, with one hard
+# difference: publishing forces an acknowledgement on every other pilot, so
+# unlike pack import (honor system, user_id audit-only) this is gated on a
+# real User.is_admin. Uploads come through upload_docs.py, mirroring
+# bulk_import_packs.py.
+# ---------------------------------------------------------------------------
+# Base64 inflates by ~4/3, and the whole payload is JSON-parsed in memory on
+# a small Railway dyno — cap the decoded PDF rather than letting an
+# accidental 200MB upload take the process down.
+MAX_DOC_BYTES = 25 * 1024 * 1024
+
+
+def _admin_required():
+    """None when the caller may publish, else a ready-to-return 403."""
+    if bool(getattr(current_user, "is_admin", False)):
+        return None
+    return jsonify({"error": "only an admin can publish documents"}), 403
+
+
+def _doc_slug(filename):
+    """Stable cross-revision identity from the filename — lowercased, no
+    extension, non-alphanumerics collapsed to '-'. Re-uploading
+    "FOM-Rev-12.pdf" over "FOM Rev 12.PDF" is the same document."""
+    stem = re.sub(r"\.pdf$", "", (filename or "").strip(), flags=re.I)
+    return re.sub(r"[^a-z0-9]+", "-", stem.lower()).strip("-") or "document"
+
+
+def _doc_summary(doc, acked_ids):
+    return {
+        "id": doc.id, "slug": doc.slug, "title": doc.title,
+        "filename": doc.filename, "category": doc.category or "",
+        "revision": doc.revision, "size_bytes": doc.size_bytes or 0,
+        "uploaded_at": doc.uploaded_at.isoformat() if doc.uploaded_at else "",
+        "acknowledged": doc.id in acked_ids,
+    }
+
+
+def _acked_doc_ids():
+    return {
+        a.document_id for a in
+        DocumentAck.query.filter_by(user_id=current_user.id).all()
+    }
+
+
+def _unacked_doc_count():
+    """Drives the blocking banner. Counts documents this pilot has no ack
+    row for — a revision bump deletes that document's acks, so a revised
+    doc comes back into this count automatically."""
+    total = Document.query.count()
+    if not total:
+        return 0
+    return total - DocumentAck.query.filter_by(user_id=current_user.id).count()
+
+
+@app.route("/docs/list")
+def list_documents():
+    acked = _acked_doc_ids()
+    docs = Document.query.order_by(Document.uploaded_at.desc()).all()
+    return jsonify({
+        "documents": [_doc_summary(d, acked) for d in docs],
+        "unacknowledged": _unacked_doc_count(),
+        "is_admin": bool(getattr(current_user, "is_admin", False)),
+    })
+
+
+@app.route("/docs/<int:doc_id>/pdf")
+def document_pdf(doc_id):
+    doc = db.session.get(Document, doc_id)
+    if not doc:
+        return jsonify({"error": "not found"}), 404
+    acked = _acked_doc_ids()
+    return jsonify({**_doc_summary(doc, acked), "pdf_b64": doc.pdf_b64})
+
+
+@app.route("/docs/<int:doc_id>/ack", methods=["POST"])
+def acknowledge_document(doc_id):
+    doc = db.session.get(Document, doc_id)
+    if not doc:
+        return jsonify({"error": "not found"}), 404
+    existing = DocumentAck.query.filter_by(document_id=doc_id, user_id=current_user.id).first()
+    acknowledged_at = datetime.now(timezone.utc).isoformat()
+    if existing:
+        # Idempotent — re-acknowledging just refreshes the recorded
+        # revision/timestamp rather than erroring or duplicating the row.
+        existing.revision, existing.acknowledged_at = doc.revision, acknowledged_at
+    else:
+        db.session.add(DocumentAck(
+            document_id=doc_id, user_id=current_user.id,
+            revision=doc.revision, acknowledged_at=acknowledged_at,
+        ))
+    db.session.commit()
+    LOG.info(f"DOC ACK doc={doc_id} rev={doc.revision} user={current_user.username} at={acknowledged_at}")
+    return jsonify({"ok": True, "acknowledged_at": acknowledged_at, "unacknowledged": _unacked_doc_count()})
+
+
+@app.route("/docs/import", methods=["POST"])
+def import_document():
+    """Body: {title, filename, pdf_b64, category}. Re-uploading the same
+    slug replaces that document in place, bumps its revision, and clears
+    its acknowledgements so every pilot has to acknowledge the new
+    revision — the whole point of versioning these."""
+    denied = _admin_required()
+    if denied:
+        return denied
+    body = request.get_json(silent=True) or {}
+    filename = (body.get("filename") or "").strip()
+    pdf_b64 = (body.get("pdf_b64") or "").strip()
+    title = (body.get("title") or "").strip() or re.sub(r"\.pdf$", "", filename, flags=re.I)
+    if not filename or not pdf_b64:
+        return jsonify({"error": "filename and pdf_b64 are both required"}), 400
+    try:
+        raw = base64.b64decode(pdf_b64, validate=True)
+    except Exception:
+        return jsonify({"error": "pdf_b64 is not valid base64"}), 400
+    if not raw.startswith(b"%PDF"):
+        return jsonify({"error": "that file isn't a PDF"}), 400
+    if len(raw) > MAX_DOC_BYTES:
+        return jsonify({"error": f"PDF is {len(raw) // (1024*1024)}MB — the limit is {MAX_DOC_BYTES // (1024*1024)}MB"}), 413
+
+    slug = _doc_slug(filename)
+    doc = Document.query.filter_by(slug=slug).first()
+    if doc:
+        doc.title, doc.filename = title, filename
+        doc.category = (body.get("category") or "").strip() or None
+        doc.pdf_b64, doc.size_bytes = pdf_b64, len(raw)
+        doc.revision += 1
+        doc.uploaded_by, doc.uploaded_at = current_user.id, datetime.now(timezone.utc)
+        DocumentAck.query.filter_by(document_id=doc.id).delete()
+    else:
+        doc = Document(
+            slug=slug, title=title, filename=filename,
+            category=(body.get("category") or "").strip() or None,
+            pdf_b64=pdf_b64, size_bytes=len(raw), revision=1,
+            uploaded_by=current_user.id,
+        )
+        db.session.add(doc)
+    db.session.commit()
+    LOG.info(f"DOC PUBLISH slug={slug} rev={doc.revision} by={current_user.username} bytes={len(raw)}")
+    return jsonify({
+        "id": doc.id, "slug": doc.slug, "title": doc.title,
+        "revision": doc.revision, "size_bytes": doc.size_bytes,
+        "acks_cleared": doc.revision > 1,
+    })
+
+
+@app.route("/docs/<int:doc_id>", methods=["DELETE"])
+def delete_document(doc_id):
+    denied = _admin_required()
+    if denied:
+        return denied
+    doc = db.session.get(Document, doc_id)
+    if not doc:
+        return jsonify({"error": "not found"}), 404
+    DocumentAck.query.filter_by(document_id=doc_id).delete()
+    db.session.delete(doc)
+    db.session.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/docs")
+def docs_root():
+    """The Docs tab's own leg-independent root, same pattern as
+    /schedule — company documents aren't scoped to any one flight, and the
+    acknowledgement banner has to be reachable with no leg loaded."""
+    return Response(render_fos_html({"id": ""}, default_view="doclocker"), mimetype="text/html")
 
 
 @app.route("/pbs/sequences")
@@ -2713,6 +2896,7 @@ def render_launcher_html():
         default_simbrief_user=_js_str(current_user.default_simbrief_user),
         current_leg_id=str(current_leg["id"]) if current_leg else "",
         current_leg_disabled="" if current_leg else " disabled",
+        unacked_docs=str(_unacked_doc_count()),
         app_version=APP_VERSION,
     )
 
@@ -2827,7 +3011,7 @@ def _fdp_remaining_display(fdp_end_dec, origin):
         return None
 
 
-def render_fos_html(leg):
+def render_fos_html(leg, default_view=""):
     ctx = {**DEFAULT_LEG, **leg}
     ctx["customer_load"] = str(ctx.get("customer_load") or "")
     crew = ctx.get("crew")
@@ -2944,6 +3128,11 @@ def render_fos_html(leg):
     ctx["app_version"] = APP_VERSION
     ctx["mot_display"] = _mot_display(ctx.get("mot") or "", ctx.get("origin") or "", current_user.timezone)
     ctx["timezone_options"] = _timezone_options_html(current_user.timezone)
+    ctx["default_view"] = default_view
+    ctx["is_admin"] = "1" if bool(getattr(current_user, "is_admin", False)) else ""
+    # Server-rendered rather than fetched, so the banner is on screen with
+    # the first paint instead of appearing a moment later on every page.
+    ctx["unacked_docs"] = str(_unacked_doc_count())
     _SIG_IMAGE_KEYS = {"signature", "ffd_signature", "eflightplan_signature"}
     str_ctx = {k: ("" if v is None else str(v)) for k, v in ctx.items() if k not in _SIG_IMAGE_KEYS}
     return Template(FOS_TEMPLATE).safe_substitute(**str_ctx)
@@ -3020,6 +3209,9 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
   .home-tile .tile-title{font-size:15px;font-weight:700;color:var(--value);}
   .home-tile .tile-sub{font-size:12.5px;color:var(--label);margin-top:2px;}
 </style></head><body>
+<!-- Styled inline rather than via .ffd-banner: that class lives only in
+     FOS_TEMPLATE's stylesheet, and this template has its own. -->
+<div id="doc-ack-banner" style="display:none;cursor:pointer;background:var(--red);color:#fff;font-size:13px;font-weight:600;line-height:1.4;padding:11px 17px;" onclick="window.location.href='/docs'"></div>
 
 <button class="settings-fab" title="Settings" onclick="window.location.href='/schedule?view=settings'">
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.34 1.87l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.7 1.7 0 00-1.87-.34 1.7 1.7 0 00-1 1.55V21a2 2 0 11-4 0v-.09A1.7 1.7 0 009 19.4a1.7 1.7 0 00-1.87.34l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.7 1.7 0 004.6 15a1.7 1.7 0 00-1.55-1H3a2 2 0 110-4h.09A1.7 1.7 0 004.6 9a1.7 1.7 0 00-.34-1.87l-.06-.06a2 2 0 112.83-2.83l.06.06A1.7 1.7 0 009 4.6a1.7 1.7 0 001-1.55V3a2 2 0 114 0v.09a1.7 1.7 0 001 1.55 1.7 1.7 0 001.87-.34l.06-.06a2 2 0 112.83 2.83l-.06.06A1.7 1.7 0 0019.4 9a1.7 1.7 0 001.55 1H21a2 2 0 110 4h-.09a1.7 1.7 0 00-1.55 1z"/></svg>
@@ -3132,7 +3324,7 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
     <span>Messages</span>
   </button>
-  <button class="navtab"$current_leg_disabled id="tab-docs" onclick="homeNavTab('doclocker')">
+  <button class="navtab" id="tab-docs" onclick="window.location.href='/docs'">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5"/><path d="M9.5 13h5M9.5 16h5"/></svg>
     <span>Docs</span>
   </button>
@@ -3154,6 +3346,16 @@ function homeNavTab(view){
   if(!CURRENT_LEG_ID) return;
   window.location.href = '/fos/' + CURRENT_LEG_ID + '?view=' + view;
 }
+// Company documents need acknowledging whether or not a leg is loaded, so
+// this banner is on Home too (FOS_TEMPLATE renders its own copy).
+(function(){
+  const n = parseInt("$unacked_docs", 10) || 0;
+  if(!n) return;
+  const el = document.getElementById('doc-ack-banner');
+  el.textContent = n + ' company document' + (n === 1 ? '' : 's')
+    + ' need' + (n === 1 ? 's' : '') + ' your acknowledgement — tap to review.';
+  el.style.display = '';
+})();
 function showHomeView(view){
   document.getElementById('home-view').classList.toggle('active', view==='home');
   document.getElementById('load-sequence-view').classList.toggle('active', view==='load-sequence');
@@ -3769,6 +3971,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.34 1.87l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.7 1.7 0 00-1.87-.34 1.7 1.7 0 00-1 1.55V21a2 2 0 11-4 0v-.09A1.7 1.7 0 009 19.4a1.7 1.7 0 00-1.87.34l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.7 1.7 0 004.6 15a1.7 1.7 0 00-1.55-1H3a2 2 0 110-4h.09A1.7 1.7 0 004.6 9a1.7 1.7 0 00-.34-1.87l-.06-.06a2 2 0 112.83-2.83l.06.06A1.7 1.7 0 009 4.6a1.7 1.7 0 001-1.55V3a2 2 0 114 0v.09a1.7 1.7 0 001 1.55 1.7 1.7 0 001.87-.34l.06-.06a2 2 0 112.83 2.83l-.06.06A1.7 1.7 0 0019.4 9a1.7 1.7 0 001.55 1H21a2 2 0 110 4h-.09a1.7 1.7 0 00-1.55 1z"/></svg>
 </button>
 <div class="app-shell">
+  <div id="doc-ack-banner" class="ffd-banner" style="display:none;cursor:pointer;" onclick="showView('doclocker')"></div>
   <main class="main">
     <section id="overview-view" class="view active">
       <div class="topbar">
@@ -3975,7 +4178,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         <button class="back-link" onclick="showView('overview')" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
         <div class="topbar-title"><h1>Docs</h1></div>
       </div>
-      <p class="placeholder-note">No documents.</p>
+      <div id="doclocker-body"><p class="placeholder-note">Loading…</p></div>
     </section>
 
     <section id="messages-view" class="view">
@@ -3997,6 +4200,10 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         </div>
       </div>
       <div id="pdf-ffd-banner" class="ffd-banner" style="display:none;">Fit for Duty not signed — you can view this document, but Export is locked until you sign it.</div>
+      <div id="pdf-ack-bar" style="display:none;padding:11px 14px;background:var(--card);border-bottom:1px solid var(--border);align-items:center;gap:10px;">
+        <span id="pdf-ack-text" style="font-size:12.5px;color:var(--label);flex:1;"></span>
+        <button type="button" id="pdf-ack-btn" style="margin:0;padding:8px 14px;font-size:13px;">Acknowledge</button>
+      </div>
       <div id="pdf-pages" style="background:#525659;margin:0 -16px;padding:12px 12px 32px;display:flex;flex-direction:column;align-items:center;gap:12px;"></div>
     </section>
     <section id="motlog-view" class="view">
@@ -4339,6 +4546,7 @@ function showView(view){
   if(view === 'sign') initSignPad();
   if(view === 'settings'){ updateThemeButtons(); updateAutoSyncButtons(); }
   if(view === 'saveddocs') initSavedDocs();
+  if(view === 'doclocker') initDocLocker();
   if(view === 'pairing') initPairingView();
   if(view === 'overview') initOverviewPills();
   if(view === 'weather' && !_weatherLoaded) loadWeather();
@@ -4353,6 +4561,10 @@ function showView(view){
 // Overview/Messages/Docs to show without a leg.
 function navTab(view){
   if(view === 'pairing'){ window.location.href = '/schedule'; return; }
+  // Company docs aren't scoped to a leg — Docs has its own root, so this
+  // tab works with no leg loaded instead of bouncing to Home like the
+  // genuinely leg-scoped tabs do.
+  if(view === 'doclocker'){ if(!LEG_ID){ window.location.href = '/docs'; return; } showView(view); return; }
   if(!LEG_ID){ window.location.href = '/'; return; }
   showView(view);
 }
@@ -4850,6 +5062,10 @@ async function viewDoc(kind, label){
   if(!b64){ showToast(label + ' not available in this release'); return; }
   document.getElementById('pdf-view-title').textContent = label;
   showView('pdf');
+  // pdf-view is shared with the company-doc viewer — clear that state so a
+  // release PDF never shows the previous document's Acknowledge bar.
+  _currentCompanyDoc = null;
+  document.getElementById('pdf-ack-bar').style.display = 'none';
   // Export still uses a blob: URL (fine for downloads) — the inline VIEW uses
   // PDF.js on canvas instead of an iframe, since iOS Safari routinely refuses
   // to render PDFs inside an iframe at all (blob or data:, doesn't matter)
@@ -6721,6 +6937,136 @@ const DOC_CODE_TO_KIND = {
   'AL*': ['notams', 'NOTAMs'], 'FR': ['field_report', 'Field Reports'],
   'WX*': ['weather', 'Winds & Weather'],
 };
+// Company Docs — instance-wide PDFs an admin publishes, which every pilot
+// has to acknowledge. Distinct from Saved Docs (this leg's own bookmarked
+// release pages) and from the release PDFs in All Commands: those come out
+// of a SimBrief OFP, these are uploaded manuals/bulletins.
+const IS_ADMIN = "$is_admin" === "1";
+let _unackedDocs = parseInt("$unacked_docs", 10) || 0;
+function paintDocAckBanner(){
+  const el = document.getElementById('doc-ack-banner');
+  if(!el) return;
+  if(_unackedDocs > 0){
+    el.textContent = _unackedDocs + ' company document' + (_unackedDocs === 1 ? '' : 's')
+      + ' need' + (_unackedDocs === 1 ? 's' : '') + ' your acknowledgement — tap to review.';
+    el.style.display = '';
+  } else {
+    el.style.display = 'none';
+  }
+}
+function _fmtDocSize(bytes){
+  if(!bytes) return '';
+  const mb = bytes / (1024 * 1024);
+  return mb >= 1 ? (mb.toFixed(1) + ' MB') : (Math.max(1, Math.round(bytes / 1024)) + ' KB');
+}
+async function initDocLocker(){
+  const body = document.getElementById('doclocker-body');
+  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  try {
+    const r = await fetch('/docs/list');
+    const data = await r.json();
+    if(!r.ok){ body.innerHTML = '<p class="placeholder-note">' + (data.error || 'Failed to load') + '</p>'; return; }
+    _unackedDocs = data.unacknowledged || 0;
+    paintDocAckBanner();
+    body.innerHTML = '';
+    if(!data.documents.length){
+      body.innerHTML = '<p class="placeholder-note">No company documents published yet.</p>';
+      return;
+    }
+    const card = document.createElement('div');
+    card.className = 'panel-card';
+    data.documents.forEach(doc => {
+      const row = document.createElement('div');
+      row.className = 'doc-row lib-row';
+      const left = document.createElement('div');
+      const code = document.createElement('div'); code.className = 'code'; code.textContent = doc.title;
+      const desc = document.createElement('div'); desc.className = 'desc';
+      const bits = [
+        doc.category,
+        doc.revision > 1 ? ('Rev ' + doc.revision) : '',
+        _fmtDocSize(doc.size_bytes),
+      ].filter(Boolean);
+      desc.textContent = bits.join(' · ');
+      left.appendChild(code); left.appendChild(desc);
+      const stats = document.createElement('div'); stats.className = 'lib-stats';
+      const status = document.createElement('div');
+      if(doc.acknowledged){
+        status.textContent = 'Acknowledged';
+      } else {
+        status.textContent = 'Needs acknowledgement';
+        status.style.color = 'var(--red)';
+        status.style.fontWeight = '600';
+      }
+      stats.appendChild(status);
+      row.appendChild(left); row.appendChild(stats);
+      row.onclick = () => viewCompanyDoc(doc.id);
+      card.appendChild(row);
+    });
+    body.appendChild(card);
+  } catch(e) { body.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>'; }
+}
+let _currentCompanyDoc = null;
+async function viewCompanyDoc(docId){
+  showToast('Opening…');
+  let data;
+  try {
+    const r = await fetch('/docs/' + docId + '/pdf');
+    data = await r.json();
+    if(!r.ok){ showToast(data.error || 'Could not open that document'); return; }
+  } catch(e) { showToast('Request failed: ' + e); return; }
+  _currentCompanyDoc = data;
+  document.getElementById('pdf-view-title').textContent = data.title;
+  showView('pdf');
+  // A company doc has no FFD gate — that one is about a specific flight's
+  // release, not a manual — so Export is always live here.
+  document.getElementById('pdf-ffd-banner').style.display = 'none';
+  if(_pdfObjectUrl) URL.revokeObjectURL(_pdfObjectUrl);
+  _pdfObjectUrl = URL.createObjectURL(new Blob([b64ToBytes(data.pdf_b64)], {type:'application/pdf'}));
+  const exportLink = document.getElementById('pdf-export-link');
+  exportLink.href = _pdfObjectUrl;
+  exportLink.download = data.filename;
+  exportLink.style.opacity = '';
+  exportLink.onclick = null;
+  paintCompanyDocAckBar();
+  try {
+    await renderPdfInline(b64ToBytes(data.pdf_b64));
+  } catch(e) {
+    document.getElementById('pdf-pages').innerHTML = '<p style="color:#fff;padding:20px;">Failed to render this PDF: ' + e + '</p>';
+  }
+}
+function paintCompanyDocAckBar(){
+  const bar = document.getElementById('pdf-ack-bar');
+  const doc = _currentCompanyDoc;
+  if(!doc){ bar.style.display = 'none'; return; }
+  const txt = document.getElementById('pdf-ack-text');
+  const btn = document.getElementById('pdf-ack-btn');
+  bar.style.display = 'flex';
+  if(doc.acknowledged){
+    txt.textContent = 'Acknowledged' + (doc.revision > 1 ? (' · Rev ' + doc.revision) : '');
+    txt.style.color = 'var(--label)';
+    btn.style.display = 'none';
+  } else {
+    txt.textContent = 'You have not acknowledged this document yet.';
+    txt.style.color = 'var(--red)';
+    btn.style.display = '';
+    btn.disabled = false;
+    btn.onclick = () => acknowledgeCompanyDoc(doc.id);
+  }
+}
+async function acknowledgeCompanyDoc(docId){
+  const btn = document.getElementById('pdf-ack-btn');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/docs/' + docId + '/ack', {method: 'POST'});
+    const data = await r.json();
+    if(!r.ok){ btn.disabled = false; showToast(data.error || 'Could not acknowledge'); return; }
+    if(_currentCompanyDoc && _currentCompanyDoc.id === docId) _currentCompanyDoc.acknowledged = true;
+    _unackedDocs = data.unacknowledged || 0;
+    paintDocAckBanner();
+    paintCompanyDocAckBar();
+    showToast('Acknowledged');
+  } catch(e) { btn.disabled = false; showToast('Request failed: ' + e); }
+}
 function initSavedDocs(){
   const body = document.getElementById('saveddocs-body');
   if(!LEG_BOOKMARKED_DOCS.length){
@@ -7008,7 +7354,8 @@ function renderWeather(stations){
 
 (function(){
   const params = new URLSearchParams(window.location.search);
-  const view = params.get('view');
+  const view = params.get('view') || "$default_view";
+  paintDocAckBanner();
   if(!LEG_ID){
     // /schedule — the leg-independent root. Nothing here is scoped to a
     // real leg, so there's no Overview to default to and no per-leg sync
@@ -7018,7 +7365,7 @@ function renderWeather(stations){
     showView(view || 'pairing');
     return;
   }
-  if(view === 'pairing' || view === 'release' || view === 'confirm' || view === 'settings') showView(view);
+  if(view === 'pairing' || view === 'release' || view === 'confirm' || view === 'settings' || view === 'doclocker') showView(view);
   else initOverviewPills();
   showDateSlipModalIfPending();
   startAutoSync();
