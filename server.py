@@ -5073,6 +5073,9 @@ async function viewDoc(kind, label){
   if(_pdfObjectUrl) URL.revokeObjectURL(_pdfObjectUrl);
   _pdfObjectUrl = URL.createObjectURL(new Blob([b64ToBytes(b64)], {type:'application/pdf'}));
   const exportLink = document.getElementById('pdf-export-link');
+  // Release PDFs are exportable — restore the link the company-doc viewer
+  // hides, since both share this one pdf-view.
+  exportLink.style.display = '';
   const banner = document.getElementById('pdf-ffd-banner');
   // Soft gate — viewing always works; Export locks until FFD is signed,
   // with a floating banner above the rendered pages as the reminder.
@@ -5098,7 +5101,12 @@ function closePdfView(){
   _pdfRenderToken++; // cancel any render still in flight
   document.getElementById('pdf-pages').innerHTML = '';
   if(_pdfObjectUrl){ URL.revokeObjectURL(_pdfObjectUrl); _pdfObjectUrl = null; }
-  showView('allcommands');
+  // pdf-view is shared: a release PDF backs out to All Commands, but a
+  // company doc came from the Docs tab — and All Commands is leg-scoped,
+  // so on /docs (no leg) backing out there lands on an empty view.
+  const wasCompanyDoc = !!_currentCompanyDoc;
+  _currentCompanyDoc = null;
+  showView(wasCompanyDoc ? 'doclocker' : 'allcommands');
 }
 async function showMotLog(){
   showView('motlog');
@@ -7017,16 +7025,19 @@ async function viewCompanyDoc(docId){
   _currentCompanyDoc = data;
   document.getElementById('pdf-view-title').textContent = data.title;
   showView('pdf');
-  // A company doc has no FFD gate — that one is about a specific flight's
-  // release, not a manual — so Export is always live here.
+  // No FFD gate on a company doc — that one is about a specific flight's
+  // release, not a manual.
   document.getElementById('pdf-ffd-banner').style.display = 'none';
-  if(_pdfObjectUrl) URL.revokeObjectURL(_pdfObjectUrl);
-  _pdfObjectUrl = URL.createObjectURL(new Blob([b64ToBytes(data.pdf_b64)], {type:'application/pdf'}));
+  // Company documents are read-in-app only: no Export control, and
+  // deliberately no blob: URL minted for them either — _pdfObjectUrl is
+  // purely the export link's href, so creating one here would leave a
+  // downloadable handle to the file with nothing pointing at it.
+  // renderPdfInline takes the bytes directly and needs no URL.
+  if(_pdfObjectUrl){ URL.revokeObjectURL(_pdfObjectUrl); _pdfObjectUrl = null; }
   const exportLink = document.getElementById('pdf-export-link');
-  exportLink.href = _pdfObjectUrl;
-  exportLink.download = data.filename;
-  exportLink.style.opacity = '';
-  exportLink.onclick = null;
+  exportLink.style.display = 'none';
+  exportLink.removeAttribute('href');
+  exportLink.removeAttribute('download');
   paintCompanyDocAckBar();
   try {
     await renderPdfInline(b64ToBytes(data.pdf_b64));
