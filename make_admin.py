@@ -2,21 +2,30 @@
 Grants (or revokes) document-publishing rights on an account.
 
 There's deliberately no in-app UI for this — admin is a standing property
-of an account, not something to toggle from a phone mid-trip, and the
-first admin has to be created out-of-band anyway (nothing in the app can
-grant it before one exists). Run this against the same database the server
-uses: locally that's the default SQLite file, on Railway set DATABASE_URL
-to the Postgres URL first.
+of an account, not something to toggle from a phone mid-trip.
+
+TO CREATE THE FIRST ADMIN ON A DEPLOYED SERVER, USE THE ENV VAR INSTEAD:
+set ADMIN_USERNAMES=<username> in the Railway dashboard and redeploy. That
+route can't target the wrong database, which this script easily can — see
+below. This script is for local development, and for revoking.
+
+This script talks to whatever DATABASE_URL points at, exactly like the
+server does. With no DATABASE_URL set that's the LOCAL SQLite file, so
+running it on a laptop to "fix production" silently grants admin to a
+local account and changes nothing on the server — the failure this
+script now refuses to let you walk into (pass --local to confirm you
+really do mean the local database).
 
 Usage:
     .venv/bin/python3 make_admin.py --list
-    .venv/bin/python3 make_admin.py --username jetcentric
-    .venv/bin/python3 make_admin.py --username someone --revoke
+    .venv/bin/python3 make_admin.py --username pairingtest --local
+    .venv/bin/python3 make_admin.py --username someone --revoke --local
 
-On Railway (from the project shell, where DATABASE_URL is already set):
-    python3 make_admin.py --username jetcentric
+Against production, with the Railway CLI injecting the real DATABASE_URL:
+    railway run .venv/bin/python3 make_admin.py --username jetcentric
 """
 import argparse
+import os
 import sys
 
 import server
@@ -28,10 +37,24 @@ def main():
     ap.add_argument("--username", help="Account to grant/revoke admin on")
     ap.add_argument("--revoke", action="store_true", help="Revoke instead of grant")
     ap.add_argument("--list", action="store_true", help="List accounts and their admin flag")
+    ap.add_argument("--local", action="store_true",
+                    help="Confirm you mean the local database (required when DATABASE_URL is unset)")
     args = ap.parse_args()
 
     if not args.username and not args.list:
         ap.error("pass --username, or --list to see accounts")
+
+    # Refuse to act on the local SQLite file unless that was asked for
+    # explicitly. Without this the script's most likely misuse — running
+    # it on a laptop expecting to change production — succeeds loudly and
+    # accomplishes nothing, which is far worse than a refusal.
+    if not os.environ.get("DATABASE_URL") and not args.local:
+        print("No DATABASE_URL set, so this would act on the LOCAL database, not production.", file=sys.stderr)
+        print(file=sys.stderr)
+        print("  To make an admin on the deployed server, set ADMIN_USERNAMES in the", file=sys.stderr)
+        print("  Railway dashboard and redeploy (see this file's docstring).", file=sys.stderr)
+        print("  To act on the local database anyway, re-run with --local.", file=sys.stderr)
+        sys.exit(1)
 
     with server.app.app_context():
         if args.list:

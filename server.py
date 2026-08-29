@@ -373,9 +373,42 @@ def _ensure_columns():
         LOG.info("Migrated: added pbs_imports.pending_edits")
 
 
+def _sync_admin_usernames():
+    """Promote the accounts named in ADMIN_USERNAMES ("a" or "a,b,c") on
+    boot. This exists because the first admin can't be created from inside
+    the app — nothing can grant the right before one holder exists — and
+    the alternative bootstrap (running make_admin.py against production)
+    means getting the production DATABASE_URL onto a laptop, which is both
+    fiddly and easy to get silently wrong: run it without that variable
+    and it cheerfully grants admin on the local SQLite file instead, with
+    no visible difference. Setting a variable in the Railway dashboard has
+    no such failure mode.
+
+    Only ever GRANTS. Removing a name here does NOT revoke it — a
+    dropped/renamed variable shouldn't quietly strip publishing rights,
+    and revoking is a deliberate act (make_admin.py --revoke). A name
+    that doesn't match an account is logged rather than treated as an
+    error, since the variable may well be set before the account exists."""
+    names = [n.strip() for n in (os.environ.get("ADMIN_USERNAMES") or "").split(",") if n.strip()]
+    if not names:
+        return
+    changed = False
+    for name in names:
+        user = User.query.filter_by(username=name).first()
+        if user is None:
+            LOG.warning(f"ADMIN_USERNAMES lists {name!r}, but no such account exists yet")
+        elif not user.is_admin:
+            user.is_admin = True
+            changed = True
+            LOG.info(f"Granted admin to {name!r} via ADMIN_USERNAMES")
+    if changed:
+        db.session.commit()
+
+
 with app.app_context():
     db.create_all()
     _ensure_columns()
+    _sync_admin_usernames()
 
 
 # ---------------------------------------------------------------------------
