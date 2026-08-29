@@ -74,6 +74,24 @@ def main():
         sys.exit(1)
     print(f"Logged in as {args.username}.\n")
 
+    # Check admin rights BEFORE sending any PDF. Not just for a friendlier
+    # message: the server rejects a non-admin the moment it sees the
+    # request, without reading the body, and when that body is multi-MB
+    # over TLS the client ends up writing into a closed socket and raises
+    # a completely misleading "SSLError: EOF occurred in violation of
+    # protocol" instead of surfacing the real 403. One cheap GET first
+    # makes that failure mode impossible to hit.
+    try:
+        me = session.get(f"{base_url}/docs/list", timeout=30)
+        if me.ok and not me.json().get("is_admin", False):
+            print(f"{args.username!r} is not an admin, so it cannot publish documents.", file=sys.stderr)
+            print("Grant it with:  python3 make_admin.py --username " + args.username, file=sys.stderr)
+            sys.exit(1)
+    except (requests.RequestException, ValueError):
+        # Don't block on a flaky preflight — fall through and let the real
+        # upload report whatever actually goes wrong.
+        pass
+
     ok, failed = 0, 0
     for f in files:
         title, category = parse_filename(f.name)
@@ -83,7 +101,16 @@ def main():
             "category": category or "",
             "pdf_b64": base64.b64encode(f.read_bytes()).decode("ascii"),
         }
-        r = session.post(f"{base_url}/docs/import", json=payload)
+        try:
+            r = session.post(f"{base_url}/docs/import", json=payload, timeout=300)
+        except requests.RequestException as e:
+            # A torn-down connection mid-upload nearly always means the
+            # server refused the request up front (auth/permission/size)
+            # rather than anything being wrong with the network.
+            print(f"FAIL  {f.name:44s} connection dropped mid-upload — {type(e).__name__}")
+            print(f"      ({f.stat().st_size / (1024*1024):.1f} MB) — the server likely rejected it before reading the file.")
+            failed += 1
+            continue
         if r.ok:
             data = r.json()
             size_mb = data.get("size_bytes", 0) / (1024 * 1024)
