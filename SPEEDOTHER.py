@@ -1407,7 +1407,13 @@ def _interp_grid(grid, temp, altitude, max_alt_gap=None, max_temp_gap=None,
         return None
     alts = sorted(grid)
     nearest = min(alts, key=lambda a: abs(a - altitude))
-    if alt_snap is not None and abs(nearest - altitude) <= alt_snap:
+    if altitude in grid:
+        # An exact altitude is that column, not a blend of it with its
+        # neighbour. Without this the bracket search pairs it with the
+        # column below and needs BOTH curves to resolve, so one gap in a
+        # neighbouring column takes out a cell that is present and exact.
+        lo = hi = int(altitude) if float(altitude).is_integer() else altitude
+    elif alt_snap is not None and abs(nearest - altitude) <= alt_snap:
         lo = hi = nearest
     elif altitude <= alts[0]:
         if max_alt_extrap is not None and (alts[0] - altitude) > max_alt_extrap:
