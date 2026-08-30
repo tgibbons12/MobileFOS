@@ -1005,6 +1005,28 @@ def engine_family(engine):
     return None, None
 
 
+# Flat-rate reference temperature (Tref) for the IAE V2533-A5, read off 112
+# takeoff-analysis pages of the A321-231 ODM (issue 10 SEP 13). Tref is the
+# temperature above which thrust starts falling off — the knee in every
+# curve in AIRBUS_TAKEOFF_THRUST below.
+#
+# Not used by the lookup. It is kept for two reasons. First, it is an
+# independent check that held: the ODM puts Tref at 30C for every field
+# between 10 and 82 ft, and the KMIA flex sweep — measured in the sim,
+# from an unrelated source — goes flat through 25/30 and breaks at 31.
+# Second, it says where new samples are worth taking. Interpolation error
+# is worst across the knee, so a temperature curve that straddles its
+# altitude's Tref without a sample near it is the one to fill in next.
+#
+# The relationship flattens with altitude (~205 ft per degree near the
+# surface, ~655 ft per degree by 3200 ft), so this must not be
+# extrapolated linearly — doing so puts Tref at 14C for 5020 ft, whereas
+# the measured knee at KFNL is 24C.
+IAE_V2533_TREF = {   # mean field elevation (ft): Tref (C)
+    36: 30, 201: 29, 531: 28, 754: 27, 1551: 23,
+    1788: 22, 2154: 21, 2492: 20, 3266: 19,
+}
+
 AIRBUS_TAKEOFF_THRUST = {
     ('A321', 'V2500'): {
         'param': 'EPR',
