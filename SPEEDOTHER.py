@@ -1092,17 +1092,71 @@ AIRBUS_TAKEOFF_THRUST = {
     # above and an easy thing to "correct" the wrong way.
     ('A321', 'CFM56-5B'): {
         'param': 'N1',
-        # Exactly +0.9 on all five sheets, with no spread at all.
+        # +0.9, exactly, on all five AA sheets — and the ODM independently
+        # gives Packs Off as +0.9 against the same baseline. Those are the
+        # same case: with the APU supplying the packs, the engines stop
+        # bleeding for them. (The ODM also lists anti-ice: engine A/I is
+        # -1.1 and engine+wing -2.0, but only at OAT >= ISA+15, and nothing
+        # upstream passes an anti-ice state yet, so neither is applied.)
         'bleed_adjust': {'apu_on': 0.9},
-        'max_alt_gap': 3600,
-        'max_temp_gap': 12,
-        'alt_snap': 1500,
+        # The table below is a full 4C x 1000 ft grid, so the guards are
+        # tightened to match it and alt_snap is switched OFF — snapping is
+        # checked before bracketing, and on a dense grid it would round
+        # every lookup to the nearest column instead of interpolating.
+        'max_alt_gap': 1000,
+        'max_temp_gap': 4,
+        'alt_snap': None,
+        # One table step past the edge, no further. The source is ragged
+        # where the envelope ends (PA 5000 stops at 42C), so clamping
+        # across those blanks would answer an uncertified corner with a
+        # certified-looking number.
+        'max_temp_extrap': 4,
+        'max_alt_extrap': 1000,
+        # TAKEOFF %N1, Delta A321 ODM p4-6 (rev 4, 12 FEB 16), transcribed
+        # by parsing the PDF rather than by hand. Baseline is the ODM's
+        # NORMAL BLEED / PACKS ON / ANTI-ICE OFF column. Ragged at the top
+        # of the hotter columns because the source table stops there.
         'toga': {
-            0: {                       # TPA/PDX/BOS/PHL, PA -181..-63; that
-                14: 98.3, 18: 98.8,    # 120 ft of spread is worth 0.02 N1
-                19: 98.9, 25: 100.0,
-            },
-            3438: {24: 102.1},         # YYC — the only altitude anchor yet
+            -1000: {54: 94.8, 50: 95.7, 46: 96.6, 42: 97.4, 38: 98.0, 34: 98.9, 30: 99.1,
+                  26: 98.5, 22: 97.8, 18: 97.2, 14: 96.6, 10: 96.0, 6: 95.3, 2: 94.7,
+                  -2: 94.0, -6: 93.4, -10: 92.7, -14: 92.1, -18: 91.4, -22: 90.7, -26: 90.0,
+                  -30: 89.3, -34: 88.6, -38: 88.0, -42: 87.3, -46: 86.5, -50: 85.8, -54: 85.1,},
+            0: {54: 95.3, 50: 96.2, 46: 97.1, 42: 98.1, 38: 98.8, 34: 99.6, 30: 100.9,
+                  26: 100.3, 22: 99.7, 18: 99.1, 14: 98.5, 10: 97.8, 6: 97.2, 2: 96.5,
+                  -2: 95.8, -6: 95.2, -10: 94.5, -14: 93.9, -18: 93.2, -22: 92.5, -26: 91.8,
+                  -30: 91.1, -34: 90.4, -38: 89.7, -42: 89.0, -46: 88.3, -50: 87.6, -54: 86.8,},
+            1000: {50: 96.2, 46: 97.1, 42: 98.0, 38: 98.8, 34: 99.8, 30: 101.0, 26: 101.4,
+                  22: 100.7, 18: 100.1, 14: 99.5, 10: 98.8, 6: 98.2, 2: 97.5, -2: 96.9,
+                  -6: 96.2, -10: 95.5, -14: 94.9, -18: 94.2, -22: 93.5, -26: 92.8, -30: 92.1,
+                  -34: 91.4, -38: 90.7, -42: 90.0, -46: 89.3, -50: 88.5, -54: 87.8,},
+            2000: {50: 96.2, 46: 97.1, 42: 97.9, 38: 98.7, 34: 99.8, 30: 101.1, 26: 102.4,
+                  22: 101.7, 18: 101.1, 14: 100.5, 10: 99.8, 6: 99.2, 2: 98.5, -2: 97.8,
+                  -6: 97.2, -10: 96.5, -14: 95.9, -18: 95.2, -22: 94.5, -26: 93.8, -30: 93.1,
+                  -34: 92.4, -38: 91.6, -42: 90.9, -46: 90.2, -50: 89.5, -54: 88.7,},
+            3000: {42: 97.9, 38: 98.7, 34: 99.8, 30: 101.0, 26: 102.0, 22: 102.1, 18: 101.4,
+                  14: 100.8, 10: 100.1, 6: 99.5, 2: 98.8, -2: 98.1, -6: 97.5, -10: 96.8,
+                  -14: 96.2, -18: 95.5, -22: 94.8, -26: 94.1, -30: 93.4, -34: 92.7, -38: 92.0,
+                  -42: 91.3, -46: 90.5, -50: 89.8, -54: 89.0,},
+            4000: {42: 97.8, 38: 98.6, 34: 99.8, 30: 101.0, 26: 102.0, 22: 102.4, 18: 101.7,
+                  14: 101.1, 10: 100.4, 6: 99.8, 2: 99.1, -2: 98.5, -6: 97.8, -10: 97.1,
+                  -14: 96.5, -18: 95.8, -22: 95.1, -26: 94.4, -30: 93.7, -34: 93.0, -38: 92.2,
+                  -42: 91.5, -46: 90.8, -50: 90.0, -54: 89.3,},
+            5000: {42: 97.7, 38: 98.5, 34: 99.5, 30: 101.1, 26: 102.1, 22: 102.4, 18: 102.0,
+                  14: 101.4, 10: 100.7, 6: 100.1, 2: 99.4, -2: 98.7, -6: 98.1, -10: 97.4,
+                  -14: 96.8, -18: 96.1, -22: 95.3, -26: 94.6, -30: 93.9, -34: 93.2, -38: 92.5,
+                  -42: 91.8, -46: 91.1, -50: 90.3, -54: 89.6,},
+            6000: {42: 97.4, 38: 98.2, 34: 99.0, 30: 100.4, 26: 101.5, 22: 102.2, 18: 102.3,
+                  14: 101.7, 10: 101.0, 6: 100.4, 2: 99.7, -2: 99.1, -6: 98.4, -10: 97.7,
+                  -14: 97.1, -18: 96.4, -22: 95.7, -26: 95.0, -30: 94.2, -34: 93.5, -38: 92.8,
+                  -42: 92.1, -46: 91.4, -50: 90.6, -54: 89.9,},
+            7000: {38: 97.9, 34: 98.7, 30: 99.7, 26: 101.0, 22: 101.8, 18: 102.2, 14: 102.0,
+                  10: 101.4, 6: 100.7, 2: 100.0, -2: 99.4, -6: 98.7, -10: 98.0, -14: 97.4,
+                  -18: 96.7, -22: 96.0, -26: 95.3, -30: 94.5, -34: 93.8, -38: 93.1, -42: 92.4,
+                  -46: 91.7, -50: 90.9, -54: 90.2,},
+            8000: {38: 97.7, 34: 98.4, 30: 99.1, 26: 100.3, 22: 101.3, 18: 101.9, 14: 102.3,
+                  10: 101.6, 6: 101.0, 2: 100.3, -2: 99.7, -6: 99.0, -10: 98.3, -14: 97.7,
+                  -18: 97.0, -22: 96.3, -26: 95.5, -30: 94.8, -34: 94.1, -38: 93.4, -42: 92.7,
+                  -46: 92.0, -50: 91.2, -54: 90.5,},
         },
         # Normalised to flex_oat_ref below; the raw sheets were each flown
         # at a different OAT, so they cannot be read as a curve untouched.
@@ -1119,21 +1173,27 @@ AIRBUS_TAKEOFF_THRUST = {
 }
 
 
-def _interp_curve(curve, x, max_gap):
+def _interp_curve(curve, x, max_gap, max_extrap=None):
     """Linear interpolation along one temperature curve ({temp: value}).
-    Clamps at the ends — outside the measured range the extreme value is
-    the best available answer. Returns None when the bracketing samples are
-    further apart than max_gap, rather than drawing a straight line across
-    an unmeasured stretch."""
+    Returns None when the bracketing samples are further apart than
+    max_gap, rather than drawing a straight line across an unmeasured
+    stretch.
+
+    Past either end it clamps, which suits a hand-measured curve whose
+    ends are just where sampling stopped. Pass max_extrap to bound that: a
+    published table is ragged where the ENVELOPE ends, not where someone
+    got tired, so clamping one sideways into an uncertified corner invents
+    a certified-looking number. Beyond max_extrap past the last sample,
+    return nothing instead."""
     if not curve:
         return None
     if x in curve:          # exact sample — never subject to the gap guard
         return curve[x]
     ks = sorted(curve)
     if x <= ks[0]:
-        return curve[ks[0]]
+        return None if max_extrap is not None and (ks[0] - x) > max_extrap else curve[ks[0]]
     if x >= ks[-1]:
-        return curve[ks[-1]]
+        return None if max_extrap is not None and (x - ks[-1]) > max_extrap else curve[ks[-1]]
     for a, b in zip(ks, ks[1:]):
         if a <= x <= b:
             if max_gap is not None and (b - a) > max_gap:
@@ -1143,7 +1203,7 @@ def _interp_curve(curve, x, max_gap):
 
 
 def _interp_grid(grid, temp, altitude, max_alt_gap=None, max_temp_gap=None,
-                 alt_snap=None):
+                 alt_snap=None, max_temp_extrap=None, max_alt_extrap=None):
     """Temperature curve within each bracketing altitude, then blend across
     altitude. Returns None if either axis can't be resolved."""
     if not grid:
@@ -1157,8 +1217,12 @@ def _interp_grid(grid, temp, altitude, max_alt_gap=None, max_temp_gap=None,
     if alt_snap is not None and abs(nearest - altitude) <= alt_snap:
         lo = hi = nearest
     elif altitude <= alts[0]:
+        if max_alt_extrap is not None and (alts[0] - altitude) > max_alt_extrap:
+            return None
         lo = hi = alts[0]
     elif altitude >= alts[-1]:
+        if max_alt_extrap is not None and (altitude - alts[-1]) > max_alt_extrap:
+            return None
         lo = hi = alts[-1]
     else:
         lo = hi = alts[0]
@@ -1168,10 +1232,10 @@ def _interp_grid(grid, temp, altitude, max_alt_gap=None, max_temp_gap=None,
                 break
         if max_alt_gap is not None and (hi - lo) > max_alt_gap:
             return None
-    v_lo = _interp_curve(grid[lo], temp, max_temp_gap)
+    v_lo = _interp_curve(grid[lo], temp, max_temp_gap, max_temp_extrap)
     if lo == hi:
         return v_lo
-    v_hi = _interp_curve(grid[hi], temp, max_temp_gap)
+    v_hi = _interp_curve(grid[hi], temp, max_temp_gap, max_temp_extrap)
     if v_lo is None or v_hi is None:
         return None
     return v_lo + (v_hi - v_lo) * ((altitude - lo) / (hi - lo))
@@ -1201,6 +1265,7 @@ def get_takeoff_thrust(icao_code, engine, oat, altitude, assumed_temp=None,
         assumed_temp if flex else oat, altitude,
         entry.get('max_alt_gap'), entry.get('max_temp_gap'),
         entry.get('alt_snap'),
+        entry.get('max_temp_extrap'), entry.get('max_alt_extrap'),
     )
     if value is None:
         return None
