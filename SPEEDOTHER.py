@@ -976,13 +976,18 @@ def get_reduced_thrust_n1(icao_code, thrust_rating, assumed_temp, altitude):
 # further apart than max_alt_gap / max_temp_gap returns nothing at all and
 # the TPS simply omits the block.
 
+# Matched against the real engine designation (SimBrief aircraft/engines,
+# e.g. "IAE V2533-A5"), never against the free-text comments field — an
+# earlier pass matched comments and silently failed, because the comment
+# for an IAE A321 reads "A321 -A5 SHARKLET" with no engine name in it.
+# CFM/LEAP/PW are tested before IAE so that CFM56-5A5, which also ends in
+# A5, can never be misread as a V2500.
 _ENGINE_FAMILIES = [
-    # (regex, family key, thrust parameter)
-    (r'V2\d{3}|IAE',      'V2500',    'EPR'),
-    (r'CFM56-?5A',        'CFM56-5A', 'N1'),
-    (r'CFM56-?5B',        'CFM56-5B', 'N1'),
     (r'LEAP',             'LEAP-1A',  'N1'),
     (r'PW11\d{2}|PW1100', 'PW1100G',  'N1'),
+    (r'CFM56-?5A',        'CFM56-5A', 'N1'),
+    (r'CFM56-?5B',        'CFM56-5B', 'N1'),
+    (r'V2\d{3}|IAE',      'V2500',    'EPR'),
 ]
 
 

@@ -830,13 +830,17 @@ def write_takeoff_performance_string(
             # it's driven off the OFP's engine string rather than the type.
             # Omitted entirely when there's no grid for that engine — an
             # absent block is honest, a substituted number is not.
-            _ab_thrust = get_takeoff_thrust(icaocode, engine_type, temp, alt_val,
+            # engine_designation is the real one ("IAE V2533-A5"); engine_type
+            # is the free-text comment the header prints ("A321 -A5 SHARKLET"),
+            # which carries no engine name and must not be matched against.
+            _eng = (first_runway.get('engine_designation') or '') if valid_runways else ''
+            _ab_thrust = get_takeoff_thrust(icaocode, _eng, temp, alt_val,
                                             apu_on=False)
             if _ab_thrust:
                 _tp = _ab_thrust['param']
                 _tv = (f"{_ab_thrust['value']:.2f}" if _tp == 'EPR'
                        else f"{_ab_thrust['value']:.1f}")
-                _ab_thrust_on = get_takeoff_thrust(icaocode, engine_type, temp, alt_val,
+                _ab_thrust_on = get_takeoff_thrust(icaocode, _eng, temp, alt_val,
                                                    apu_on=True)
                 output += f"         *MAX* {_tp}\n"
                 output += f"      APU OFF {_tv}\n"
@@ -1576,7 +1580,8 @@ def write_takeoff_performance_string(
                 # to the bare "FLEX"/"TOGA" label when there's no grid for
                 # this engine rather than inventing a setting.
                 _fx_temp = int(at_numeric) if (thr_display == "FLEX" and at_numeric is not None) else None
-                _fx = get_takeoff_thrust(icaocode, engine_type, temp, alt_val,
+                _fx_eng = (first_runway.get('engine_designation') or '') if valid_runways else ''
+                _fx = get_takeoff_thrust(icaocode, _fx_eng, temp, alt_val,
                                          assumed_temp=_fx_temp)
                 if _fx:
                     _fv = f"{_fx['value']:.2f}" if _fx['param'] == 'EPR' else f"{_fx['value']:.1f}"

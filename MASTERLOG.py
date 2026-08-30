@@ -2415,6 +2415,12 @@ def extract_runway_data(xml_root):
             try:
                 acdata = json.loads(acdata_tag.text.strip())
                 aircraft_name = acdata.get('name', 'UNKNOWN')
+                # comments is free text ("A321 -A5 SHARKLET") and is what the
+                # sheet header prints, so it stays the display string. The
+                # actual engine designation comes from aircraft/engines --
+                # the same XML path simbrief_ofp.py already reads -- because
+                # matching an engine family off a free-text comment is
+                # guesswork (and silently failed for the IAE A321).
                 engine_type   = acdata.get('comments', 'UNKNOWN')
                 LOG.debug(f"[DBG: Loaded acdata for {acdata.get('reg','UNKNOWN')} - {aircraft_name} / {engine_type}")
             except json.JSONDecodeError as e:
@@ -2435,6 +2441,7 @@ def extract_runway_data(xml_root):
                 'temp': conditions.findtext('temperature', '0'),
                 'qnh': conditions.findtext('altimeter', '0'),
                 'engine': engine_type,
+                'engine_designation': (xml_root.findtext('aircraft/engines') or '').strip(),
                 'aircraft': aircraft_name,
                 'surface_condition': surface_condition,
                 'wind': f"{conditions.findtext('wind_direction', '0')}/{conditions.findtext('wind_speed', '0')}",
@@ -2446,6 +2453,7 @@ def extract_runway_data(xml_root):
                 'temp': '0',
                 'qnh': '0',
                 'engine': engine_type,
+                'engine_designation': (xml_root.findtext('aircraft/engines') or '').strip(),
                 'aircraft': aircraft_name,
                 'surface_condition': 'dry',
                 'wind': '0/0',
@@ -2520,6 +2528,7 @@ def extract_runway_data(xml_root):
                     'temp': flight_info.get('temp','ERR'),
                     'surface_condition': flight_info.get('surface_condition','ERR').upper(),
                     'engine': flight_info.get('engine','ERR'),
+                    'engine_designation': flight_info.get('engine_designation',''),
                     'aircraft': flight_info.get('aircraft','ERR'),
                     'icaocode': flight_info.get('icaocode','ERR'),
                     'wind': flight_info.get('wind','ERR'),
