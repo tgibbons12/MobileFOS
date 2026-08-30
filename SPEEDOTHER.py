@@ -1012,7 +1012,7 @@ AIRBUS_TAKEOFF_THRUST = {
         # examples, identical across PA -27..3653, OAT 14..26, sharklet and
         # non-sharklet, wet and dry.
         'bleed_adjust': {'apu_on': 0.01},
-        'max_alt_gap': 4000,
+        'max_alt_gap': 5100,
         'max_temp_gap': 12,
         # Within this distance of a measured altitude, use that column
         # directly instead of interpolating — being 500 ft from a sampled
@@ -1024,7 +1024,10 @@ AIRBUS_TAKEOFF_THRUST = {
                 15: 1.600,             # flex<=OAT returns TOGA, so this is a TOGA reading
                 37: 1.537, 40: 1.511,
             },
-            9933: {                    # KLXV, QNH 29.92
+            5020: {                    # KFNL, QNH 1013 — break ~24C
+                1: 1.589, 24: 1.553, 38: 1.440,
+            },
+            9933: {                    # KLXV, QNH 29.92 — break ~12C
                 0: 1.602, 12: 1.578, 17: 1.543,
                 20: 1.510, 24: 1.467, 29: 1.432,
             },
