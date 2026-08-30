@@ -982,12 +982,22 @@ def get_reduced_thrust_n1(icao_code, thrust_rating, assumed_temp, altitude):
 # for an IAE A321 reads "A321 -A5 SHARKLET" with no engine name in it.
 # CFM/LEAP/PW are tested before IAE so that CFM56-5A5, which also ends in
 # A5, can never be misread as a V2500.
+# Resolved to the exact dash number, because the ODMs publish a separate
+# N1 table per variant and they really do differ — the A320's 5A1 and 5A3
+# tables disagree in 258 of their 260 cells. A variant with no grid of its
+# own therefore resolves to a family that isn't in AIRBUS_TAKEOFF_THRUST
+# and shows nothing, rather than borrowing a sibling's numbers. Specific
+# patterns must stay ahead of the generic ones.
 _ENGINE_FAMILIES = [
-    (r'LEAP',             'LEAP-1A',  'N1'),
-    (r'PW11\d{2}|PW1100', 'PW1100G',  'N1'),
-    (r'CFM56-?5A',        'CFM56-5A', 'N1'),
-    (r'CFM56-?5B',        'CFM56-5B', 'N1'),
-    (r'V2\d{3}|IAE',      'V2500',    'EPR'),
+    (r'LEAP',             'LEAP-1A',   'N1'),
+    (r'PW11\d{2}|PW1100', 'PW1100G',   'N1'),
+    (r'CFM56-?5A1',       'CFM56-5A1', 'N1'),
+    (r'CFM56-?5A3',       'CFM56-5A3', 'N1'),
+    (r'CFM56-?5A5',       'CFM56-5A5', 'N1'),
+    (r'CFM56-?5B3',       'CFM56-5B3', 'N1'),
+    (r'CFM56-?5A',        'CFM56-5A',  'N1'),
+    (r'CFM56-?5B',        'CFM56-5B',  'N1'),
+    (r'V2\d{3}|IAE',      'V2500',     'EPR'),
 ]
 
 
@@ -1090,32 +1100,24 @@ AIRBUS_TAKEOFF_THRUST = {
     # flat-rated engine the shaft has to spin faster to hold the same
     # thrust as the air thins — which is the opposite of the EPR grids
     # above and an easy thing to "correct" the wrong way.
-    ('A321', 'CFM56-5B'): {
+    ('A321', 'CFM56-5B3'): {
         'param': 'N1',
-        # +0.9, exactly, on all five AA sheets — and the ODM independently
-        # gives Packs Off as +0.9 against the same baseline. Those are the
-        # same case: with the APU supplying the packs, the engines stop
-        # bleeding for them. (The ODM also lists anti-ice: engine A/I is
-        # -1.1 and engine+wing -2.0, but only at OAT >= ISA+15, and nothing
-        # upstream passes an anti-ice state yet, so neither is applied.)
+        # +0.9, exactly, on all five real AA A321 -5B3/P sheets, and the ODM
+        # independently gives Packs Off as +0.9 against the same baseline.
+        # Those are the same case: with the APU feeding the packs, the
+        # engines stop bleeding for them.
         'bleed_adjust': {'apu_on': 0.9},
-        # The table below is a full 4C x 1000 ft grid, so the guards are
-        # tightened to match it and alt_snap is switched OFF — snapping is
-        # checked before bracketing, and on a dense grid it would round
-        # every lookup to the nearest column instead of interpolating.
+        # TAKE OFF %N1, Delta A321 ODM p4-6 (25 MAR 16), parsed from the
+        # PDF rather than typed. Baseline is the ODM's NORMAL BLEED /
+        # PACKS ON / ANTI-ICE OFF column. Blank cells in the source are
+        # labelled OUTSIDE ENVIRONMENTAL ENVELOPE, which is why the
+        # extrapolation bounds below matter: clamping across them would
+        # answer an uncertified corner with a certified-looking number.
         'max_alt_gap': 1000,
         'max_temp_gap': 4,
         'alt_snap': None,
-        # One table step past the edge, no further. The source is ragged
-        # where the envelope ends (PA 5000 stops at 42C), so clamping
-        # across those blanks would answer an uncertified corner with a
-        # certified-looking number.
         'max_temp_extrap': 4,
         'max_alt_extrap': 1000,
-        # TAKEOFF %N1, Delta A321 ODM p4-6 (rev 4, 12 FEB 16), transcribed
-        # by parsing the PDF rather than by hand. Baseline is the ODM's
-        # NORMAL BLEED / PACKS ON / ANTI-ICE OFF column. Ragged at the top
-        # of the hotter columns because the source table stops there.
         'toga': {
             -1000: {54: 94.8, 50: 95.7, 46: 96.6, 42: 97.4, 38: 98.0, 34: 98.9, 30: 99.1,
                   26: 98.5, 22: 97.8, 18: 97.2, 14: 96.6, 10: 96.0, 6: 95.3, 2: 94.7,
@@ -1158,15 +1160,206 @@ AIRBUS_TAKEOFF_THRUST = {
                   -18: 97.0, -22: 96.3, -26: 95.5, -30: 94.8, -34: 94.1, -38: 93.4, -42: 92.7,
                   -46: 92.0, -50: 91.2, -54: 90.5,},
         },
-        # Normalised to flex_oat_ref below; the raw sheets were each flown
-        # at a different OAT, so they cannot be read as a curve untouched.
+        # Flex stays modelled rather than tabulated: the ODM publishes MAX
+        # takeoff N1 only, and reading that table at the assumed
+        # temperature does not reproduce the real AA flex rows (off by 3.7
+        # N1 at TPA). See the OAT correction in get_takeoff_thrust.
         'flex_oat_ref': 20,
-        'flex_oat_coeff': 0.152,       # least squares; independently
-                                       # corroborated by the +0.155/C slope
-                                       # of the MAX N1 rows above
+        'flex_oat_coeff': 0.152,
         'flex': {
             0:    {45: 93.35, 46: 93.01, 49: 91.94, 51: 91.20},
-            3438: {30: 99.39},         # YYC AT 30, OAT 24 -> 100.0 raw
+            3438: {30: 99.39},
+        },
+    },
+    ('A320', 'CFM56-5A1'): {
+        'param': 'N1',
+        # The ODM prints Packs Off as -0.7 here, where the A319's own ODM
+        # prints +0.7 and the A321's +0.9 — Delta's manuals genuinely
+        # disagree in sign across types (both pages read visually, this is
+        # not a parse artifact). Only the A321 value has independent
+        # confirmation, from the AA sheets. Recorded as published.
+        'bleed_adjust': {'apu_on': -0.7},
+        # TAKE OFF %N1, Delta A320 ODM p4-6 (25 MAR 16), parsed from the
+        # PDF rather than typed. Baseline is the ODM's NORMAL BLEED /
+        # PACKS ON / ANTI-ICE OFF column. Blank cells in the source are
+        # labelled OUTSIDE ENVIRONMENTAL ENVELOPE, which is why the
+        # extrapolation bounds below matter: clamping across them would
+        # answer an uncertified corner with a certified-looking number.
+        'max_alt_gap': 1000,
+        'max_temp_gap': 4,
+        'alt_snap': None,
+        'max_temp_extrap': 4,
+        'max_alt_extrap': 1000,
+        'toga': {
+            -1000: {54: 92.2, 50: 92.8, 46: 93.4, 42: 93.9, 38: 94.5, 34: 95.1, 30: 95.1,
+                  26: 94.5, 22: 93.9, 18: 93.3, 14: 92.6, 10: 92.0, 6: 91.4, 2: 90.8,
+                  -2: 90.2, -6: 89.5, -10: 88.9, -14: 88.2, -18: 87.6, -22: 86.9, -26: 86.3,
+                  -30: 85.6, -34: 85.0, -38: 84.3, -42: 83.6, -46: 82.9, -50: 82.2, -54: 81.5,},
+            0: {54: 93.1, 50: 93.7, 46: 94.3, 42: 94.9, 38: 95.4, 34: 95.9, 30: 96.3,
+                  26: 95.7, 22: 95.1, 18: 94.5, 14: 93.9, 10: 93.3, 6: 92.6, 2: 92.0,
+                  -2: 91.4, -6: 90.7, -10: 90.1, -14: 89.4, -18: 88.8, -22: 88.1, -26: 87.4,
+                  -30: 86.8, -34: 86.1, -38: 85.4, -42: 84.7, -46: 84.0, -50: 83.3, -54: 82.6,},
+            1000: {50: 93.7, 46: 94.3, 42: 94.8, 38: 95.3, 34: 95.8, 30: 96.3, 26: 96.2,
+                  22: 95.6, 18: 95.0, 14: 94.4, 10: 93.8, 6: 93.1, 2: 92.5, -2: 91.9,
+                  -6: 91.2, -10: 90.6, -14: 89.9, -18: 89.3, -22: 88.6, -26: 87.9, -30: 87.2,
+                  -34: 86.6, -38: 85.9, -42: 85.2, -46: 84.5, -50: 83.8, -54: 83.1,},
+            2000: {50: 93.6, 46: 94.2, 42: 94.7, 38: 95.3, 34: 95.8, 30: 96.3, 26: 96.8,
+                  22: 96.1, 18: 95.5, 14: 94.9, 10: 94.3, 6: 93.6, 2: 93.0, -2: 92.4,
+                  -6: 91.7, -10: 91.1, -14: 90.4, -18: 89.7, -22: 89.1, -26: 88.4, -30: 87.7,
+                  -34: 87.0, -38: 86.3, -42: 85.6, -46: 84.9, -50: 84.2, -54: 83.5,},
+            3000: {46: 94.1, 42: 94.7, 38: 95.2, 34: 95.7, 30: 96.2, 26: 96.7, 22: 96.6,
+                  18: 96.0, 14: 95.4, 10: 94.7, 6: 94.1, 2: 93.5, -2: 92.8, -6: 92.2,
+                  -10: 91.5, -14: 90.9, -18: 90.2, -22: 89.5, -26: 88.8, -30: 88.2, -34: 87.5,
+                  -38: 86.8, -42: 86.1, -46: 85.4, -50: 84.6, -54: 83.9,},
+            4000: {46: 94.1, 42: 94.6, 38: 95.1, 34: 95.6, 30: 96.1, 26: 96.6, 22: 97.1,
+                  18: 96.5, 14: 95.9, 10: 95.2, 6: 94.6, 2: 94.0, -2: 93.3, -6: 92.7,
+                  -10: 92.0, -14: 91.3, -18: 90.7, -22: 90.0, -26: 89.3, -30: 88.6, -34: 87.9,
+                  -38: 87.2, -42: 86.5, -46: 85.8, -50: 85.1, -54: 84.4,},
+            5000: {42: 94.6, 38: 95.1, 34: 95.6, 30: 96.0, 26: 96.6, 22: 97.1, 18: 97.0,
+                  14: 96.4, 10: 95.7, 6: 95.1, 2: 94.5, -2: 93.8, -6: 93.1, -10: 92.5,
+                  -14: 91.8, -18: 91.1, -22: 90.5, -26: 89.8, -30: 89.1, -34: 88.4, -38: 87.7,
+                  -42: 87.0, -46: 86.3, -50: 85.5, -54: 84.8,},
+            6000: {42: 94.6, 38: 95.0, 34: 95.5, 30: 96.0, 26: 96.5, 22: 97.0, 18: 97.4,
+                  14: 96.8, 10: 96.2, 6: 95.5, 2: 94.9, -2: 94.2, -6: 93.6, -10: 92.9,
+                  -14: 92.2, -18: 91.5, -22: 90.9, -26: 90.2, -30: 89.5, -34: 88.8, -38: 88.1,
+                  -42: 87.4, -46: 86.6, -50: 85.9, -54: 85.2,},
+            7000: {38: 95.0, 34: 95.5, 30: 95.9, 26: 96.4, 22: 96.9, 18: 97.3, 14: 97.2,
+                  10: 96.6, 6: 95.9, 2: 95.3, -2: 94.6, -6: 93.9, -10: 93.3, -14: 92.6,
+                  -18: 91.9, -22: 91.2, -26: 90.5, -30: 89.9, -34: 89.1, -38: 88.4, -42: 87.7,
+                  -46: 87.0, -50: 86.3, -54: 85.5,},
+            8000: {38: 94.7, 34: 95.2, 30: 95.6, 26: 96.1, 22: 96.5, 18: 97.0, 14: 97.4,
+                  10: 96.8, 6: 96.1, 2: 95.5, -2: 94.8, -6: 94.1, -10: 93.5, -14: 92.8,
+                  -18: 92.1, -22: 91.4, -26: 90.7, -30: 90.0, -34: 89.3, -38: 88.6, -42: 87.9,
+                  -46: 87.2, -50: 86.5, -54: 85.7,},
+        },
+    },
+    ('A320', 'CFM56-5A3'): {
+        'param': 'N1',
+        # The ODM prints Packs Off as -0.7 here, where the A319's own ODM
+        # prints +0.7 and the A321's +0.9 — Delta's manuals genuinely
+        # disagree in sign across types (both pages read visually, this is
+        # not a parse artifact). Only the A321 value has independent
+        # confirmation, from the AA sheets. Recorded as published.
+        'bleed_adjust': {'apu_on': -0.7},
+        # TAKE OFF %N1, Delta A320 ODM p4-7 (25 MAR 16), parsed from the
+        # PDF rather than typed. Baseline is the ODM's NORMAL BLEED /
+        # PACKS ON / ANTI-ICE OFF column. Blank cells in the source are
+        # labelled OUTSIDE ENVIRONMENTAL ENVELOPE, which is why the
+        # extrapolation bounds below matter: clamping across them would
+        # answer an uncertified corner with a certified-looking number.
+        'max_alt_gap': 1000,
+        'max_temp_gap': 4,
+        'alt_snap': None,
+        'max_temp_extrap': 4,
+        'max_alt_extrap': 1000,
+        'toga': {
+            -1000: {54: 92.4, 50: 93.2, 46: 94.0, 42: 94.8, 38: 95.1, 34: 95.4, 30: 95.2,
+                  26: 94.6, 22: 94.0, 18: 93.4, 14: 92.8, 10: 92.2, 6: 91.6, 2: 91.0,
+                  -2: 90.3, -6: 89.7, -10: 89.1, -14: 88.4, -18: 87.8, -22: 87.1, -26: 86.5,
+                  -30: 85.8, -34: 85.1, -38: 84.4, -42: 83.8, -46: 83.1, -50: 82.4, -54: 81.7,},
+            0: {54: 92.8, 50: 93.6, 46: 94.4, 42: 95.1, 38: 95.6, 34: 95.9, 30: 96.2,
+                  26: 95.6, 22: 95.0, 18: 94.4, 14: 93.8, 10: 93.2, 6: 92.5, 2: 91.9,
+                  -2: 91.3, -6: 90.6, -10: 90.0, -14: 89.3, -18: 88.7, -22: 88.0, -26: 87.4,
+                  -30: 86.7, -34: 86.0, -38: 85.3, -42: 84.6, -46: 83.9, -50: 83.2, -54: 82.5,},
+            1000: {50: 94.2, 46: 94.9, 42: 95.6, 38: 96.2, 34: 96.5, 30: 96.8, 26: 96.7,
+                  22: 96.1, 18: 95.4, 14: 94.8, 10: 94.2, 6: 93.6, 2: 92.9, -2: 92.3,
+                  -6: 91.6, -10: 91.0, -14: 90.3, -18: 89.7, -22: 89.0, -26: 88.3, -30: 87.6,
+                  -34: 86.9, -38: 86.3, -42: 85.6, -46: 84.9, -50: 84.1, -54: 83.4,},
+            2000: {50: 94.9, 46: 95.5, 42: 96.1, 38: 96.6, 34: 97.1, 30: 97.4, 26: 97.7,
+                  22: 97.1, 18: 96.4, 14: 95.8, 10: 95.2, 6: 94.5, 2: 93.9, -2: 93.2,
+                  -6: 92.6, -10: 91.9, -14: 91.3, -18: 90.6, -22: 89.9, -26: 89.2, -30: 88.6,
+                  -34: 87.9, -38: 87.2, -42: 86.5, -46: 85.7, -50: 85.0, -54: 84.3,},
+            3000: {46: 95.7, 42: 96.2, 38: 96.7, 34: 97.2, 30: 97.5, 26: 97.8, 22: 97.6,
+                  18: 97.0, 14: 96.4, 10: 95.7, 6: 95.1, 2: 94.4, -2: 93.8, -6: 93.1,
+                  -10: 92.5, -14: 91.8, -18: 91.1, -22: 90.5, -26: 89.8, -30: 89.1, -34: 88.4,
+                  -38: 87.7, -42: 87.0, -46: 86.2, -50: 85.5, -54: 84.8,},
+            4000: {46: 96.1, 42: 96.6, 38: 97.1, 34: 97.6, 30: 98.0, 26: 98.4, 22: 98.7,
+                  18: 98.1, 14: 97.5, 10: 96.8, 6: 96.2, 2: 95.5, -2: 94.8, -6: 94.2,
+                  -10: 93.5, -14: 92.8, -18: 92.2, -22: 91.5, -26: 90.8, -30: 90.1, -34: 89.4,
+                  -38: 88.7, -42: 87.9, -46: 87.2, -50: 86.5, -54: 85.7,},
+            5000: {42: 96.9, 38: 97.4, 34: 97.9, 30: 98.3, 26: 98.8, 22: 99.3, 18: 99.2,
+                  14: 98.5, 10: 97.9, 6: 97.2, 2: 96.5, -2: 95.9, -6: 95.2, -10: 94.5,
+                  -14: 93.8, -18: 93.2, -22: 92.5, -26: 91.8, -30: 91.1, -34: 90.3, -38: 89.6,
+                  -42: 88.9, -46: 88.2, -50: 87.4, -54: 86.7,},
+            6000: {42: 97.1, 38: 97.6, 34: 98.1, 30: 98.6, 26: 99.1, 22: 99.7, 18: 100.2,
+                  14: 99.5, 10: 98.9, 6: 98.2, 2: 97.5, -2: 96.9, -6: 96.2, -10: 95.5,
+                  -14: 94.8, -18: 94.1, -22: 93.4, -26: 92.7, -30: 92.0, -34: 91.3, -38: 90.5,
+                  -42: 89.8, -46: 89.1, -50: 88.3, -54: 87.6,},
+            7000: {38: 97.6, 34: 98.1, 30: 98.6, 26: 99.1, 22: 99.6, 18: 100.2, 14: 100.1,
+                  10: 99.4, 6: 98.8, 2: 98.1, -2: 97.4, -6: 96.7, -10: 96.1, -14: 95.4,
+                  -18: 94.7, -22: 94.0, -26: 93.2, -30: 92.5, -34: 91.8, -38: 91.1, -42: 90.3,
+                  -46: 89.6, -50: 88.8, -54: 88.1,},
+            8000: {38: 97.2, 34: 97.7, 30: 98.2, 26: 98.7, 22: 99.3, 18: 99.9, 14: 100.4,
+                  10: 99.8, 6: 99.1, 2: 98.4, -2: 97.8, -6: 97.1, -10: 96.4, -14: 95.7,
+                  -18: 95.0, -22: 94.3, -26: 93.6, -30: 92.8, -34: 92.1, -38: 91.4, -42: 90.6,
+                  -46: 89.9, -50: 89.1, -54: 88.4,},
+        },
+    },
+    ('A319', 'CFM56-5A5'): {
+        'param': 'N1',
+        # +0.7 as published (verified against the page image; the minus
+        # signs on the anti-ice rows below it survive, so the absence of
+        # one here is real). See the A320 entries — the sign is not
+        # consistent across Delta's own manuals for this engine family.
+        'bleed_adjust': {'apu_on': 0.7},
+        # TAKE OFF %N1, Delta A319 ODM p4-7 (25 MAR 16), parsed from the
+        # PDF rather than typed. Baseline is the ODM's NORMAL BLEED /
+        # PACKS ON / ANTI-ICE OFF column. Blank cells in the source are
+        # labelled OUTSIDE ENVIRONMENTAL ENVELOPE, which is why the
+        # extrapolation bounds below matter: clamping across them would
+        # answer an uncertified corner with a certified-looking number.
+        'max_alt_gap': 1000,
+        'max_temp_gap': 4,
+        'alt_snap': None,
+        'max_temp_extrap': 4,
+        'max_alt_extrap': 1000,
+        # Two cells are absent from the PA 3000 column that the manual does
+        # print: OAT -50 and -54, where it gives 94.4 and 94.8. Those are
+        # ~13 N1 above both horizontal neighbours and are verbatim copies
+        # of the 50C and 46C entries at the top of the same column — a
+        # typesetting error, not data. Dropping them costs the -54C corner
+        # at that one altitude, which now returns nothing.
+        'toga': {
+            -1000: {54: 90.7, 50: 91.3, 46: 92.0, 42: 92.6, 38: 92.3, 34: 91.8, 30: 91.2,
+                  26: 90.6, 22: 90.0, 18: 89.5, 14: 88.9, 10: 88.3, 6: 87.7, 2: 87.1,
+                  -2: 86.5, -6: 85.9, -10: 85.3, -14: 84.7, -18: 84.0, -22: 83.4, -26: 82.8,
+                  -30: 82.1, -34: 81.5, -38: 80.8, -42: 80.2, -46: 79.5, -50: 78.9, -54: 78.2,},
+            0: {54: 91.3, 50: 92.0, 46: 92.6, 42: 93.2, 38: 93.5, 34: 93.0, 30: 92.4,
+                  26: 91.8, 22: 91.2, 18: 90.7, 14: 90.1, 10: 89.5, 6: 88.9, 2: 88.3,
+                  -2: 87.6, -6: 87.0, -10: 86.4, -14: 85.8, -18: 85.2, -22: 84.5, -26: 83.9,
+                  -30: 83.2, -34: 82.6, -38: 81.9, -42: 81.3, -46: 80.6, -50: 79.9, -54: 79.2,},
+            1000: {54: 91.9, 50: 92.6, 46: 93.2, 42: 93.8, 38: 94.5, 34: 94.2, 30: 93.6,
+                  26: 93.0, 22: 92.4, 18: 91.8, 14: 91.2, 10: 90.6, 6: 90.0, 2: 89.4,
+                  -2: 88.8, -6: 88.2, -10: 87.5, -14: 86.9, -18: 86.3, -22: 85.6, -26: 85.0,
+                  -30: 84.3, -34: 83.6, -38: 83.0, -42: 82.3, -46: 81.6, -50: 80.9, -54: 80.3,},
+            2000: {50: 92.9, 46: 93.4, 42: 94.0, 38: 94.6, 34: 94.8, 30: 94.2, 26: 93.6,
+                  22: 93.0, 18: 92.4, 14: 91.8, 10: 91.2, 6: 90.6, 2: 90.0, -2: 89.4,
+                  -6: 88.8, -10: 88.1, -14: 87.5, -18: 86.8, -22: 86.2, -26: 85.5, -30: 84.9,
+                  -34: 84.2, -38: 83.6, -42: 82.9, -46: 82.2, -50: 81.5, -54: 80.8,},
+            3000: {50: 94.4, 46: 94.8, 42: 95.3, 38: 95.4, 34: 94.8, 30: 94.2, 26: 93.6,
+                  22: 93.0, 18: 92.4, 14: 91.7, 10: 91.1, 6: 90.5, 2: 89.9, -2: 89.2,
+                  -6: 88.6, -10: 87.9, -14: 87.3, -18: 86.6, -22: 85.9, -26: 85.3, -30: 84.6,
+                  -34: 83.9, -38: 83.2, -42: 82.5, -46: 81.8,},
+            4000: {42: 94.4, 38: 94.8, 34: 95.3, 30: 95.4, 26: 94.8, 22: 94.2, 18: 93.6,
+                  14: 93.0, 10: 92.4, 6: 91.7, 2: 91.1, -2: 90.5, -6: 89.9, -10: 89.2,
+                  -14: 88.6, -18: 87.9, -22: 87.3, -26: 86.6, -30: 85.9, -34: 85.3, -38: 84.6,
+                  -42: 83.9, -46: 83.2, -50: 82.5, -54: 81.8,},
+            5000: {42: 94.7, 38: 95.2, 34: 95.6, 30: 96.0, 26: 95.6, 22: 95.0, 18: 94.4,
+                  14: 93.8, 10: 93.1, 6: 92.5, 2: 91.9, -2: 91.2, -6: 90.6, -10: 90.0,
+                  -14: 89.3, -18: 88.7, -22: 88.0, -26: 87.3, -30: 86.7, -34: 86.0, -38: 85.3,
+                  -42: 84.6, -46: 83.9, -50: 83.2, -54: 82.5,},
+            6000: {42: 95.0, 38: 95.4, 34: 95.9, 30: 96.2, 26: 96.4, 22: 95.7, 18: 95.1,
+                  14: 94.5, 10: 93.9, 6: 93.3, 2: 92.6, -2: 92.0, -6: 91.3, -10: 90.7,
+                  -14: 90.0, -18: 89.4, -22: 88.7, -26: 88.0, -30: 87.3, -34: 86.7, -38: 86.0,
+                  -42: 85.3, -46: 84.6, -50: 83.9, -54: 83.2,},
+            7000: {42: 95.3, 38: 95.7, 34: 96.2, 30: 96.6, 26: 97.0, 22: 96.6, 18: 96.0,
+                  14: 95.3, 10: 94.7, 6: 94.1, 2: 93.4, -2: 92.8, -6: 92.1, -10: 91.5,
+                  -14: 90.8, -18: 90.1, -22: 89.5, -26: 88.8, -30: 88.1, -34: 87.4, -38: 86.7,
+                  -42: 86.0, -46: 85.3, -50: 84.6, -54: 83.9,},
+            8000: {38: 95.7, 34: 96.4, 30: 96.7, 26: 97.0, 22: 97.1, 18: 96.5, 14: 95.8,
+                  10: 95.2, 6: 94.6, 2: 93.9, -2: 93.3, -6: 92.6, -10: 92.0, -14: 91.3,
+                  -18: 90.6, -22: 89.9, -26: 89.3, -30: 88.6, -34: 87.9, -38: 87.2, -42: 86.5,
+                  -46: 85.8, -50: 85.1, -54: 84.3,},
         },
     },
     # ('A21N', 'LEAP-1A'):  N1 — awaiting capture (A321neo is A21N, not A321)
