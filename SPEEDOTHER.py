@@ -1033,6 +1033,23 @@ AIRBUS_TAKEOFF_THRUST = {
             },
         },
         # FLEX: {pressure altitude: {assumed temp: EPR}}
+        #
+        # Stored WITHOUT an actual-OAT axis, because the real AA TPS prints
+        # it that way and the real examples bear it out: flex 37 reads 1.56
+        # at OAT 18 and at OAT 26 alike. Checked against four real AA A321
+        # -A5 flex rows, this table lands within 0.015 on the three at or
+        # near sea level. The fourth, at PA 3653, is 0.075 low — that is
+        # the altitude hump, not an OAT effect, and it is the single
+        # biggest known gap in this grid (see the missing 5020 row below).
+        #
+        # A sweep taken at KFNL (PA 5020, actual OAT 38) was DELIBERATELY
+        # NOT LOADED. Every value in it — flex 25/30/35/40 → 1.415/1.390/
+        # 1.366/1.343 — falls BELOW both the PA 0 and PA 9933 readings at
+        # the same flex temperature, which no altitude relationship can
+        # produce. It was something other than a flex EPR (a fixed derate,
+        # most likely, since most of its range sat below the actual OAT).
+        # Discarding it leaves a hole at mid altitude; filling that hole
+        # with data known to be wrong would have been worse.
         'flex': {
             0: {                       # swept at actual OAT 15
                 84: 1.331, 72: 1.331, 71: 1.333, 70: 1.338, 65: 1.365,
