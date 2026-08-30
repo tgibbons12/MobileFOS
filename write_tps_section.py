@@ -877,12 +877,16 @@ def write_takeoff_performance_string(
             _v_off  = _fmt_thr(_ab_off) if _thr_param else ''
             _v_on   = _fmt_thr(_ab_on)  if _thr_param else ''
 
-            _stab = f"  {_ab_trim}" if (_ab_trim and _ab_trim != 'X.X') else ''
-            output += f"{'':<17}{'TOW CG':<10}{'STAB' if _stab else ''}\n"
-            output += f"*MAX*    {_lbl:<8}{_ab_cg:<10}{_ab_trim if _stab else ''}\n"
-            output += f"APU OFF  {_v_off}\n"
-            output += f"APU ON   {_v_on:<8}{'F':<5}{'S':<5}{'GRN DOT'}\n"
-            output += f"{'':<17}{f_val:<5}{s_val:<5}{gd_val:^7}\n\n"
+            # Column positions verified character-for-character against the
+            # AOM's own worked example (1p.3.1), which lands tokens at
+            # cols 16/27 (headers), 0/9/17/27 (*MAX* row) and 16/21/28
+            # (F/S/GRN DOT values).
+            _has_stab = bool(_ab_trim and _ab_trim != 'X.X')
+            output += f"{'TOW CG':>22}{'STAB' if _has_stab else '':>9}\n"
+            output += f"{'*MAX*':<9}{_lbl:<8}{_ab_cg:<10}{_ab_trim if _has_stab else ''}\n"
+            output += f"{'APU OFF':<9}{_v_off}\n"
+            output += f"{'APU ON':<9}{_v_on:<8}{'F':<5}{'S':<4}{'GRN DOT'}\n"
+            output += f"{f_val:>19}{s_val:>5}{gd_val:>7}\n\n"
 
         elif speed_data_dict and 'n1' in speed_data_dict:
             # Boeing 737: *MAX* N1 block with BLD ON / BLD OFF + CG / STAB
@@ -1065,8 +1069,10 @@ def write_takeoff_performance_string(
         if is_erj:
             output += f"{'RWY':<5} {flap_label:<5} {'V1':>3} {'VR':>3} {'V2':>3} {'V215':>4} {'VFS':>4}   {thr_column_label:<6}   {'MTOW':<6}\n"
         elif is_airbus:
-            # AOM order: the thrust setting sits BEFORE the V-speeds.
-            output += f"{'RWY':<5} {flap_label:<5} {ac_label:<4} {thr_column_label:<6} {'V1':>3} {'VR':>3} {'V2':>3}  {'AT':<7} {'MTOW':<6}\n"
+            # AOM order and spacing: thrust setting BEFORE the V-speeds,
+            # tokens at cols 0/6/12/18/24/28/32/38/45.
+            output += (f"{'RWY':<6}{flap_label:<6}{ac_label:<6}{thr_column_label:<6}"
+                       f"{'V1':>2}  {'VR':>2}  {'V2':>2}    {'AT':<7}{'MTOW'}\n")
         else:
             output += f"{'RWY':<5} {flap_label:<5} {ac_label:<4} {'V1':>3} {'VR':>3} {'V2':>3}   {thr_column_label:<7} {'AT':<8}   {'MTOW':<6}\n"
         output += "-" * 58 + "\n"
@@ -1728,8 +1734,8 @@ def write_takeoff_performance_string(
                 output += (f"{rwy:<5} {flap_fmt:<5} {v1:>3} {vr:>3} {v2:>3} {v215_display:>4} "
                            f"{vfs_display:>4}   {thr_display:<6}   {mtow:<6}\n")
             else:
-                output += (f"{rwy:<5} {flap_fmt:<5} {apu_status:<4} {thr_display:<6} "
-                           f"{v1:>3} {vr:>3} {v2:>3}  {at_display:<7} {mtow:<6}\n") if is_airbus else \
+                output += (f"{rwy:<6}{flap_fmt:<6}{apu_status:<5}{thr_display:>4}  "
+                           f"{v1:>3} {vr:>3} {v2:>3}    {at_display:<6}{mtow:>6}\n") if is_airbus else \
                          f"{rwy:<5} {flap_fmt:<5} {apu_status:<4} {v1:>3} {vr:>3} {v2:>3}   {thr_display:<7} {at_display:<8}   {mtow:<6}\n"
             output += "-" * 58 + "\n"
 
