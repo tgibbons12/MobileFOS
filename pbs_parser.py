@@ -58,7 +58,14 @@ def _parse_leg_line(line):
     eq = toks[i]; i += 1
 
     flt = ''
-    if i < len(toks) and re.match(r'^\d{2,5}$', toks[i]):
+    # 1-5 digits, not 2-5: single-digit flight numbers are real (the
+    # flagship transcons are AA 1/2/3/8/9) and requiring two digits didn't
+    # just lose the number, it dropped the whole leg — the station check
+    # below would then see "1" where it wanted "JFK" and bail out, so e.g.
+    # SEQ 29856's JFK-LAX day-1 leg silently vanished from the pairing.
+    # Unambiguous: the token after the equipment code is either the flight
+    # number (digits) or the station (three letters), never both.
+    if i < len(toks) and re.match(r'^\d{1,5}$', toks[i]):
         flt = toks[i]; i += 1
 
     if i >= len(toks) or not re.match(r'^[A-Z]{3}$', toks[i]):
