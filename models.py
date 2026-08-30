@@ -66,6 +66,12 @@ class User(UserMixin, db.Model):
     # published doc forces an acknowledgement on every other pilot, so who
     # can publish one is enforced rather than assumed.
     is_admin = db.Column(db.Boolean, default=False)
+    # Last request this account made, for the admin roster. Written at most
+    # once every few minutes rather than per request (see _touch_last_seen
+    # in server.py) — an accurate-to-the-second value isn't worth a DB write
+    # on every page load, and "last active" only needs to be roughly right.
+    # Starts recording from deploy; there's no history to backfill.
+    last_seen = db.Column(db.DateTime(timezone=True))
     created_at = db.Column(db.DateTime(timezone=True), default=_now)
 
     def set_password(self, password):

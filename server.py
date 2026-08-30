@@ -24,7 +24,7 @@ import re
 import time
 import uuid
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import airportsdata
 import requests
@@ -366,6 +366,10 @@ def _ensure_columns():
         with db.engine.begin() as conn:
             conn.execute(sa_text("ALTER TABLE users ADD COLUMN is_admin BOOLEAN"))
         LOG.info("Migrated: added users.is_admin")
+    if "last_seen" not in existing:
+        with db.engine.begin() as conn:
+            conn.execute(sa_text("ALTER TABLE users ADD COLUMN last_seen TIMESTAMP"))
+        LOG.info("Migrated: added users.last_seen")
     existing_pbs = {c["name"] for c in inspector.get_columns("pbs_imports")}
     if "pending_edits" not in existing_pbs:
         with db.engine.begin() as conn:
@@ -418,11 +422,38 @@ with app.app_context():
 _PUBLIC_ENDPOINTS = {"login", "register", "health", "static"}
 
 
+# How stale users.last_seen is allowed to get before a request rewrites it.
+# The admin roster shows "last active" to the nearest few minutes at best, so
+# writing on every single request would be a per-page-load DB write to buy
+# precision nothing displays.
+_LAST_SEEN_THROTTLE = timedelta(minutes=5)
+
+
+def _touch_last_seen():
+    last = current_user.last_seen
+    now = datetime.now(timezone.utc)
+    if last is not None:
+        # SQLite hands back naive datetimes where Postgres gives aware ones;
+        # compare on common ground rather than raising on the subtraction.
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        if now - last < _LAST_SEEN_THROTTLE:
+            return
+    current_user.last_seen = now
+    db.session.commit()
+
+
 @app.before_request
 def _require_login():
     if request.endpoint in _PUBLIC_ENDPOINTS or request.endpoint is None:
         return None
     if current_user.is_authenticated:
+        try:
+            _touch_last_seen()
+        except Exception as e:
+            # Activity tracking is never worth failing a real request over.
+            db.session.rollback()
+            LOG.warning(f"last_seen update failed: {e}")
         return None
     # A redirect would hand back an HTML login page to a fetch() call that
     # expects JSON — only the full-page GETs (opening a URL directly) should
@@ -1432,11 +1463,13 @@ def list_bid_layer_pairings(layer_id):
 MAX_DOC_BYTES = 25 * 1024 * 1024
 
 
-def _admin_required():
-    """None when the caller may publish, else a ready-to-return 403."""
+def _admin_required(action="publish documents"):
+    """None when the caller is an admin, else a ready-to-return 403 naming
+    what they were trying to do — a stats request refused with "only an
+    admin can publish documents" reads like a bug in the caller."""
     if bool(getattr(current_user, "is_admin", False)):
         return None
-    return jsonify({"error": "only an admin can publish documents"}), 403
+    return jsonify({"error": f"only an admin can {action}"}), 403
 
 
 def _doc_slug(filename):
@@ -1567,7 +1600,7 @@ def import_document():
 
 @app.route("/docs/<int:doc_id>", methods=["DELETE"])
 def delete_document(doc_id):
-    denied = _admin_required()
+    denied = _admin_required("delete documents")
     if denied:
         return denied
     doc = db.session.get(Document, doc_id)
@@ -1577,6 +1610,122 @@ def delete_document(doc_id):
     db.session.delete(doc)
     db.session.commit()
     return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# Admin stats — roster, activity, and document-acknowledgement compliance.
+# Read-only; the only thing here that can change state is nothing at all.
+# ---------------------------------------------------------------------------
+def _iso(dt):
+    return dt.isoformat() if dt else ""
+
+
+@app.route("/admin/stats")
+def admin_stats():
+    denied = _admin_required("view crew stats")
+    if denied:
+        return denied
+
+    users = User.query.order_by(User.username).all()
+    docs = Document.query.order_by(Document.uploaded_at.desc()).all()
+    user_count = len(users)
+
+    # One grouped query per table instead of per-user counts in a loop —
+    # this page is small today but it's the kind of thing that quietly
+    # becomes N+1 once there's a real crew list.
+    def _counts(model, col):
+        return dict(
+            db.session.query(col, db.func.count()).group_by(col).all()
+        )
+
+    legs_by_user = _counts(Leg, Leg.user_id)
+    sigs_by_user = _counts(SignatureLog, SignatureLog.user_id)
+    trips_by_user = _counts(TripCheckIn, TripCheckIn.user_id)
+    acks_by_user = _counts(DocumentAck, DocumentAck.user_id)
+
+    roster = [{
+        "id": u.id,
+        "username": u.username,
+        "is_admin": bool(u.is_admin),
+        "created_at": _iso(u.created_at),
+        "last_seen": _iso(u.last_seen),
+        "timezone": u.timezone or "",
+        "active_seq": u.active_seq or "",
+        "legs": legs_by_user.get(u.id, 0),
+        "signings": sigs_by_user.get(u.id, 0),
+        "trip_checkins": trips_by_user.get(u.id, 0),
+        "docs_acked": acks_by_user.get(u.id, 0),
+        "docs_outstanding": len(docs) - acks_by_user.get(u.id, 0),
+    } for u in users]
+
+    # Compliance is per document: who has signed off on the CURRENT
+    # revision. A re-upload deletes that document's acks, so anyone
+    # missing here genuinely hasn't acknowledged what's published now.
+    acks_by_doc = {}
+    for a in DocumentAck.query.all():
+        acks_by_doc.setdefault(a.document_id, {})[a.user_id] = a
+    by_id = {u.id: u for u in users}
+    documents = []
+    for d in docs:
+        acked = acks_by_doc.get(d.id, {})
+        documents.append({
+            "id": d.id, "title": d.title, "revision": d.revision,
+            "category": d.category or "",
+            "uploaded_at": _iso(d.uploaded_at),
+            "acked_count": len(acked), "user_count": user_count,
+            "acknowledged": sorted(
+                ({"username": by_id[uid].username, "at": a.acknowledged_at}
+                 for uid, a in acked.items() if uid in by_id),
+                key=lambda r: r["username"],
+            ),
+            "outstanding": sorted(u.username for u in users if u.id not in acked),
+        })
+
+    return jsonify({"users": roster, "documents": documents, "user_count": user_count})
+
+
+@app.route("/admin/users/<int:user_id>")
+def admin_user_detail(user_id):
+    denied = _admin_required("view crew stats")
+    if denied:
+        return denied
+    user = db.session.get(User, user_id)
+    if not user:
+        return jsonify({"error": "not found"}), 404
+
+    legs = (Leg.query.filter_by(user_id=user_id)
+            .order_by(Leg.created_at.desc()).limit(25).all())
+    sigs = (SignatureLog.query.filter_by(user_id=user_id)
+            .order_by(SignatureLog.id.desc()).limit(25).all())
+    trips = (TripCheckIn.query.filter_by(user_id=user_id)
+             .order_by(TripCheckIn.id.desc()).limit(25).all())
+    acked = {a.document_id: a for a in DocumentAck.query.filter_by(user_id=user_id).all()}
+
+    return jsonify({
+        "user": {
+            "id": user.id, "username": user.username,
+            "is_admin": bool(user.is_admin),
+            "created_at": _iso(user.created_at), "last_seen": _iso(user.last_seen),
+            "timezone": user.timezone or "", "active_seq": user.active_seq or "",
+            "simbrief_user": user.default_simbrief_user or "",
+        },
+        "legs": [{
+            "id": l.id, "flight_number": l.data.get("flight_number", ""),
+            "origin": l.data.get("origin", ""), "destination": l.data.get("destination", ""),
+            "seq": l.data.get("seq", ""), "created_at": _iso(l.created_at),
+            "fit_for_duty": bool(l.data.get("fit_for_duty")),
+        } for l in legs],
+        "signings": [{
+            "flight_number": s.flight_number or "", "dep_date": s.dep_date or "",
+            "signed_at": s.signed_at or "",
+        } for s in sigs],
+        "trip_checkins": [{"seq": t.seq, "signed_at": t.signed_at or ""} for t in trips],
+        "documents": [{
+            "title": d.title, "revision": d.revision,
+            "acknowledged": d.id in acked,
+            "at": acked[d.id].acknowledged_at if d.id in acked else "",
+        } for d in Document.query.order_by(Document.uploaded_at.desc()).all()],
+    })
 
 
 @app.route("/docs")
@@ -4461,8 +4610,19 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         <button type="button" onclick="changePassword()" style="margin-top:10px;width:100%;background:var(--blue);color:#fff;border:none;padding:10px;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;">Update Password</button>
         <div id="password-msg" style="margin-top:8px;font-size:12.5px;color:var(--label);"></div>
       </div>
+      <div id="admin-entry" class="search-block" style="display:none;">
+        <label>Admin</label>
+        <button type="button" onclick="showView('admin')" style="margin-top:4px;width:100%;background:var(--bg);color:var(--blue);border:1px solid var(--border);padding:10px;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;">Crew &amp; Document Stats</button>
+      </div>
       <div id="settings-msg" class="placeholder-note"></div>
       <div style="text-align:center;padding:18px 0 4px;font-size:12px;color:var(--label);">Version $app_version</div>
+    </section>
+    <section id="admin-view" class="view">
+      <div class="topbar">
+        <button class="back-link" onclick="showView('settings')" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
+        <div class="topbar-title"><h1>Crew &amp; Documents</h1></div>
+      </div>
+      <div id="admin-body"><p class="placeholder-note">Loading…</p></div>
     </section>
     <section id="confirm-view" class="view">
       <div class="topbar">
@@ -4587,6 +4747,7 @@ function showView(view){
   document.getElementById('saveddocs-view').classList.toggle('active', view==='saveddocs');
   document.getElementById('messages-view').classList.toggle('active', view==='messages');
   document.getElementById('settings-view').classList.toggle('active', view==='settings');
+  document.getElementById('admin-view').classList.toggle('active', view==='admin');
   document.getElementById('more-view').classList.toggle('active', view==='more');
   document.getElementById('tab-overview').classList.toggle('active', view==='overview');
   document.getElementById('tab-schedule').classList.toggle('active', view==='pairing');
@@ -4601,7 +4762,14 @@ function showView(view){
   if(view === 'release') initReleaseView();
   if(view === 'confirm') initConfirmView();
   if(view === 'sign') initSignPad();
-  if(view === 'settings'){ updateThemeButtons(); updateAutoSyncButtons(); }
+  if(view === 'settings'){
+    updateThemeButtons(); updateAutoSyncButtons();
+    // Entry point only exists for admins — hidden by default so a
+    // non-admin never sees a control that would 403 on them.
+    const ae = document.getElementById('admin-entry');
+    if(ae) ae.style.display = IS_ADMIN ? '' : 'none';
+  }
+  if(view === 'admin') initAdminView();
   if(view === 'saveddocs') initSavedDocs();
   if(view === 'doclocker') initDocLocker();
   if(view === 'pairing') initPairingView();
@@ -7002,6 +7170,164 @@ const DOC_CODE_TO_KIND = {
   'AL*': ['notams', 'NOTAMs'], 'FR': ['field_report', 'Field Reports'],
   'WX*': ['weather', 'Winds & Weather'],
 };
+// Admin stats — crew roster, activity, and per-document acknowledgement
+// compliance. Admin-only; the entry point in Settings stays hidden for
+// everyone else and every route behind it 403s independently, so this is
+// a convenience, not the access control.
+function _agoText(iso){
+  if(!iso) return 'never';
+  const then = new Date(iso), mins = Math.floor((Date.now() - then) / 60000);
+  if(isNaN(mins)) return 'never';
+  if(mins < 2) return 'just now';
+  if(mins < 60) return mins + 'm ago';
+  const h = Math.floor(mins / 60);
+  if(h < 24) return h + 'h ago';
+  const d = Math.floor(h / 24);
+  return d < 30 ? (d + 'd ago') : then.toLocaleDateString();
+}
+function _adminSection(title){
+  const wrap = document.createElement('div');
+  wrap.style.cssText = 'margin:0 0 16px;';
+  const bar = document.createElement('div');
+  bar.className = 'section-bar';
+  bar.textContent = title;
+  wrap.appendChild(bar);
+  const body = document.createElement('div');
+  body.className = 'panel-card';
+  body.style.cssText = 'margin-top:0;';
+  wrap.appendChild(body);
+  return {wrap, body};
+}
+async function initAdminView(){
+  const body = document.getElementById('admin-body');
+  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  let data;
+  try {
+    const r = await fetch('/admin/stats');
+    data = await r.json();
+    if(!r.ok){ body.innerHTML = '<p class="placeholder-note">' + (data.error || 'Failed to load') + '</p>'; return; }
+  } catch(e) { body.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>'; return; }
+  body.innerHTML = '';
+
+  // --- Document compliance first: it's the reason acknowledgement exists,
+  // and an outstanding count is the one thing worth acting on today.
+  const docs = _adminSection('Document Acknowledgement');
+  if(!data.documents.length){
+    docs.body.innerHTML = '<p class="placeholder-note" style="padding:14px;">No documents published yet.</p>';
+  }
+  data.documents.forEach(d => {
+    const row = document.createElement('div');
+    row.className = 'doc-row lib-row';
+    const left = document.createElement('div');
+    const code = document.createElement('div'); code.className = 'code'; code.textContent = d.title;
+    const desc = document.createElement('div'); desc.className = 'desc';
+    const missing = d.user_count - d.acked_count;
+    desc.textContent = [d.category, d.revision > 1 ? ('Rev ' + d.revision) : '',
+                        missing ? (d.outstanding.join(', ') + ' outstanding') : 'everyone acknowledged']
+                       .filter(Boolean).join(' · ');
+    if(missing) desc.style.color = 'var(--red)';
+    left.appendChild(code); left.appendChild(desc);
+    const stats = document.createElement('div'); stats.className = 'lib-stats';
+    const n = document.createElement('div');
+    n.textContent = d.acked_count + '/' + d.user_count;
+    n.style.cssText = 'font-weight:700;font-size:14px;color:' + (missing ? 'var(--red)' : 'var(--value)') + ';';
+    stats.appendChild(n);
+    row.appendChild(left); row.appendChild(stats);
+    docs.body.appendChild(row);
+  });
+  body.appendChild(docs.wrap);
+
+  // --- Crew roster
+  const crew = _adminSection('Crew (' + data.user_count + ')');
+  data.users.forEach(u => {
+    const row = document.createElement('div');
+    row.className = 'doc-row lib-row';
+    const left = document.createElement('div');
+    const code = document.createElement('div'); code.className = 'code';
+    code.textContent = u.username + (u.is_admin ? '  ·  ADMIN' : '');
+    const desc = document.createElement('div'); desc.className = 'desc';
+    const bits = [
+      u.legs + ' leg' + (u.legs === 1 ? '' : 's'),
+      u.signings + ' signing' + (u.signings === 1 ? '' : 's'),
+      u.trip_checkins + ' trip' + (u.trip_checkins === 1 ? '' : 's'),
+    ];
+    if(u.active_seq) bits.unshift('SEQ ' + u.active_seq);
+    if(u.docs_outstanding > 0) bits.push(u.docs_outstanding + ' doc' + (u.docs_outstanding === 1 ? '' : 's') + ' outstanding');
+    desc.textContent = bits.join(' · ');
+    left.appendChild(code); left.appendChild(desc);
+    const stats = document.createElement('div'); stats.className = 'lib-stats';
+    const seen = document.createElement('div');
+    seen.textContent = _agoText(u.last_seen);
+    stats.appendChild(seen);
+    row.appendChild(left); row.appendChild(stats);
+    row.onclick = () => adminShowUser(u.id);
+    crew.body.appendChild(row);
+  });
+  body.appendChild(crew.wrap);
+}
+async function adminShowUser(userId){
+  const body = document.getElementById('admin-body');
+  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  let d;
+  try {
+    const r = await fetch('/admin/users/' + userId);
+    d = await r.json();
+    if(!r.ok){ body.innerHTML = '<p class="placeholder-note">' + (d.error || 'Failed to load') + '</p>'; return; }
+  } catch(e) { body.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>'; return; }
+  body.innerHTML = '';
+  body.appendChild(libraryBackLink('Back to Crew & Documents', initAdminView));
+
+  const hdr = document.createElement('div');
+  hdr.className = 'lib-total';
+  hdr.textContent = [
+    d.user.username + (d.user.is_admin ? ' (admin)' : ''),
+    'last seen ' + _agoText(d.user.last_seen),
+    d.user.active_seq ? ('SEQ ' + d.user.active_seq) : '',
+    d.user.timezone, d.user.simbrief_user ? ('SimBrief ' + d.user.simbrief_user) : '',
+  ].filter(Boolean).join(' · ');
+  body.appendChild(hdr);
+
+  const simple = (title, rows, empty) => {
+    const s = _adminSection(title);
+    if(!rows.length){
+      s.body.innerHTML = '<p class="placeholder-note" style="padding:14px;">' + empty + '</p>';
+    }
+    rows.forEach(([main, sub, warn]) => {
+      const row = document.createElement('div');
+      row.className = 'doc-row';
+      const left = document.createElement('div');
+      const c = document.createElement('div'); c.className = 'code'; c.textContent = main;
+      const s2 = document.createElement('div'); s2.className = 'desc'; s2.textContent = sub;
+      if(warn) s2.style.color = 'var(--red)';
+      left.appendChild(c); left.appendChild(s2);
+      row.appendChild(left);
+      s.body.appendChild(row);
+    });
+    body.appendChild(s.wrap);
+  };
+
+  simple('Documents', d.documents.map(x => [
+    x.title + (x.revision > 1 ? ('  Rev ' + x.revision) : ''),
+    x.acknowledged ? ('Acknowledged ' + new Date(x.at).toLocaleString()) : 'NOT acknowledged',
+    !x.acknowledged,
+  ]), 'No documents published.');
+
+  simple('Recent Legs', d.legs.map(x => [
+    (x.flight_number || '—') + ' ' + x.origin + '→' + x.destination,
+    [x.seq ? ('SEQ ' + x.seq) : '', new Date(x.created_at).toLocaleString(),
+     x.fit_for_duty ? 'FFD signed' : 'FFD not signed'].filter(Boolean).join(' · '),
+    !x.fit_for_duty,
+  ]), 'No legs generated.');
+
+  simple('Trip Check-Ins', d.trip_checkins.map(x => [
+    'SEQ ' + x.seq, x.signed_at ? new Date(x.signed_at).toLocaleString() : '', false,
+  ]), 'No trip check-ins.');
+
+  simple('Signing History', d.signings.map(x => [
+    (x.flight_number || '—') + (x.dep_date ? ('  ' + x.dep_date) : ''),
+    x.signed_at ? new Date(x.signed_at).toLocaleString() : '', false,
+  ]), 'No signatures recorded.');
+}
 // Company Docs — instance-wide PDFs an admin publishes, which every pilot
 // has to acknowledge. Distinct from Saved Docs (this leg's own bookmarked
 // release pages) and from the release PDFs in All Commands: those come out
