@@ -831,19 +831,19 @@ def write_takeoff_performance_string(
             # Omitted entirely when there's no grid for that engine — an
             # absent block is honest, a substituted number is not.
             _ab_thrust = get_takeoff_thrust(icaocode, engine_type, temp, alt_val,
-                                            packs_off=False)
+                                            apu_on=False)
             if _ab_thrust:
                 _tp = _ab_thrust['param']
                 _tv = (f"{_ab_thrust['value']:.2f}" if _tp == 'EPR'
                        else f"{_ab_thrust['value']:.1f}")
-                _ab_thrust_off = get_takeoff_thrust(icaocode, engine_type, temp, alt_val,
-                                                    packs_off=True)
+                _ab_thrust_on = get_takeoff_thrust(icaocode, engine_type, temp, alt_val,
+                                                   apu_on=True)
                 output += f"         *MAX* {_tp}\n"
-                output += f"      A/C ON  {_tv}\n"
-                if _ab_thrust_off and _ab_thrust_off['value'] != _ab_thrust['value']:
-                    _tvo = (f"{_ab_thrust_off['value']:.2f}" if _tp == 'EPR'
-                            else f"{_ab_thrust_off['value']:.1f}")
-                    output += f"      A/C OFF {_tvo}\n"
+                output += f"      APU OFF {_tv}\n"
+                if _ab_thrust_on and _ab_thrust_on['value'] != _ab_thrust['value']:
+                    _tvn = (f"{_ab_thrust_on['value']:.2f}" if _tp == 'EPR'
+                            else f"{_ab_thrust_on['value']:.1f}")
+                    output += f"      APU ON  {_tvn}\n"
                 output += "\n"
             _ab_cg = cg_display or speed_data_dict.get('cg', 'XX.X')
             _ab_trim = trim_data.get('trim', 'X.X') if trim_data else \

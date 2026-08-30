@@ -999,9 +999,12 @@ AIRBUS_TAKEOFF_THRUST = {
         'altitudes': [-1000, 0, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000],
         'oat_temps': [],   # descending, e.g. [55, 50, 45, ...]
         'values': {},      # {oat: [v_at_-1000, v_at_0, ...]}
-        # Applied to the looked-up value, matching the ODM's own
-        # "Engine Bleed Adjustment" block. Left empty until captured.
-        'bleed_adjust': {},
+        # Bleed correction, named as the real TPS prints it: the sheet
+        # shows "APU OFF" and "APU ON" rather than packs on/off. +0.01 is
+        # measured, not assumed — it is the delta in all five real AA A321
+        # -A5 examples, holding across PA -27..3653, OAT 14..26, sharklet
+        # and non-sharklet, wet and dry.
+        'bleed_adjust': {'apu_on': 0.01},
     },
 }
 
@@ -1053,7 +1056,7 @@ def _interp_grid(grid, temp, altitude):
 
 
 def get_takeoff_thrust(icao_code, engine, oat, altitude, assumed_temp=None,
-                       packs_off=False, anti_ice=None):
+                       apu_on=False, anti_ice=None):
     """Max (TOGA) or reduced (FLEX) takeoff thrust for an Airbus.
 
     Pass assumed_temp for FLEX — the grid is then read at that temperature
@@ -1073,8 +1076,8 @@ def get_takeoff_thrust(icao_code, engine, oat, altitude, assumed_temp=None,
     if value is None:
         return None
     adj = grid.get('bleed_adjust') or {}
-    if packs_off:
-        value += adj.get('packs_off', 0.0)
+    if apu_on:
+        value += adj.get('apu_on', 0.0)
     if anti_ice:
         value += adj.get(anti_ice, 0.0)
     return {
