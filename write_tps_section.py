@@ -53,7 +53,7 @@ import textwrap
 import traceback
 from datetime import datetime, timezone
 
-from SPEEDOTHER import get_speed_other, get_reduced_thrust_n1, get_takeoff_thrust
+from SPEEDOTHER import get_speed_other, get_reduced_thrust_n1, get_takeoff_thrust, engine_family
 from calm_wind_tlr import (atow_delta_lbs, interpolate_to_atow,
                            parse_calm_wind_tables)
 from ENGINEFAILPROC import get_airport_specific_altitudes
@@ -570,6 +570,15 @@ def write_takeoff_performance_string(
                 engine_type      = first_runway.get('engine', 'UNKNOWN')
                 LOG.debug(f"[DBG: Aircraft {aircraft_reg} not in mapping, using XML: {aircraft_display}")
 
+            # Real engine designation (SimBrief aircraft/engines, e.g.
+            # "IAE V2533-A5"), distinct from engine_type above which is the
+            # free-text comment the sheet header prints. Resolved once here
+            # so both the runway-table column label and the *MAX* block use
+            # the same answer.
+            engine_designation = first_runway.get('engine_designation', '') or ''
+            _eng_family, _thr_param = engine_family(engine_designation)
+            LOG.debug(f"[DBG: engines={engine_designation!r} -> {_eng_family}/{_thr_param}")
+
             sta      = (xml_root.findtext('origin/iata_code') or first_runway.get('airport', 'ERR')).strip().upper() \
                        if xml_root is not None else first_runway.get('airport', 'ERR')
             pres     = first_runway.get('qnh', 'ERR')
@@ -830,39 +839,50 @@ def write_takeoff_performance_string(
             # it's driven off the OFP's engine string rather than the type.
             # Omitted entirely when there's no grid for that engine — an
             # absent block is honest, a substituted number is not.
-            # engine_designation is the real one ("IAE V2533-A5"); engine_type
-            # is the free-text comment the header prints ("A321 -A5 SHARKLET"),
-            # which carries no engine name and must not be matched against.
-            _eng = (first_runway.get('engine_designation') or '') if valid_runways else ''
-            _ab_thrust = get_takeoff_thrust(icaocode, _eng, temp, alt_val,
-                                            apu_on=False)
-            if _ab_thrust:
-                _tp = _ab_thrust['param']
-                _tv = (f"{_ab_thrust['value']:.2f}" if _tp == 'EPR'
-                       else f"{_ab_thrust['value']:.1f}")
-                _ab_thrust_on = get_takeoff_thrust(icaocode, _eng, temp, alt_val,
-                                                   apu_on=True)
-                output += f"         *MAX* {_tp}\n"
-                output += f"      APU OFF {_tv}\n"
-                if _ab_thrust_on and _ab_thrust_on['value'] != _ab_thrust['value']:
-                    _tvn = (f"{_ab_thrust_on['value']:.2f}" if _tp == 'EPR'
-                            else f"{_ab_thrust_on['value']:.1f}")
-                    output += f"      APU ON  {_tvn}\n"
-                output += "\n"
+            # Rendered whenever the engine is recognised, even with no data
+            # for these conditions — a visible 0.00 reads as "not available"
+            # and keeps the block in its expected place on the sheet, which
+            # is more useful than the row silently vanishing. (0.00 is not a
+            # plausible thrust setting, so it can't be mistaken for one.)
+            # Still omitted entirely for an unrecognised engine, since then
+            # we don't know whether to label it EPR or N1.
+            # Laid out to match the A32F AOM's own TPS (1p.3.1): the thrust
+            # column and the CG/STAB + F/S/GRN DOT columns INTERLEAVE rather
+            # than stacking --
+            #                 TOW CG     STAB
+            #  *MAX*    N1     26.4      N/U 1.2
+            #  APU OFF  87.9
+            #  APU ON   88.6   F    S   GRN DOT
+            #                 137  179    195
             _ab_cg = cg_display or speed_data_dict.get('cg', 'XX.X')
             _ab_trim = trim_data.get('trim', 'X.X') if trim_data else \
                        speed_data_dict.get('trim', 'X.X')
-            if _ab_trim and _ab_trim != 'X.X':
-                output += f"      TOW CG       STAB\n"
-                output += f"       {_ab_cg:<10} {_ab_trim}\n"
-            else:
-                output += f"      TOW CG\n"
-                output += f"       {_ab_cg}\n"
             f_val  = speed_data_dict['speed'].get('F', 'XXX')
             s_val  = speed_data_dict['speed'].get('S', 'XXX')
             gd_val = speed_data_dict['speed'].get('GRN DOT', 'XXX')
-            output += f"       F     S    GRN DOT\n"
-            output += f"      {f_val:<5} {s_val:<5} {gd_val:^8}\n\n"
+
+            # 0.00 rather than an omitted row when there's no data for these
+            # conditions: it holds the block in its expected place and can't
+            # be mistaken for a real setting. Only the thrust VALUES fall
+            # back -- an unrecognised engine leaves the label blank instead
+            # of guessing between EPR and N1.
+            _dec = 2 if _thr_param == 'EPR' else 1
+            def _fmt_thr(r):
+                return f"{r['value']:.{_dec}f}" if r else f"{0:.{_dec}f}"
+            _ab_off = get_takeoff_thrust(icaocode, engine_designation, temp,
+                                         alt_val, apu_on=False) if _thr_param else None
+            _ab_on  = get_takeoff_thrust(icaocode, engine_designation, temp,
+                                         alt_val, apu_on=True) if _thr_param else None
+            _lbl    = _thr_param or ''
+            _v_off  = _fmt_thr(_ab_off) if _thr_param else ''
+            _v_on   = _fmt_thr(_ab_on)  if _thr_param else ''
+
+            _stab = f"  {_ab_trim}" if (_ab_trim and _ab_trim != 'X.X') else ''
+            output += f"{'':<17}{'TOW CG':<10}{'STAB' if _stab else ''}\n"
+            output += f"*MAX*    {_lbl:<8}{_ab_cg:<10}{_ab_trim if _stab else ''}\n"
+            output += f"APU OFF  {_v_off}\n"
+            output += f"APU ON   {_v_on:<8}{'F':<5}{'S':<5}{'GRN DOT'}\n"
+            output += f"{'':<17}{f_val:<5}{s_val:<5}{gd_val:^7}\n\n"
 
         elif speed_data_dict and 'n1' in speed_data_dict:
             # Boeing 737: *MAX* N1 block with BLD ON / BLD OFF + CG / STAB
@@ -894,6 +914,11 @@ def write_takeoff_performance_string(
             thr_column_label = "N1"
         elif is_erj:
             thr_column_label = "THR"
+        elif is_airbus and _thr_param:
+            # Airbus sets neither by hand — the sheet is a crosscheck — but
+            # the column still has to say which parameter it is, and that
+            # follows the engine: V2500 is EPR-rated, CFM/LEAP/PW are N1.
+            thr_column_label = _thr_param
         else:
             thr_column_label = "THR"
 
@@ -1039,6 +1064,9 @@ def write_takeoff_performance_string(
         # ERJ header: no BLD col, no AT col, extra V215 and VFS cols
         if is_erj:
             output += f"{'RWY':<5} {flap_label:<5} {'V1':>3} {'VR':>3} {'V2':>3} {'V215':>4} {'VFS':>4}   {thr_column_label:<6}   {'MTOW':<6}\n"
+        elif is_airbus:
+            # AOM order: the thrust setting sits BEFORE the V-speeds.
+            output += f"{'RWY':<5} {flap_label:<5} {ac_label:<4} {thr_column_label:<6} {'V1':>3} {'VR':>3} {'V2':>3}  {'AT':<7} {'MTOW':<6}\n"
         else:
             output += f"{'RWY':<5} {flap_label:<5} {ac_label:<4} {'V1':>3} {'VR':>3} {'V2':>3}   {thr_column_label:<7} {'AT':<8}   {'MTOW':<6}\n"
         output += "-" * 58 + "\n"
@@ -1573,19 +1601,21 @@ def write_takeoff_performance_string(
                         thr_display = str(n1_pack_on)
 
             elif is_airbus:
-                thr_display = "TOGA" if (at_override_occurred or at_display.startswith("MAX")) else "FLEX"
-                # FLEX is the same grid read at the assumed temperature —
-                # that's what reduced thrust means, and it's how the MD-8x
-                # branch above already derives its takeoff EPR. Falls back
-                # to the bare "FLEX"/"TOGA" label when there's no grid for
-                # this engine rather than inventing a setting.
-                _fx_temp = int(at_numeric) if (thr_display == "FLEX" and at_numeric is not None) else None
-                _fx_eng = (first_runway.get('engine_designation') or '') if valid_runways else ''
-                _fx = get_takeoff_thrust(icaocode, _fx_eng, temp, alt_val,
+                # Per the A32F AOM the column holds the bare setting (83.6),
+                # not a "FLEX 83.6" label — the AT column alongside it already
+                # says whether a flex temp was used. TOGA is read from the
+                # TOGA grid at actual OAT, FLEX from the flex grid at the
+                # assumed temp; 0.00 stands in when the grid has no data for
+                # these conditions, matching the *MAX* block above.
+                _is_toga = at_override_occurred or at_display.startswith("MAX")
+                _fx_temp = None if _is_toga else (int(at_numeric) if at_numeric is not None else None)
+                _fx = get_takeoff_thrust(icaocode, engine_designation, temp, alt_val,
                                          assumed_temp=_fx_temp)
-                if _fx:
-                    _fv = f"{_fx['value']:.2f}" if _fx['param'] == 'EPR' else f"{_fx['value']:.1f}"
-                    thr_display = f"{thr_display} {_fv}"
+                if _thr_param:
+                    _fd = 2 if _thr_param == 'EPR' else 1
+                    thr_display = f"{_fx['value']:.{_fd}f}" if _fx else f"{0:.{_fd}f}"
+                else:
+                    thr_display = "TOGA" if _is_toga else "FLEX"
 
             elif is_erj:
                 # ERJ: apply same thrust label mapping as raw passthrough above
@@ -1698,7 +1728,9 @@ def write_takeoff_performance_string(
                 output += (f"{rwy:<5} {flap_fmt:<5} {v1:>3} {vr:>3} {v2:>3} {v215_display:>4} "
                            f"{vfs_display:>4}   {thr_display:<6}   {mtow:<6}\n")
             else:
-                output += f"{rwy:<5} {flap_fmt:<5} {apu_status:<4} {v1:>3} {vr:>3} {v2:>3}   {thr_display:<7} {at_display:<8}   {mtow:<6}\n"
+                output += (f"{rwy:<5} {flap_fmt:<5} {apu_status:<4} {thr_display:<6} "
+                           f"{v1:>3} {vr:>3} {v2:>3}  {at_display:<7} {mtow:<6}\n") if is_airbus else \
+                         f"{rwy:<5} {flap_fmt:<5} {apu_status:<4} {v1:>3} {vr:>3} {v2:>3}   {thr_display:<7} {at_display:<8}   {mtow:<6}\n"
             output += "-" * 58 + "\n"
 
         # ===================================================================
