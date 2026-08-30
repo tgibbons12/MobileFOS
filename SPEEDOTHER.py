@@ -1063,7 +1063,36 @@ AIRBUS_TAKEOFF_THRUST = {
             },
         },
     },
-    # ('A321', 'CFM56-5B'): N1 — awaiting capture
+    # Seeded entirely from five real AA A321 -5B3/P TPS sheets (TPA, PDX,
+    # BOS, PHL, YYC), not from the sim. Note N1 RISES with OAT — on a
+    # flat-rated engine the shaft has to spin faster to hold the same
+    # thrust as the air thins — which is the opposite of the EPR grids
+    # above and an easy thing to "correct" the wrong way.
+    ('A321', 'CFM56-5B'): {
+        'param': 'N1',
+        # Exactly +0.9 on all five sheets, with no spread at all.
+        'bleed_adjust': {'apu_on': 0.9},
+        'max_alt_gap': 3600,
+        'max_temp_gap': 12,
+        'alt_snap': 1500,
+        'toga': {
+            0: {                       # TPA/PDX/BOS/PHL, PA -181..-63; that
+                14: 98.3, 18: 98.8,    # 120 ft of spread is worth 0.02 N1
+                19: 98.9, 25: 100.0,
+            },
+            3438: {24: 102.1},         # YYC — the only altitude anchor yet
+        },
+        # Normalised to flex_oat_ref below; the raw sheets were each flown
+        # at a different OAT, so they cannot be read as a curve untouched.
+        'flex_oat_ref': 20,
+        'flex_oat_coeff': 0.152,       # least squares; independently
+                                       # corroborated by the +0.155/C slope
+                                       # of the MAX N1 rows above
+        'flex': {
+            0:    {45: 93.35, 46: 93.01, 49: 91.94, 51: 91.20},
+            3438: {30: 99.39},         # YYC AT 30, OAT 24 -> 100.0 raw
+        },
+    },
     # ('A21N', 'LEAP-1A'):  N1 — awaiting capture (A321neo is A21N, not A321)
 }
 
@@ -1153,6 +1182,19 @@ def get_takeoff_thrust(icao_code, engine, oat, altitude, assumed_temp=None,
     )
     if value is None:
         return None
+    # N1-rated engines need the ACTUAL OAT even under flex. N1 is a shaft
+    # speed, so the speed that delivers the assumed temperature's thrust
+    # still depends on the air actually going through the engine; EPR, a
+    # pressure ratio, is near enough independent of it (confirmed on the
+    # real AA IAE sheets, where flex 37 reads 1.56 at OAT 18 and 26 alike).
+    # Without this term the four real CFM flex rows aren't even monotonic
+    # in assumed temp — AT 45 reads 93.2 while AT 46 reads 92.1. Applying
+    # it straightens them into a curve of near-constant slope, which is why
+    # this is a correction and not a curve fit.
+    if flex and entry.get('flex_oat_coeff'):
+        if oat is None:
+            return None
+        value += entry['flex_oat_coeff'] * (oat - entry['flex_oat_ref'])
     if apu_on:
         value += (entry.get('bleed_adjust') or {}).get('apu_on', 0.0)
     return {
