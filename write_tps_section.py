@@ -53,7 +53,7 @@ import textwrap
 import traceback
 from datetime import datetime, timezone
 
-from SPEEDOTHER import get_speed_other, get_reduced_thrust_n1
+from SPEEDOTHER import get_speed_other, get_reduced_thrust_n1, get_takeoff_thrust
 from calm_wind_tlr import (atow_delta_lbs, interpolate_to_atow,
                            parse_calm_wind_tables)
 from ENGINEFAILPROC import get_airport_specific_altitudes
@@ -824,6 +824,27 @@ def write_takeoff_performance_string(
         elif icaocode in ['A318', 'A319', 'A320', 'A321', 'A20N', 'A21N'] \
                 and speed_data_dict and isinstance(speed_data_dict.get('speed'), dict):
             # Airbus: CG from cg_percent; trim from TRIMSETTING
+            # Max takeoff thrust block, mirroring the 737's *MAX* N1 and the
+            # MD-8x's *MAX* EPR. Which parameter appears is a property of the
+            # engine (IAE V2500 is EPR-rated, CFM/LEAP/PW are N1-rated), so
+            # it's driven off the OFP's engine string rather than the type.
+            # Omitted entirely when there's no grid for that engine — an
+            # absent block is honest, a substituted number is not.
+            _ab_thrust = get_takeoff_thrust(icaocode, engine_type, temp, alt_val,
+                                            packs_off=False)
+            if _ab_thrust:
+                _tp = _ab_thrust['param']
+                _tv = (f"{_ab_thrust['value']:.2f}" if _tp == 'EPR'
+                       else f"{_ab_thrust['value']:.1f}")
+                _ab_thrust_off = get_takeoff_thrust(icaocode, engine_type, temp, alt_val,
+                                                    packs_off=True)
+                output += f"         *MAX* {_tp}\n"
+                output += f"      A/C ON  {_tv}\n"
+                if _ab_thrust_off and _ab_thrust_off['value'] != _ab_thrust['value']:
+                    _tvo = (f"{_ab_thrust_off['value']:.2f}" if _tp == 'EPR'
+                            else f"{_ab_thrust_off['value']:.1f}")
+                    output += f"      A/C OFF {_tvo}\n"
+                output += "\n"
             _ab_cg = cg_display or speed_data_dict.get('cg', 'XX.X')
             _ab_trim = trim_data.get('trim', 'X.X') if trim_data else \
                        speed_data_dict.get('trim', 'X.X')
@@ -1549,6 +1570,17 @@ def write_takeoff_performance_string(
 
             elif is_airbus:
                 thr_display = "TOGA" if (at_override_occurred or at_display.startswith("MAX")) else "FLEX"
+                # FLEX is the same grid read at the assumed temperature —
+                # that's what reduced thrust means, and it's how the MD-8x
+                # branch above already derives its takeoff EPR. Falls back
+                # to the bare "FLEX"/"TOGA" label when there's no grid for
+                # this engine rather than inventing a setting.
+                _fx_temp = int(at_numeric) if (thr_display == "FLEX" and at_numeric is not None) else None
+                _fx = get_takeoff_thrust(icaocode, engine_type, temp, alt_val,
+                                         assumed_temp=_fx_temp)
+                if _fx:
+                    _fv = f"{_fx['value']:.2f}" if _fx['param'] == 'EPR' else f"{_fx['value']:.1f}"
+                    thr_display = f"{thr_display} {_fv}"
 
             elif is_erj:
                 # ERJ: apply same thrust label mapping as raw passthrough above

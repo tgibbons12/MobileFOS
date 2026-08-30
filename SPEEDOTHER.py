@@ -1,3 +1,5 @@
+import re
+
 def get_speed_other(icao_code, weight=None, speed_type=None, oat=None, altitude=None, assumed_temp=None, thrust_rating=26):
     """
     Lookup additional speeds/N1/EPR based on aircraft ICAO code and parameters.
@@ -940,4 +942,144 @@ def get_reduced_thrust_n1(icao_code, thrust_rating, assumed_temp, altitude):
         'n1': round(n1, 1), 
         'thrust_rating': thrust_rating, 
         'assumed_temp': assumed_temp
+    }
+
+
+# ===========================================================================
+# Airbus takeoff thrust — engine-keyed
+# ===========================================================================
+# Keyed on (ICAO type, engine family) rather than ICAO type alone, because
+# one type genuinely has several grids: the A320-211 ODM publishes separate
+# CFM56-5A1 and 5A3 tables, and an IAE A321 is a different table again from
+# a CFM one. The existing SPEED_DATA lookups stay ICAO-only — those are
+# V-speeds, which don't vary by engine.
+#
+# Which parameter the fleet sets is a property of the engine, not the
+# airframe: IAE V2500 is EPR-rated, CFM56/LEAP/PW1100G are N1-rated.
+#
+# FLEX needs no separate data. Reduced-thrust takeoff sets the thrust the
+# engine would make at the assumed temperature, so flex is this same grid
+# read at that temperature instead of the actual OAT — the approach
+# MD83_EPR_DATA already uses (see temp_for_lookup in get_speed_other).
+# Anything published as "outside environmental envelope" must be absent
+# from the grid rather than clamped, so a lookup there returns nothing
+# instead of a plausible-looking invalid setting.
+
+_ENGINE_FAMILIES = [
+    # (regex, family key, thrust parameter)
+    (r'V2\d{3}|IAE',      'V2500',    'EPR'),
+    (r'CFM56-?5A',        'CFM56-5A', 'N1'),
+    (r'CFM56-?5B',        'CFM56-5B', 'N1'),
+    (r'LEAP',             'LEAP-1A',  'N1'),
+    (r'PW11\d{2}|PW1100', 'PW1100G',  'N1'),
+]
+
+
+def engine_family(engine):
+    """('V2500', 'EPR') from a SimBrief engine string like 'V2533-A5', or
+    (None, None) when it isn't recognised. Deliberately returns nothing
+    rather than guessing a default: showing an N1 for an EPR-rated engine
+    (or either from the wrong grid) is worse than showing no value."""
+    s = (engine or '').upper().replace(' ', '')
+    if not s:
+        return None, None
+    for pattern, family, param in _ENGINE_FAMILIES:
+        if re.search(pattern, s):
+            return family, param
+    return None, None
+
+
+# (ICAO, engine family) -> grid. 'values' maps each OAT to one row across
+# 'altitudes'; a row may hold None where the manual shades a cell out.
+AIRBUS_TAKEOFF_THRUST = {
+    ('A321', 'V2500'): {
+        'name': 'Takeoff Thrust EPR',
+        'param': 'EPR',
+        'engine': 'V2500',
+        'altitudes': [-1000, 0, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000],
+        'oat_temps': [],   # descending, e.g. [55, 50, 45, ...]
+        'values': {},      # {oat: [v_at_-1000, v_at_0, ...]}
+        # Applied to the looked-up value, matching the ODM's own
+        # "Engine Bleed Adjustment" block. Left empty until captured.
+        'bleed_adjust': {},
+    },
+}
+
+
+def _interp_grid(grid, temp, altitude):
+    """Bilinear lookup over an OAT x pressure-altitude grid. OAT axis is
+    descending (as published); altitude ascending. Returns None when the
+    grid is empty or any bracketing cell is blank — a shaded 'outside
+    envelope' cell must not silently resolve to a neighbour's value."""
+    temps, alts, values = grid.get('oat_temps') or [], grid.get('altitudes') or [], grid.get('values') or {}
+    if not temps or not alts or not values:
+        return None
+    try:
+        temp, altitude = float(temp), float(altitude)
+    except (TypeError, ValueError):
+        return None
+
+    def bracket(axis, v, descending):
+        if descending:
+            if v >= axis[0]:
+                return 0, 0, 0.0
+            if v <= axis[-1]:
+                return len(axis) - 1, len(axis) - 1, 0.0
+            for i in range(len(axis) - 1):
+                if axis[i] >= v >= axis[i + 1]:
+                    return i, i + 1, (axis[i] - v) / (axis[i] - axis[i + 1])
+        else:
+            if v <= axis[0]:
+                return 0, 0, 0.0
+            if v >= axis[-1]:
+                return len(axis) - 1, len(axis) - 1, 0.0
+            for i in range(len(axis) - 1):
+                if axis[i] <= v <= axis[i + 1]:
+                    return i, i + 1, (v - axis[i]) / (axis[i + 1] - axis[i])
+        return 0, 0, 0.0
+
+    t1, t2, tf = bracket(temps, temp, True)
+    a1, a2, af = bracket(alts, altitude, False)
+    try:
+        c = [values[temps[t1]][a1], values[temps[t1]][a2],
+             values[temps[t2]][a1], values[temps[t2]][a2]]
+    except (KeyError, IndexError):
+        return None
+    if any(v is None for v in c):
+        return None
+    top = c[0] + (c[1] - c[0]) * af
+    bot = c[2] + (c[3] - c[2]) * af
+    return top + (bot - top) * tf
+
+
+def get_takeoff_thrust(icao_code, engine, oat, altitude, assumed_temp=None,
+                       packs_off=False, anti_ice=None):
+    """Max (TOGA) or reduced (FLEX) takeoff thrust for an Airbus.
+
+    Pass assumed_temp for FLEX — the grid is then read at that temperature
+    instead of the actual OAT, which is what reduced thrust means.
+
+    Returns {'param': 'EPR'|'N1', 'value': float, 'engine': ..., 'flex': bool}
+    or None when the engine is unrecognised or there's no data for that
+    combination. None means "show XXX", never a substituted value.
+    """
+    family, param = engine_family(engine)
+    if not family:
+        return None
+    grid = AIRBUS_TAKEOFF_THRUST.get(((icao_code or '').upper(), family))
+    if not grid:
+        return None
+    value = _interp_grid(grid, assumed_temp if assumed_temp is not None else oat, altitude)
+    if value is None:
+        return None
+    adj = grid.get('bleed_adjust') or {}
+    if packs_off:
+        value += adj.get('packs_off', 0.0)
+    if anti_ice:
+        value += adj.get(anti_ice, 0.0)
+    return {
+        'param': param,
+        'value': round(value, 2 if param == 'EPR' else 1),
+        'engine': family,
+        'flex': assumed_temp is not None,
     }
