@@ -1057,7 +1057,8 @@ AIRBUS_TAKEOFF_THRUST = {
                 37: 1.537, 40: 1.511,
             },
             5020: {                    # KFNL, QNH 1013 — break ~24C
-                1: 1.589, 24: 1.553, 38: 1.440,
+                1: 1.589, 15: 1.589,   # identical: flat-rated below the break
+                24: 1.553, 38: 1.440,
             },
             9933: {                    # KLXV, QNH 29.92 — break ~12C
                 0: 1.602, 12: 1.578, 17: 1.543,
