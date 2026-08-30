@@ -945,25 +945,36 @@ def get_reduced_thrust_n1(icao_code, thrust_rating, assumed_temp, altitude):
     }
 
 
+
 # ===========================================================================
-# Airbus takeoff thrust — engine-keyed
+# Airbus takeoff thrust — engine-keyed, measured from the fleet's own aircraft
 # ===========================================================================
-# Keyed on (ICAO type, engine family) rather than ICAO type alone, because
-# one type genuinely has several grids: the A320-211 ODM publishes separate
-# CFM56-5A1 and 5A3 tables, and an IAE A321 is a different table again from
-# a CFM one. The existing SPEED_DATA lookups stay ICAO-only — those are
-# V-speeds, which don't vary by engine.
+# Keyed on (ICAO type, engine family) rather than type alone: one type
+# genuinely has several grids (the A320-211 ODM publishes separate CFM56-5A1
+# and 5A3 tables), and which parameter is set follows the ENGINE, not the
+# airframe — IAE V2500 is EPR-rated, CFM56/LEAP/PW1100G are N1-rated.
 #
-# Which parameter the fleet sets is a property of the engine, not the
-# airframe: IAE V2500 is EPR-rated, CFM56/LEAP/PW1100G are N1-rated.
+# TOGA and FLEX are stored SEPARATELY and are not interchangeable. Measured
+# on the A321 V2500 at 9933 ft, TOGA sits +0.008 above the flex curve at
+# 17C but -0.025 below it at 24C — they cross, so neither can stand in for
+# the other. (They are also never needed at the same temperature: the
+# dispatch script forces TOGA when the assumed temp is within a few degrees
+# of OAT, so the two are used in disjoint regimes.)
 #
-# FLEX needs no separate data. Reduced-thrust takeoff sets the thrust the
-# engine would make at the assumed temperature, so flex is this same grid
-# read at that temperature instead of the actual OAT — the approach
-# MD83_EPR_DATA already uses (see temp_for_lookup in get_speed_other).
-# Anything published as "outside environmental envelope" must be absent
-# from the grid rather than clamped, so a lookup there returns nothing
-# instead of a plausible-looking invalid setting.
+# Each grid is stored as one temperature curve PER ALTITUDE rather than a
+# rectangular table, because real capture is ragged — different altitudes
+# get different temperatures sampled. Lookup interpolates along the
+# temperature curve within each bracketing altitude first, then blends the
+# two results across altitude.
+#
+# Gap guards matter more than usual here. Published CFM data shows thrust
+# vs pressure altitude is a HUMP whose peak moves with temperature (sea
+# level at 30C, 4000 ft at 22C, still climbing at 8000 ft at 10C), so
+# interpolating across a wide unmeasured altitude span silently invents a
+# straight line through a curve — worth up to 1.3 %N1 in the published
+# tables. Rather than do that, a lookup whose bracketing samples are
+# further apart than max_alt_gap / max_temp_gap returns nothing at all and
+# the TPS simply omits the block.
 
 _ENGINE_FAMILIES = [
     # (regex, family key, thrust parameter)
@@ -977,9 +988,9 @@ _ENGINE_FAMILIES = [
 
 def engine_family(engine):
     """('V2500', 'EPR') from a SimBrief engine string like 'V2533-A5', or
-    (None, None) when it isn't recognised. Deliberately returns nothing
-    rather than guessing a default: showing an N1 for an EPR-rated engine
-    (or either from the wrong grid) is worse than showing no value."""
+    (None, None) when unrecognised. Deliberately returns nothing rather
+    than guessing a default: showing an N1 for an EPR-rated engine, or
+    either from the wrong grid, is worse than showing no value."""
     s = (engine or '').upper().replace(' ', '')
     if not s:
         return None, None
@@ -989,100 +1000,139 @@ def engine_family(engine):
     return None, None
 
 
-# (ICAO, engine family) -> grid. 'values' maps each OAT to one row across
-# 'altitudes'; a row may hold None where the manual shades a cell out.
 AIRBUS_TAKEOFF_THRUST = {
     ('A321', 'V2500'): {
-        'name': 'Takeoff Thrust EPR',
         'param': 'EPR',
-        'engine': 'V2500',
-        'altitudes': [-1000, 0, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000],
-        'oat_temps': [],   # descending, e.g. [55, 50, 45, ...]
-        'values': {},      # {oat: [v_at_-1000, v_at_0, ...]}
-        # Bleed correction, named as the real TPS prints it: the sheet
-        # shows "APU OFF" and "APU ON" rather than packs on/off. +0.01 is
-        # measured, not assumed — it is the delta in all five real AA A321
-        # -A5 examples, holding across PA -27..3653, OAT 14..26, sharklet
-        # and non-sharklet, wet and dry.
+        # +0.01, measured: the delta in all five real AA A321 -A5 TPS
+        # examples, identical across PA -27..3653, OAT 14..26, sharklet and
+        # non-sharklet, wet and dry.
         'bleed_adjust': {'apu_on': 0.01},
+        'max_alt_gap': 4000,
+        'max_temp_gap': 12,
+        # Within this distance of a measured altitude, use that column
+        # directly instead of interpolating — being 500 ft from a sampled
+        # field is not the same as sitting in the unmeasured middle.
+        'alt_snap': 1500,
+        # TOGA: {pressure altitude: {OAT: EPR}}
+        'toga': {
+            0: {                       # KMIA, QNH 1013
+                15: 1.600,             # flex<=OAT returns TOGA, so this is a TOGA reading
+                37: 1.537, 40: 1.511,
+            },
+            9933: {                    # KLXV, QNH 29.92
+                0: 1.602, 12: 1.578, 17: 1.543,
+                20: 1.510, 24: 1.467, 29: 1.432,
+            },
+        },
+        # FLEX: {pressure altitude: {assumed temp: EPR}}
+        'flex': {
+            0: {                       # swept at actual OAT 15
+                84: 1.331, 72: 1.331, 71: 1.333, 70: 1.338, 65: 1.365,
+                60: 1.394, 58: 1.406, 55: 1.424, 53: 1.436, 50: 1.455,
+                48: 1.469, 45: 1.489, 43: 1.503, 40: 1.523, 37: 1.545,
+                35: 1.560, 32: 1.583, 30: 1.598, 25: 1.600,
+            },
+            9933: {                    # swept at actual OAT 12; clamps at 41
+                41: 1.395, 40: 1.402, 35: 1.429, 30: 1.457,
+                25: 1.486, 20: 1.516, 15: 1.547,
+            },
+        },
     },
+    # ('A321', 'CFM56-5B'): N1 — awaiting capture
+    # ('A21N', 'LEAP-1A'):  N1 — awaiting capture (A321neo is A21N, not A321)
 }
 
 
-def _interp_grid(grid, temp, altitude):
-    """Bilinear lookup over an OAT x pressure-altitude grid. OAT axis is
-    descending (as published); altitude ascending. Returns None when the
-    grid is empty or any bracketing cell is blank — a shaded 'outside
-    envelope' cell must not silently resolve to a neighbour's value."""
-    temps, alts, values = grid.get('oat_temps') or [], grid.get('altitudes') or [], grid.get('values') or {}
-    if not temps or not alts or not values:
+def _interp_curve(curve, x, max_gap):
+    """Linear interpolation along one temperature curve ({temp: value}).
+    Clamps at the ends — outside the measured range the extreme value is
+    the best available answer. Returns None when the bracketing samples are
+    further apart than max_gap, rather than drawing a straight line across
+    an unmeasured stretch."""
+    if not curve:
+        return None
+    if x in curve:          # exact sample — never subject to the gap guard
+        return curve[x]
+    ks = sorted(curve)
+    if x <= ks[0]:
+        return curve[ks[0]]
+    if x >= ks[-1]:
+        return curve[ks[-1]]
+    for a, b in zip(ks, ks[1:]):
+        if a <= x <= b:
+            if max_gap is not None and (b - a) > max_gap:
+                return None
+            return curve[a] + (curve[b] - curve[a]) * ((x - a) / (b - a))
+    return None
+
+
+def _interp_grid(grid, temp, altitude, max_alt_gap=None, max_temp_gap=None,
+                 alt_snap=None):
+    """Temperature curve within each bracketing altitude, then blend across
+    altitude. Returns None if either axis can't be resolved."""
+    if not grid:
         return None
     try:
         temp, altitude = float(temp), float(altitude)
     except (TypeError, ValueError):
         return None
-
-    def bracket(axis, v, descending):
-        if descending:
-            if v >= axis[0]:
-                return 0, 0, 0.0
-            if v <= axis[-1]:
-                return len(axis) - 1, len(axis) - 1, 0.0
-            for i in range(len(axis) - 1):
-                if axis[i] >= v >= axis[i + 1]:
-                    return i, i + 1, (axis[i] - v) / (axis[i] - axis[i + 1])
-        else:
-            if v <= axis[0]:
-                return 0, 0, 0.0
-            if v >= axis[-1]:
-                return len(axis) - 1, len(axis) - 1, 0.0
-            for i in range(len(axis) - 1):
-                if axis[i] <= v <= axis[i + 1]:
-                    return i, i + 1, (v - axis[i]) / (axis[i + 1] - axis[i])
-        return 0, 0, 0.0
-
-    t1, t2, tf = bracket(temps, temp, True)
-    a1, a2, af = bracket(alts, altitude, False)
-    try:
-        c = [values[temps[t1]][a1], values[temps[t1]][a2],
-             values[temps[t2]][a1], values[temps[t2]][a2]]
-    except (KeyError, IndexError):
+    alts = sorted(grid)
+    nearest = min(alts, key=lambda a: abs(a - altitude))
+    if alt_snap is not None and abs(nearest - altitude) <= alt_snap:
+        lo = hi = nearest
+    elif altitude <= alts[0]:
+        lo = hi = alts[0]
+    elif altitude >= alts[-1]:
+        lo = hi = alts[-1]
+    else:
+        lo = hi = alts[0]
+        for a, b in zip(alts, alts[1:]):
+            if a <= altitude <= b:
+                lo, hi = a, b
+                break
+        if max_alt_gap is not None and (hi - lo) > max_alt_gap:
+            return None
+    v_lo = _interp_curve(grid[lo], temp, max_temp_gap)
+    if lo == hi:
+        return v_lo
+    v_hi = _interp_curve(grid[hi], temp, max_temp_gap)
+    if v_lo is None or v_hi is None:
         return None
-    if any(v is None for v in c):
-        return None
-    top = c[0] + (c[1] - c[0]) * af
-    bot = c[2] + (c[3] - c[2]) * af
-    return top + (bot - top) * tf
+    return v_lo + (v_hi - v_lo) * ((altitude - lo) / (hi - lo))
 
 
 def get_takeoff_thrust(icao_code, engine, oat, altitude, assumed_temp=None,
-                       apu_on=False, anti_ice=None):
+                       apu_on=False):
     """Max (TOGA) or reduced (FLEX) takeoff thrust for an Airbus.
 
-    Pass assumed_temp for FLEX — the grid is then read at that temperature
-    instead of the actual OAT, which is what reduced thrust means.
+    Pass assumed_temp for FLEX — that selects the flex grid and reads it at
+    the assumed temperature. Without it the TOGA grid is read at actual OAT.
 
     Returns {'param': 'EPR'|'N1', 'value': float, 'engine': ..., 'flex': bool}
-    or None when the engine is unrecognised or there's no data for that
-    combination. None means "show XXX", never a substituted value.
+    or None when the engine is unrecognised, there's no grid for that
+    combination, or the request falls in an unmeasured gap. None always
+    means "show nothing", never a substituted value.
     """
     family, param = engine_family(engine)
     if not family:
         return None
-    grid = AIRBUS_TAKEOFF_THRUST.get(((icao_code or '').upper(), family))
-    if not grid:
+    entry = AIRBUS_TAKEOFF_THRUST.get(((icao_code or '').upper(), family))
+    if not entry:
         return None
-    value = _interp_grid(grid, assumed_temp if assumed_temp is not None else oat, altitude)
+    flex = assumed_temp is not None
+    value = _interp_grid(
+        entry.get('flex' if flex else 'toga'),
+        assumed_temp if flex else oat, altitude,
+        entry.get('max_alt_gap'), entry.get('max_temp_gap'),
+        entry.get('alt_snap'),
+    )
     if value is None:
         return None
-    adj = grid.get('bleed_adjust') or {}
     if apu_on:
-        value += adj.get('apu_on', 0.0)
-    if anti_ice:
-        value += adj.get(anti_ice, 0.0)
+        value += (entry.get('bleed_adjust') or {}).get('apu_on', 0.0)
     return {
-        'param': param,
+        'param': entry.get('param', param),
         'value': round(value, 2 if param == 'EPR' else 1),
         'engine': family,
-        'flex': assumed_temp is not None,
+        'flex': flex,
     }
