@@ -5433,11 +5433,10 @@ async function fetchAeroSuggestions(){
 function applyAeroRoute(){
   if(_aeroSuggestion && _aeroSuggestion.route) document.getElementById('sbgen-route').value = _aeroSuggestion.route;
 }
-// readOnly re-reads what is already on file and repaints, without ever
-// generating — used by the post-FFD refresh, which only needs to pick up
-// the now-true fit_for_duty flag and must not manufacture a release for a
-// leg that never had one.
-function generateRelease(force, readOnly){
+// The explicit "generate" path — the Release view's own button and its
+// Regenerate link. Reading what is already on file goes through
+// ensureRelease() instead, which passes cached_only and never generates.
+function generateRelease(force){
   const btn = document.getElementById('release-gen-btn');
   const status = document.getElementById('release-status');
   const userId = document.getElementById('release-user').value.trim();
@@ -5446,9 +5445,7 @@ function generateRelease(force, readOnly){
   status.style.color = '';
   status.textContent = force ? 'Regenerating — this can take up to a minute…' : 'Generating release — this can take up to a minute…';
   document.getElementById('release-downloads').style.display = 'none';
-  (readOnly
-    ? fetch('/fos/' + LEG_ID + '/release')
-    : fetch('/fos/' + LEG_ID + '/release', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({user_id:userId, force: !!force})}))
+  fetch('/fos/' + LEG_ID + '/release', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({user_id:userId, force: !!force})})
     .then(r => r.json().then(data => ({ok:r.ok, data})))
     .then(({ok, data}) => {
       btn.disabled = false;

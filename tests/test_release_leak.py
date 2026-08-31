@@ -13,6 +13,7 @@ nothing had ever been generated for silently minted (and then remembered)
 another leg's release.
 """
 import os
+import re
 import sys
 import tempfile
 
@@ -117,6 +118,21 @@ check("leg B generates once SimBrief actually holds it",
 r = client.post(f"/fos/{a_id}/release", json={"user_id": "tester", "cached_only": True})
 check("leg A still serves its own release afterwards",
       r.get_json().get("filename") == "AA101-KPHX-KLAX-RLS.pdf", str(r.get_json().get("filename")))
+
+# 8. The release URL serves exactly the methods the page actually calls.
+#    A read path that GETs a POST-only route is a 405 the page reports as a
+#    failed request — and the read/generate split is the whole fix above, so
+#    the two halves drifting apart is the way it would silently come undone.
+methods = set()
+for rule in server.app.url_map.iter_rules():
+    if rule.rule == "/fos/<int:leg_id>/release":
+        methods |= (rule.methods - {"HEAD", "OPTIONS"})
+called = set()
+for name in ("LAUNCHER_TEMPLATE", "FOS_TEMPLATE"):
+    for m in re.finditer(r"fetch\('/fos/' \+ LEG_ID \+ '/release'(.*?)\)", getattr(server, name)):
+        called.add("POST" if "method:'POST'" in m.group(1) else "GET")
+check("every /release fetch in the page uses a method the route serves",
+      called and called <= methods, f"page calls {sorted(called)}, route serves {sorted(methods)}")
 
 print("\n" + ("FAILED: " + ", ".join(FAILURES) if FAILURES else "All checks passed."))
 sys.exit(1 if FAILURES else 0)
