@@ -2803,6 +2803,34 @@ def _gate_release_payload(payload, fit_for_duty):
     return {**payload, "fit_for_duty": bool(fit_for_duty)}
 
 
+@app.route("/fos/<int:leg_id>/release", methods=["GET"])
+def read_release(leg_id):
+    """Returns this leg's release if one has already been generated, and
+    NEVER generates. Split out from the POST below because generating and
+    reading had been the same call, and that leaked other flights' paperwork:
+
+    generate_release_pdfs() is keyed on the pilot's SimBrief USERNAME and
+    takes no leg argument at all — it renders whatever OFP happens to be
+    sitting on that account right now. So opening Documents on a leg that
+    had nothing on file rendered some *other* flight's OFP and then cached
+    it against this leg permanently. Viewing must therefore be incapable of
+    generating, which is what this route is for.
+
+    {"exists": false} rather than a 404: "nothing generated yet" is the
+    normal state of a fresh leg, not an error worth a red toast."""
+    record = _get_leg(leg_id)
+    if not record:
+        return jsonify({"error": "not found"}), 404
+    cached = ReleaseCache.query.filter_by(leg_id=leg_id).first()
+    if not cached:
+        return jsonify({"exists": False})
+    return jsonify({
+        **_gate_release_payload(cached.payload, record.get("fit_for_duty")),
+        "exists": True, "cached": True,
+        "generated_at": cached.generated_at.isoformat(),
+    })
+
+
 @app.route("/fos/<int:leg_id>/release", methods=["POST"])
 def generate_release(leg_id):
     """Generates (or, by far the common case, just returns) this leg's
@@ -5168,7 +5196,11 @@ async function fetchAeroSuggestions(){
 function applyAeroRoute(){
   if(_aeroSuggestion && _aeroSuggestion.route) document.getElementById('sbgen-route').value = _aeroSuggestion.route;
 }
-function generateRelease(force){
+// readOnly re-reads what is already on file and repaints, without ever
+// generating — used by the post-FFD refresh, which only needs to pick up
+// the now-true fit_for_duty flag and must not manufacture a release for a
+// leg that never had one.
+function generateRelease(force, readOnly){
   const btn = document.getElementById('release-gen-btn');
   const status = document.getElementById('release-status');
   const userId = document.getElementById('release-user').value.trim();
@@ -5177,11 +5209,14 @@ function generateRelease(force){
   status.style.color = '';
   status.textContent = force ? 'Regenerating — this can take up to a minute…' : 'Generating release — this can take up to a minute…';
   document.getElementById('release-downloads').style.display = 'none';
-  fetch('/fos/' + LEG_ID + '/release', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({user_id:userId, force: !!force})})
+  (readOnly
+    ? fetch('/fos/' + LEG_ID + '/release')
+    : fetch('/fos/' + LEG_ID + '/release', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({user_id:userId, force: !!force})}))
     .then(r => r.json().then(data => ({ok:r.ok, data})))
     .then(({ok, data}) => {
       btn.disabled = false;
       if(!ok){ status.textContent = 'Failed: ' + (data.error || 'unknown error'); status.style.color = '#c0392b'; return; }
+      if(data.exists === false){ status.textContent = ''; return; }
       _releaseCache = data; // ensureRelease()/viewDoc() reuse this — one generation serves both paths
       // Generation itself is never blocked (soft gate) — the PDF renders
       // fine via viewDoc() either way. Only the Download links here stay
@@ -5280,13 +5315,22 @@ async function ensureRelease(){
   if(_releaseCache) return _releaseCache;
   const userId = document.getElementById('release-user').value.trim();
   if(!userId){ showToast('Send this flight to SimBrief first to get a username on file'); return null; }
-  showToast('Generating release…');
   let r, data;
   try {
-    r = await fetch('/fos/' + LEG_ID + '/release', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({user_id:userId})});
+    // GET, deliberately: this is the VIEW path. It used to POST, which
+    // generates, and generating is keyed on the SimBrief account rather
+    // than on this leg — so opening a document on a leg with nothing on
+    // file pulled whatever flight was on SimBrief at that moment and
+    // pinned it here. Generating stays behind the Release view's own
+    // explicit button.
+    r = await fetch('/fos/' + LEG_ID + '/release');
     data = await r.json();
   } catch(e) { showToast('Request failed: ' + e); return null; }
   if(!r.ok){ showToast('Failed: ' + (data.error || 'unknown error')); return null; }
+  if(data.exists === false){
+    showToast('No release on file for this flight — generate one from Release first');
+    return null;
+  }
   _releaseCache = data;
   return data;
 }
@@ -5538,7 +5582,7 @@ async function submitSignature(){
       // cached, this just re-reads the now-true flag) unlocks downloads
       // immediately instead of requiring a page reload to notice.
       _releaseCache = null;
-      if(document.getElementById('release-user')) generateRelease();
+      if(document.getElementById('release-user')) generateRelease(false, true);
     }
     showToast('Signed');
     showView('allcommands');
