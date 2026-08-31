@@ -182,6 +182,39 @@ class TripCheckIn(db.Model):
     signed_at = db.Column(db.String(64))
 
 
+class Message(db.Model):
+    """Flight-deck messages, in the sense a crew would recognise: short
+    ACARS-style lines about the release for a flight, each acknowledged
+    once and then kept as a record.
+
+    `dedupe` is what stops the 3-minute sync tick posting the same line
+    forever. It is a caller-composed key ("rls-new:12", "rls-drift:12:AA99
+    KPHX-KLAX") and a new message is only written when no UNACKNOWLEDGED
+    message already carries that key — so a drift the pilot has already
+    seen stays quiet, while a drift to a *different* flight is a new key
+    and does speak up. Acknowledging one lets the same condition report
+    again if it recurs later, which is the behaviour wanted: the pilot has
+    dealt with the old one.
+
+    Deliberately its own table rather than a JSON list on User: these are
+    per-leg records that outlive the leg's own row, and the unacknowledged
+    count is read on every page load, which wants an indexed query rather
+    than deserializing a growing blob."""
+    __tablename__ = "messages"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    # Nullable, and NOT a foreign key: a message about a flight should
+    # survive that leg being regenerated or dropped.
+    leg_id = db.Column(db.Integer)
+    flight_number = db.Column(db.String(16))
+    dep_date = db.Column(db.String(16))
+    kind = db.Column(db.String(32), nullable=False)
+    body = db.Column(db.String(200), nullable=False)
+    dedupe = db.Column(db.String(200), index=True)
+    created_at = db.Column(db.DateTime(timezone=True), default=_now, index=True)
+    acknowledged_at = db.Column(db.String(64))
+
+
 class Document(db.Model):
     """One company document published to every pilot on this instance —
     same instance-wide sharing model as PairingPack (upload once, everyone

@@ -41,7 +41,7 @@ import release_engine
 from fos_pages import AIRLINE_IATA, synthesize_crew
 from models import (
     db, User, Leg, PbsImport, PairingPack, SignatureLog, ReleaseCache, TripCheckIn,
-    Document, DocumentAck,
+    Document, DocumentAck, Message,
 )
 import simbrief_ofp
 
@@ -2963,6 +2963,133 @@ def _ofp_is_this_leg(simbrief_user, record):
     )
 
 
+# ---------------------------------------------------------------------------
+# Flight-deck messages
+# ---------------------------------------------------------------------------
+
+def _msg_prefix(record):
+    """"FLT 1234 31AUG" — the flight this message is about, in the form a
+    crew reads it off a release."""
+    flt = (record.get("flight_number") or "").strip() or "----"
+    raw = (record.get("dep_date") or record.get("date") or "").strip()
+    day = ""
+    for fmt in ("%Y-%m-%d", "%m/%d/%y", "%m/%d/%Y", "%d%b%y", "%d%b"):
+        try:
+            day = datetime.strptime(raw, fmt).strftime("%d%b").upper()
+            break
+        except (ValueError, TypeError):
+            continue
+    if not day:
+        day = raw.upper()
+    return f"FLT {flt} {day}".strip()
+
+
+def _add_message(user_id, kind, body, dedupe, record=None, leg_id=None):
+    """Writes one message unless one already carries the same dedupe key.
+
+    This is what makes it safe to call from the 3-minute sync tick. The
+    check deliberately counts ACKNOWLEDGED messages too: an earlier version
+    ignored them, which meant acknowledging a drift got it re-posted on the
+    very next tick and every three minutes after that. A condition the
+    pilot has already seen and dealt with must stay quiet.
+
+    Saying something new therefore requires a new key, which is why the
+    drift key includes the flight SimBrief actually holds — drifting to a
+    *different* flight is a different key and does speak up."""
+    existing = Message.query.filter_by(user_id=user_id, dedupe=dedupe).first()
+    if existing:
+        return None
+    record = record or {}
+    msg = Message(
+        user_id=user_id, leg_id=leg_id, kind=kind,
+        flight_number=(record.get("flight_number") or "")[:16],
+        dep_date=(record.get("dep_date") or "")[:16],
+        body=body[:200], dedupe=dedupe[:200],
+    )
+    db.session.add(msg)
+    db.session.commit()
+    return msg
+
+
+def _unacked_message_count():
+    try:
+        return Message.query.filter_by(user_id=current_user.id, acknowledged_at=None).count()
+    except Exception:
+        return 0
+
+
+@app.route("/messages")
+def list_messages():
+    rows = (Message.query.filter_by(user_id=current_user.id)
+            .order_by(Message.created_at.desc(), Message.id.desc()).limit(100).all())
+    return jsonify({
+        "unacknowledged": _unacked_message_count(),
+        "messages": [{
+            "id": m.id, "kind": m.kind, "body": m.body,
+            "leg_id": m.leg_id, "flight_number": m.flight_number,
+            "created_at": _iso(m.created_at), "acknowledged_at": m.acknowledged_at,
+        } for m in rows],
+    })
+
+
+@app.route("/messages/<int:msg_id>/ack", methods=["POST"])
+def ack_message(msg_id):
+    m = Message.query.filter_by(id=msg_id, user_id=current_user.id).first()
+    if not m:
+        return jsonify({"error": "not found"}), 404
+    if not m.acknowledged_at:
+        m.acknowledged_at = datetime.now(timezone.utc).isoformat()
+        db.session.commit()
+    return jsonify({"ok": True, "unacknowledged": _unacked_message_count()})
+
+
+@app.route("/messages/check", methods=["POST"])
+def check_messages():
+    """Called from the auto-sync tick. Asks one question: does the release
+    we hold for this leg still describe what SimBrief has on the account?
+
+    The FIRST message for a leg is posted when its release is generated
+    ("[NEW] RLS AVAILABLE" — see generate_release). Everything after that
+    is drift: the pilot re-dispatched on SimBrief and what is in the app is
+    now stale. Nothing is posted for a leg with no release, because there
+    is nothing yet to be out of date.
+    """
+    body = request.get_json(silent=True) or {}
+    try:
+        leg_id = int(body.get("leg_id") or 0)
+    except (TypeError, ValueError):
+        leg_id = 0
+    if not leg_id:
+        return jsonify({"unacknowledged": _unacked_message_count()})
+    record = _get_leg(leg_id)
+    if not record:
+        return jsonify({"unacknowledged": _unacked_message_count()})
+    if not ReleaseCache.query.filter_by(leg_id=leg_id).first():
+        return jsonify({"unacknowledged": _unacked_message_count()})
+
+    simbrief_user = (body.get("simbrief_user") or "").strip() or current_user.default_simbrief_user
+    if not simbrief_user:
+        return jsonify({"unacknowledged": _unacked_message_count()})
+
+    matches, _why = _ofp_is_this_leg(simbrief_user, record)
+    if not matches:
+        fields = {}
+        try:
+            fields = _cached_ofp_fields(simbrief_user) or {}
+        except Exception:
+            fields = {}
+        on_account = "{} {}-{}".format(
+            (fields.get("flight_number") or "?"),
+            (fields.get("origin") or "?"), (fields.get("destination") or "?"))
+        _add_message(
+            current_user.id, "rls_drift",
+            f"{_msg_prefix(record)} [UPD] RLS DIFFERS FROM SIMBRIEF - NOW {on_account}",
+            # Keyed on what SimBrief holds, so drifting to a different
+            # flight later is a NEW message rather than a silenced repeat.
+            f"rls-drift:{leg_id}:{on_account}", record=record, leg_id=leg_id)
+    return jsonify({"unacknowledged": _unacked_message_count()})
+
+
 @app.route("/fos/<int:leg_id>/release", methods=["POST"])
 def generate_release(leg_id):
     """Generates (or, by far the common case, just returns) this leg's
@@ -3051,6 +3178,10 @@ def generate_release(leg_id):
         db.session.add(ReleaseCache(leg_id=leg_id, filename=filename, payload=payload, generated_at=generated_at))
     db.session.commit()
 
+    _add_message(
+        current_user.id, "rls_new",
+        f"{_msg_prefix(record)} [NEW] RLS AVAILABLE",
+        f"rls-new:{leg_id}", record=record, leg_id=leg_id)
     return jsonify({
         **_gate_release_payload(payload, record.get("fit_for_duty")),
         "cached": False, "generated_at": generated_at.isoformat(),
@@ -4436,6 +4567,19 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   /* A real hit target on a touch screen without making the chip taller. */
   .pdf-tab-x{flex:0 0 auto;font-size:15px;line-height:1;opacity:.65;padding:2px 3px;margin:-2px -3px;}
   .pdf-tab-x:hover{opacity:1;}
+  /* Messages read like ACARS lines: monospace, one flight per card, with
+     the acknowledgement kept as a record rather than dismissing the card. */
+  .msg-card{padding:13px 16px;border-bottom:1px solid var(--border);background:var(--card);}
+  .msg-card.acked{opacity:.62;}
+  .msg-line{font-family:ui-monospace,Menlo,monospace;font-size:13px;font-weight:600;
+    color:var(--value);letter-spacing:.02em;word-break:break-word;}
+  .msg-meta{margin-top:5px;font-size:11.5px;color:var(--label);}
+  .msg-ackbar{margin-top:10px;}
+  .msg-ackbar button{margin:0;padding:8px 15px;font-size:13px;font-weight:600;
+    background:var(--blue);color:#fff;border:none;border-radius:5px;cursor:pointer;}
+  .msg-badge{position:absolute;top:3px;right:calc(50% - 22px);min-width:16px;height:16px;
+    padding:0 4px;border-radius:8px;background:var(--red);color:#fff;font-size:10px;
+    font-weight:700;line-height:16px;text-align:center;}
   .view{display:none;}
   .view.active{display:block;}
   #toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(12px);background:#1a1f29;color:#fff;padding:9px 16px;border-radius:20px;font-size:13px;opacity:0;pointer-events:none;transition:opacity .18s ease, transform .18s ease;box-shadow:0 4px 14px rgba(0,0,0,.25);z-index:10;}
@@ -4692,7 +4836,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         <button class="back-link" onclick="showView('overview')" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
         <div class="topbar-title"><h1>Messages</h1></div>
       </div>
-      <p class="placeholder-note">No messages.</p>
+      <div id="messages-body"></div>
     </section>
 
     <section id="pdf-view" class="view">
@@ -5093,6 +5237,7 @@ function showView(view){
   }
   if(view === 'admin') initAdminView();
   if(view === 'saveddocs') initSavedDocs();
+  if(view === 'messages') initMessages();
   if(view === 'doclocker') initDocLocker();
   if(view === 'pairing') initPairingView();
   if(view === 'overview') initOverviewPills();
@@ -5239,6 +5384,93 @@ async function checkForSimbriefUpdate(){
     }
     _lastKnownOfpTs = ts;
   } catch(e) { /* best-effort — try again next interval */ }
+  // Same tick asks whether the release we hold still matches what SimBrief
+  // has. Kept separate from the block above deliberately: that one only
+  // fires when the OFP TIMESTAMP moves, and a pilot who re-dispatches a
+  // different flight onto the account is exactly the case where our
+  // release goes stale without this leg's own timestamp telling us.
+  try {
+    const mr = await fetch('/messages/check', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({leg_id: LEG_ID ? Number(LEG_ID) : 0, simbrief_user: user}),
+    });
+    if(mr.ok) paintMessageBadge((await mr.json()).unacknowledged || 0);
+  } catch(e) { /* best-effort */ }
+}
+
+// The nav tab carries the unacknowledged count, so a message posted by the
+// background tick is visible without opening Messages to look.
+function paintMessageBadge(n){
+  _unackedMessages = n;
+  ['tab-messages'].forEach(id => {
+    const tab = document.getElementById(id);
+    if(!tab) return;
+    let dot = tab.querySelector('.msg-badge');
+    if(!n){ if(dot) dot.remove(); return; }
+    if(!dot){
+      dot = document.createElement('span');
+      dot.className = 'msg-badge';
+      tab.appendChild(dot);
+    }
+    dot.textContent = n > 9 ? '9+' : String(n);
+  });
+}
+let _unackedMessages = 0;
+
+async function initMessages(){
+  const body = document.getElementById('messages-body');
+  showLoading(body);
+  let data;
+  try {
+    const r = await fetch('/messages');
+    data = await r.json();
+    if(!r.ok){ body.innerHTML = '<p class="placeholder-note">' + (data.error || 'Failed to load') + '</p>'; return; }
+  } catch(e) { body.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>'; return; }
+  paintMessageBadge(data.unacknowledged || 0);
+  if(!data.messages.length){
+    body.innerHTML = '<p class="placeholder-note">No messages.</p>';
+    return;
+  }
+  body.innerHTML = '';
+  data.messages.forEach(m => {
+    const card = document.createElement('div');
+    card.className = 'msg-card' + (m.acknowledged_at ? ' acked' : '');
+    const line = document.createElement('div');
+    line.className = 'msg-line';
+    line.textContent = m.body;
+    card.appendChild(line);
+    const meta = document.createElement('div');
+    meta.className = 'msg-meta';
+    meta.textContent = m.created_at ? new Date(m.created_at).toLocaleString() : '';
+    card.appendChild(meta);
+    if(m.acknowledged_at){
+      const done = document.createElement('div');
+      done.className = 'msg-meta';
+      done.textContent = 'Acknowledged ' + new Date(m.acknowledged_at).toLocaleString();
+      card.appendChild(done);
+    } else {
+      const bar = document.createElement('div');
+      bar.className = 'msg-ackbar';
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = 'Acknowledge';
+      btn.onclick = () => acknowledgeMessage(m.id, btn);
+      bar.appendChild(btn);
+      card.appendChild(bar);
+    }
+    body.appendChild(card);
+  });
+}
+
+async function acknowledgeMessage(id, btn){
+  btn.disabled = true;
+  try {
+    const r = await fetch('/messages/' + id + '/ack', {method: 'POST'});
+    const data = await r.json();
+    if(!r.ok){ btn.disabled = false; showToast(data.error || 'Could not acknowledge'); return; }
+    paintMessageBadge(data.unacknowledged || 0);
+    initMessages();
+  } catch(e) { btn.disabled = false; showToast('Request failed: ' + e); }
 }
 function startAutoSync(){
   if(_autoSyncTimer || !isAutoSyncOn()) return;
