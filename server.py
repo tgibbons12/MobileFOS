@@ -581,6 +581,10 @@ DEFAULT_LEG = {
     "airline_iata": "", "airline_icao": "",
     "pending_date_slip": None,
     "est_out": "", "est_in": "", "dep_gate": "", "arr_gate": "",
+    # The AeroAPI lookup that produced dep_gate/arr_gate, kept whole so
+    # re-opening or regenerating a leg can repaint the panel from what is
+    # already on file instead of spending another (paid) API call.
+    "aero_suggestion": None,
     "fleet_type": "", "equipment_type": "", "tail_number": "", "tail_routing": "",
     "aircraft_name": "", "fin": "", "engines": "", "selcal": "", "seat_capacity": "",
     "oew": "", "max_zfw": "", "max_tow_struct": "", "max_ldw": "",
@@ -883,6 +887,7 @@ def generate():
             for key in (
                 "seq", "position", "base", "duty_time", "ground_time",
                 "hotel_details", "limo_details", "dep_gate", "arr_gate",
+                "aero_suggestion",
                 "bookmarked_docs", "signed_in", "fit_for_duty",
                 "pairing_sched_out", "pairing_sched_in",
             ):
@@ -2311,6 +2316,11 @@ def set_gates(leg_id):
         changes["dep_gate"] = body["dep_gate"]
     if "arr_gate" in body:
         changes["arr_gate"] = body["arr_gate"]
+    # Stored so the panel can be repainted later without another lookup —
+    # see DEFAULT_LEG["aero_suggestion"]. Guarded to a dict so a malformed
+    # body can't put a string or a list where the page expects an object.
+    if isinstance(body.get("suggestion"), dict):
+        changes["aero_suggestion"] = body["suggestion"]
     data = _save_leg(row, {**row.data, **changes})
     return jsonify({"dep_gate": data.get("dep_gate", ""), "arr_gate": data.get("arr_gate", "")})
 
@@ -3332,6 +3342,18 @@ def render_fos_html(leg, default_view=""):
     ctx["default_simbrief_user"] = html.escape(current_user.default_simbrief_user or "")
     ctx["aeroapi_key"] = html.escape(current_user.aeroapi_key or "")
     ctx["app_version"] = APP_VERSION
+    # Embedded as JSON so the AeroAPI panel can paint itself on first load
+    # from what's already on the leg. json.dumps also makes this safe to
+    # drop straight into a <script>: the value is inserted by
+    # safe_substitute AFTER the template is scanned, so a $ inside it is
+    # never treated as a placeholder.
+    # The "</" split is not cosmetic: a literal </script> anywhere inside
+    # this JSON ends the <script> block early and silently kills every
+    # function after it. "<\\/" is a legal JSON escape for "/", so the
+    # parsed value is unchanged. ensure_ascii (the default) already takes
+    # care of U+2028/U+2029, the other two characters that can break out.
+    ctx["aero_suggestion_json"] = json.dumps(
+        ctx.get("aero_suggestion") or None).replace("</", "<\\/")
     ctx["mot_display"] = _mot_display(ctx.get("mot") or "", ctx.get("origin") or "", current_user.timezone)
     ctx["timezone_options"] = _timezone_options_html(current_user.timezone)
     ctx["default_view"] = default_view
@@ -4522,7 +4544,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
             <button onclick="applyAeroRoute()" style="margin:8px 0 0;width:100%;background:var(--blue);color:#fff;border:none;padding:9px;border-radius:5px;font-size:13px;font-weight:600;cursor:pointer;">Use This Route</button>
             <div class="info-row" style="margin-top:10px;"><span class="lbl">Suggested Gate — Origin</span><span class="val" id="aero-gate-orig">—</span></div>
             <div class="info-row"><span class="lbl">Suggested Gate — Destination</span><span class="val" id="aero-gate-dest">—</span></div>
-            <button onclick="applyAeroGates()" style="margin:8px 0 0;width:100%;background:var(--blue);color:#fff;border:none;padding:9px;border-radius:5px;font-size:13px;font-weight:600;cursor:pointer;">Apply Gates to This Flight</button>
+            <div id="aero-applied" style="margin:8px 0 0;font-size:13px;font-weight:600;color:var(--blue-dark);"></div>
             <p class="placeholder-note" id="aero-basis" style="margin-top:8px;"></p>
           </div>
         </div>
@@ -4702,6 +4724,10 @@ FOS_TEMPLATE = """<!DOCTYPE html>
 <div id="toast"></div>
 <script>
 const LEG_ID = "$leg_id";
+// The AeroAPI lookup already stored on this leg, or null. Present so
+// opening a leg -- or coming back to one after a regenerate -- repaints
+// the panel for free instead of calling a paid API again.
+const AERO_SUGGESTION = $aero_suggestion_json;
 const LEG_FLIGHT_NUMBER = "$flight_number";
 const LEG_FLIGHT_DESIGNATOR = "$flight_designator";
 const LEG_ORIGIN = "$origin";
@@ -5062,6 +5088,50 @@ async function prefillSimbriefGen(){
 }
 
 let _aeroSuggestion = null;
+
+// Paints the results panel from a suggestion object. Shared by a live
+// lookup and by the copy already stored on the leg, so those two paths
+// cannot drift apart in what they show.
+function paintAeroSuggestion(data, applied){
+  if(!data) return;
+  _aeroSuggestion = data;
+  const orig = data.orig || "", dest = data.dest || "";
+  document.getElementById('aero-route-val').textContent =
+    data.route_found ? (data.route || "(no filed route on record)")
+                     : ("AA does not fly " + orig + "\u2192" + dest + " nonstop \u2014 no route suggestion");
+  document.getElementById('aero-gate-orig').textContent = data.gate_origin || "\u2014";
+  document.getElementById('aero-gate-dest').textContent = data.gate_destination || "\u2014";
+  document.getElementById('aero-basis').textContent =
+    "Gates based on " + data.sample_size_origin + " AA departure(s) at " + orig +
+    " and " + data.sample_size_destination + " AA arrival(s) at " + dest + " in the last 10 days.";
+  document.getElementById('aero-applied').textContent = applied || "";
+  document.getElementById('aero-results').style.display = 'block';
+}
+
+// Writes the gates onto the leg AND stores the suggestion that produced
+// them. Called automatically by a lookup rather than from a button: the
+// pilot asked for gates by running the lookup, so a second click was a
+// step with no decision in it.
+async function applyAeroGates(){
+  if(!_aeroSuggestion) return false;
+  const dep = _aeroSuggestion.gate_origin || "", arr = _aeroSuggestion.gate_destination || "";
+  if(!dep && !arr){
+    document.getElementById('aero-applied').textContent = "No gate data to apply.";
+    return false;
+  }
+  try {
+    const r = await fetch('/fos/' + LEG_ID + '/gates', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({dep_gate: dep, arr_gate: arr, suggestion: _aeroSuggestion}),
+    });
+    const data = await r.json();
+    if(!r.ok){ showToast(data.error || 'Could not apply gates'); return false; }
+    const depGateEl = document.getElementById('ov-dep-gate'); if(depGateEl) depGateEl.textContent = data.dep_gate || "";
+    const arrGateEl = document.getElementById('ov-arr-gate'); if(arrGateEl) arrGateEl.textContent = data.arr_gate || "";
+    return true;
+  } catch(e) { showToast('Request failed: ' + e); return false; }
+}
+
 async function fetchAeroSuggestions(){
   const msg = document.getElementById('aero-msg');
   const btn = document.getElementById('aero-btn');
@@ -5070,10 +5140,10 @@ async function fetchAeroSuggestions(){
   const dest = document.getElementById('sbgen-dest').value.trim().toUpperCase();
   document.getElementById('aero-results').style.display = 'none';
   if(!key){ msg.textContent = 'Enter your AeroAPI key first.'; msg.style.color = '#c0392b'; return; }
-  if(!orig || !dest){ msg.textContent = 'Origin and Destination are required — set those in Generate Flight Plan below first.'; msg.style.color = '#c0392b'; return; }
+  if(!orig || !dest){ msg.textContent = "Origin and Destination are required \u2014 set those in Generate Flight Plan below first."; msg.style.color = '#c0392b'; return; }
 
   btn.disabled = true;
-  msg.textContent = 'Looking up AA at ' + orig + ' / ' + dest + '…';
+  msg.textContent = 'Looking up AA at ' + orig + ' / ' + dest + "\u2026";
   msg.style.color = '';
   try {
     const r = await fetch('/aeroapi/suggest', {
@@ -5083,13 +5153,11 @@ async function fetchAeroSuggestions(){
     const data = await r.json();
     btn.disabled = false;
     if(!r.ok){ msg.textContent = data.error || 'Lookup failed'; msg.style.color = '#c0392b'; return; }
-    _aeroSuggestion = data;
-    document.getElementById('aero-route-val').textContent = data.route_found ? (data.route || '(no filed route on record)') : `AA doesn't fly ${orig}→${dest} nonstop — no route suggestion`;
-    document.getElementById('aero-gate-orig').textContent = data.gate_origin || '—';
-    document.getElementById('aero-gate-dest').textContent = data.gate_destination || '—';
-    document.getElementById('aero-basis').textContent =
-      `Gates based on ${data.sample_size_origin} AA departure(s) at ${orig} and ${data.sample_size_destination} AA arrival(s) at ${dest} in the last 10 days.`;
-    document.getElementById('aero-results').style.display = 'block';
+    // Carried on the object so the stored copy can repaint the panel later
+    // without the Generate form still holding these two values.
+    data.orig = orig; data.dest = dest;
+    paintAeroSuggestion(data, "");
+    if(await applyAeroGates()) document.getElementById('aero-applied').textContent = "Gates applied to this flight.";
     msg.textContent = '';
   } catch(e) {
     btn.disabled = false;
@@ -5099,20 +5167,6 @@ async function fetchAeroSuggestions(){
 }
 function applyAeroRoute(){
   if(_aeroSuggestion && _aeroSuggestion.route) document.getElementById('sbgen-route').value = _aeroSuggestion.route;
-}
-async function applyAeroGates(){
-  if(!_aeroSuggestion) return;
-  try {
-    const r = await fetch('/fos/' + LEG_ID + '/gates', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({dep_gate: _aeroSuggestion.gate_origin || '', arr_gate: _aeroSuggestion.gate_destination || ''}),
-    });
-    const data = await r.json();
-    if(!r.ok){ showToast(data.error || 'Could not apply gates'); return; }
-    const depGateEl = document.getElementById('ov-dep-gate'); if(depGateEl) depGateEl.textContent = data.dep_gate || '';
-    const arrGateEl = document.getElementById('ov-arr-gate'); if(arrGateEl) arrGateEl.textContent = data.arr_gate || '';
-    showToast('Gates applied');
-  } catch(e) { showToast('Request failed: ' + e); }
 }
 function generateRelease(force){
   const btn = document.getElementById('release-gen-btn');
@@ -7761,6 +7815,12 @@ function renderWeather(stations){
   }
   if(view === 'pairing' || view === 'release' || view === 'confirm' || view === 'settings' || view === 'doclocker') showView(view);
   else initOverviewPills();
+  // Repaint the AeroAPI panel from what is already on the leg. This is the
+  // half of "no second API call" the server cannot do on its own: the
+  // gates survive a regenerate via carry_gates_from, but without this the
+  // panel came back blank and the obvious next move was to run the lookup
+  // again.
+  if(AERO_SUGGESTION) paintAeroSuggestion(AERO_SUGGESTION, "Gates applied to this flight.");
   showDateSlipModalIfPending();
   startAutoSync();
 })();
