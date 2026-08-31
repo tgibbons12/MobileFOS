@@ -5686,37 +5686,137 @@ if(window.pdfjsLib){
 }
 let _pdfObjectUrl = null;
 let _pdfRenderToken = 0;
+// Every page gets a correctly-sized placeholder up front, but only the
+// pages near the viewport are ever rasterised, and they are released again
+// once they scroll well clear. Rendering the whole document eagerly is what
+// crashed the tab on the bigger company manuals: a page at device pixel
+// ratio is roughly 2.7 MB of canvas, so a 200-page FOM asked the browser
+// for gigabytes in one go.
+//
+// The placeholders carry each page's real aspect ratio, so the scrollbar is
+// honest from the first paint and nothing jumps around as pages fill in.
+let _pdfObserver = null;
+
+function _teardownPdfObserver(){
+  if(_pdfObserver){ _pdfObserver.disconnect(); _pdfObserver = null; }
+}
+
 async function renderPdfInline(bytes){
   const token = ++_pdfRenderToken;
   const container = document.getElementById('pdf-pages');
+  _teardownPdfObserver();
   container.innerHTML = '<p style="color:#fff;">Rendering…</p>';
   const pdf = await pdfjsLib.getDocument({data: bytes}).promise;
-  if(token !== _pdfRenderToken) return; // a newer viewDoc() call superseded this one
+  if(token !== _pdfRenderToken) return; // a newer open superseded this one
   container.innerHTML = '';
   const targetWidth = Math.max(container.clientWidth - 24, 280);
   // Render the bitmap at the screen's real device pixel ratio, not just
   // the CSS width — a canvas sized 1:1 to CSS pixels looks soft once the
   // browser upscales it on a Retina/high-DPI iPad. Same DPR-scaling
-  // pattern the signature pad canvas already uses; canvas.style.width
-  // stays at targetWidth so the displayed size is unchanged, only the
-  // underlying bitmap gets sharper.
+  // pattern the signature pad canvas already uses.
   const dpr = window.devicePixelRatio || 1;
-  for(let pageNum = 1; pageNum <= pdf.numPages; pageNum++){
-    if(token !== _pdfRenderToken) return;
-    const page = await pdf.getPage(pageNum);
-    const scale = (targetWidth / page.getViewport({scale:1}).width) * dpr;
-    const viewport = page.getViewport({scale});
-    const canvas = document.createElement('canvas');
-    canvas.className = 'pdf-page';
-    canvas.width = viewport.width;
-    canvas.height = viewport.height;
-    canvas.style.width = '100%';
-    canvas.style.maxWidth = targetWidth + 'px';
-    canvas.style.background = '#fff';
-    canvas.style.boxShadow = '0 1px 4px rgba(0,0,0,.35)';
-    container.appendChild(canvas);
-    await page.render({canvasContext: canvas.getContext('2d'), viewport}).promise;
+
+  // Every slot is sized from page 1 rather than from its own page. getPage
+  // is per-page work even though it rasterises nothing, and asking for all
+  // of them up front is what made a 200-page manual sit blank for the best
+  // part of a minute before the first page appeared. Documents are
+  // overwhelmingly uniform, and the rare page that is not corrects its own
+  // slot when it renders — a late nudge on one page beats a stall on all
+  // of them. Opening is now O(1) in page count.
+  const first = await pdf.getPage(1);
+  if(token !== _pdfRenderToken) return;
+  const nominal = first.getViewport({scale: 1});
+  const slots = [];
+  for(let n = 1; n <= pdf.numPages; n++){
+    const slot = document.createElement('div');
+    slot.className = 'pdf-slot';
+    slot.style.width = '100%';
+    slot.style.maxWidth = targetWidth + 'px';
+    // Reserve the height this page is expected to occupy, so the scrollbar
+    // is honest from the first paint.
+    slot.style.aspectRatio = nominal.width + ' / ' + nominal.height;
+    slot.style.background = '#fff';
+    slot.style.boxShadow = '0 1px 4px rgba(0,0,0,.35)';
+    slot.dataset.page = String(n);
+    container.appendChild(slot);
+    slots.push({slot, page: (n === 1 ? first : null), rendered: false, rendering: false});
   }
+  if(!slots.length) return;
+
+  async function fill(entry){
+    if(entry.rendered || entry.rendering || token !== _pdfRenderToken) return;
+    entry.rendering = true;
+    try {
+      // Fetched here, not up front — this is the per-page cost that used to
+      // be paid for the whole document before anything was shown.
+      if(!entry.page) entry.page = await pdf.getPage(Number(entry.slot.dataset.page));
+      if(token !== _pdfRenderToken) return;
+      const base = entry.page.getViewport({scale: 1});
+      // A page that is not the nominal size fixes its own slot.
+      const want = base.width + ' / ' + base.height;
+      if(entry.slot.style.aspectRatio.replace(/\s/g, '') !== want.replace(/\s/g, '')){
+        entry.slot.style.aspectRatio = want;
+      }
+      const scale = (targetWidth / base.width) * dpr;
+      const viewport = entry.page.getViewport({scale});
+      const canvas = document.createElement('canvas');
+      canvas.className = 'pdf-page';
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      canvas.style.width = '100%';
+      canvas.style.display = 'block';
+      await entry.page.render({canvasContext: canvas.getContext('2d'), viewport}).promise;
+      if(token !== _pdfRenderToken) return;
+      entry.slot.innerHTML = '';
+      entry.slot.appendChild(canvas);
+      entry.rendered = true;
+    } catch(e) {
+      // A page that will not render should not take the document with it.
+      entry.slot.innerHTML = '<p style="color:#900;padding:12px;font-size:12px;">page ' +
+        entry.slot.dataset.page + ' failed to render</p>';
+      entry.rendered = true;
+    } finally {
+      entry.rendering = false;
+    }
+  }
+
+  function release(entry){
+    if(!entry.rendered) return;
+    // Zero the canvas before dropping it: some browsers hold the backing
+    // store until the element is collected otherwise.
+    const c = entry.slot.querySelector('canvas');
+    if(c){ c.width = 0; c.height = 0; }
+    entry.slot.innerHTML = '';
+    entry.rendered = false;
+  }
+
+  // Without IntersectionObserver there is no way to know what is on screen,
+  // and a viewer stuck on page 1 forever is worse than a heavy one. Fall
+  // back to the old eager render — correct, just costly, and only on
+  // browsers old enough to lack an API iOS has had since 12.2.
+  if(typeof IntersectionObserver === 'undefined'){
+    for(const e of slots){
+      if(token !== _pdfRenderToken) return;
+      await fill(e);
+    }
+    return;
+  }
+
+  // rootMargin renders a screen ahead and behind, so scrolling at a normal
+  // speed never catches a blank page; anything further out is released.
+  _pdfObserver = new IntersectionObserver((entries) => {
+    if(token !== _pdfRenderToken) return;
+    entries.forEach(e => {
+      const entry = slots[Number(e.target.dataset.page) - 1];
+      if(!entry) return;
+      if(e.isIntersecting) fill(entry); else release(entry);
+    });
+  }, {root: null, rootMargin: '150% 0px', threshold: 0.01});
+  slots.forEach(e => _pdfObserver.observe(e.slot));
+
+  // The observer only fires on the next frame; paint page 1 immediately so
+  // the viewer is never briefly blank.
+  await fill(slots[0]);
 }
 // ---------------------------------------------------------------------
 // Tabbed PDF viewer. One #pdf-view is shared by release paperwork and by
@@ -5736,7 +5836,11 @@ function _pdfTabIndex(key){ return _pdfTabs.findIndex(t => t.key === key); }
 function renderPdfTabs(){
   const strip = document.getElementById('pdf-tabs');
   strip.innerHTML = '';
-  strip.style.display = _pdfTabs.length > 1 ? 'flex' : 'none';
+  // Hidden at one tab (on a phone the title bar already names a lone
+  // document), and hidden entirely while an untabbed company document is
+  // showing — _activePdfTab is null then, so none of the chips would match
+  // what is actually on screen.
+  strip.style.display = (_pdfTabs.length > 1 && _activePdfTab) ? 'flex' : 'none';
   _pdfTabs.forEach(t => {
     const el = document.createElement('button');
     el.type = 'button';
@@ -5763,6 +5867,8 @@ function renderPdfTabs(){
 async function openPdfTab(tab){
   const i = _pdfTabIndex(tab.key);
   if(i >= 0) _pdfTabs[i] = tab; else _pdfTabs.push(tab);
+  // Coming back from an untabbed company document.
+  _currentCompanyDoc = null;
   showView('pdf');
   await activatePdfTab(tab.key);
 }
@@ -5858,6 +5964,7 @@ async function viewDoc(kind, label){
 // closing the last tab tears the viewer down.
 function closePdfView(){
   _pdfRenderToken++; // cancel any render still in flight
+  _teardownPdfObserver();
   document.getElementById('pdf-pages').innerHTML = '';
   if(_pdfObjectUrl){ URL.revokeObjectURL(_pdfObjectUrl); _pdfObjectUrl = null; }
   // pdf-view is shared: a release PDF backs out to All Commands, but a
@@ -7967,16 +8074,33 @@ async function viewCompanyDoc(docId){
     data = await r.json();
     if(!r.ok){ showToast(data.error || 'Could not open that document'); return; }
   } catch(e) { showToast('Request failed: ' + e); return; }
+  // Company documents are deliberately NOT tabbed. Tabs are for the handful
+  // of small release PDFs a pilot compares against each other; a manual is
+  // one big thing you read on its own, and holding several of them open
+  // would keep that many multi-hundred-page documents in memory at once.
+  // Opening one therefore stands alone and leaves any release tabs intact
+  // underneath — going back to a release brings its strip straight back.
+  _activePdfTab = null;
+  renderPdfTabs();
+  _currentCompanyDoc = data;
+  showView('pdf');
+  document.getElementById('pdf-view-title').textContent = data.title;
   // No FFD gate on a company doc — that one is about a specific flight's
-  // release, not a manual. meta is the doc object itself, so acknowledging
-  // it updates the tab in place.
-  await openPdfTab({
-    key: 'doc:' + docId,
-    label: data.title,
-    kind: 'company',
-    bytes: b64ToBytes(data.pdf_b64),
-    meta: data,
-  });
+  // release, not a manual.
+  document.getElementById('pdf-ffd-banner').style.display = 'none';
+  // Read-in-app only: no Export control, and deliberately no blob URL
+  // minted either, since that would leave a downloadable handle to it.
+  if(_pdfObjectUrl){ URL.revokeObjectURL(_pdfObjectUrl); _pdfObjectUrl = null; }
+  const exportLink = document.getElementById('pdf-export-link');
+  exportLink.style.display = 'none';
+  exportLink.removeAttribute('href');
+  exportLink.removeAttribute('download');
+  paintCompanyDocAckBar();
+  try {
+    await renderPdfInline(b64ToBytes(data.pdf_b64));
+  } catch(e) {
+    document.getElementById('pdf-pages').innerHTML = '<p style="color:#fff;padding:20px;">Failed to render this PDF: ' + e + '</p>';
+  }
 }
 function paintCompanyDocAckBar(){
   const bar = document.getElementById('pdf-ack-bar');
