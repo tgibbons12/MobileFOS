@@ -1052,10 +1052,15 @@ AIRBUS_TAKEOFF_THRUST = {
         'alt_snap': 1500,
         # TOGA: {pressure altitude: {OAT: EPR}}
         'toga': {
-            0: {                       # KMIA, QNH 1013
-                15: 1.600,             # flex<=OAT returns TOGA, so this is a TOGA reading
-                37: 1.537, 40: 1.511,
+            0: {                       # KMIA, QNH 1013 — break at 30C, which is
+                15: 1.600, 20: 1.600,  # exactly the Tref the ODM publishes for
+                25: 1.600, 30: 1.600,  # sea level (see IAE_V2533_TREF above)
+                35: 1.554, 40: 1.520, 45: 1.471,
             },
+            # An earlier session read 37 -> 1.537 and 40 -> 1.511 here. The
+            # sweep above supersedes both: it is self-consistent, and it
+            # resolves the plateau that two samples 22C apart could not
+            # show. They agree to within 0.009 where they overlap.
             5020: {                    # KFNL, QNH 1013 — break ~24C
                 1: 1.589, 15: 1.589,   # identical: flat-rated below the break
                 24: 1.553, 38: 1.440,
