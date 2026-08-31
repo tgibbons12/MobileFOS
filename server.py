@@ -8474,9 +8474,15 @@ let _unackedDocs = parseInt("$unacked_docs", 10) || 0;
 // old name because a dozen call sites already invoke it whenever the
 // unacknowledged count could have moved.
 //
-// Two views are deliberately exempt: the Docs list and the PDF viewer.
+// Two views are exempt, and only two: the Docs list and the PDF viewer.
 // Locking those would leave no way to READ the documents or press
-// Acknowledge, so the lock would have no exit.
+// Acknowledge, so the lock would have no exit at all.
+//
+// Messages is NOT exempt, and that is a decision rather than an oversight
+// (asked and confirmed 2026-08-31). It is the tempting one to add, since a
+// release-drift line is operational and the documents are paperwork — but
+// the lock is meant to be a lock. Outstanding acknowledgements come first,
+// and a message that has waited for them is still there afterwards.
 const _DOC_LOCK_EXEMPT = ['doclocker', 'pdf'];
 
 function paintDocAckBanner(){
