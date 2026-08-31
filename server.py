@@ -2793,6 +2793,41 @@ def _gate_release_payload(payload, fit_for_duty):
     return {**payload, "fit_for_duty": bool(fit_for_duty)}
 
 
+def _ofp_is_this_leg(simbrief_user, record):
+    """Is the OFP sitting on this pilot's SimBrief account right now
+    genuinely THIS leg? Same flight number + city pair check
+    generate_from_pbs already uses — an account only ever holds one OFP,
+    and it belongs to whichever flight was dispatched last, not to
+    whichever leg the app happens to be showing.
+
+    Returns (True, "") when it matches, (False, <reason>) otherwise.
+    A fetch that fails is a "no", not a "yes": generate_release_pdfs()
+    pulls the same OFP from the same API a moment later, so waving it
+    through on a network hiccup wouldn't rescue the generation anyway —
+    it would only reopen the leak this check exists to close."""
+    try:
+        ofp_fields = _cached_ofp_fields(simbrief_user)
+    except Exception as e:
+        LOG.warning(f"SimBrief OFP identity check failed for {simbrief_user}: {e}")
+        return False, f"couldn't reach SimBrief to confirm which flight is on the account: {e}"
+    if not ofp_fields:
+        return False, "no OFP on that SimBrief account yet"
+    if (
+        ofp_fields.get("flight_number") == record.get("flight_number")
+        and _airport_icao(ofp_fields.get("origin", "")) == _airport_icao(record.get("origin", ""))
+        and _airport_icao(ofp_fields.get("destination", "")) == _airport_icao(record.get("destination", ""))
+    ):
+        return True, ""
+    on_account = "{} {}-{}".format(
+        ofp_fields.get("flight_number") or "?",
+        ofp_fields.get("origin") or "?", ofp_fields.get("destination") or "?",
+    )
+    return False, (
+        f"SimBrief currently holds {on_account}, not this flight — send this leg "
+        "to SimBrief first, then generate its release"
+    )
+
+
 @app.route("/fos/<int:leg_id>/release", methods=["POST"])
 def generate_release(leg_id):
     """Generates (or, by far the common case, just returns) this leg's
@@ -2801,7 +2836,22 @@ def generate_release(leg_id):
     "Generate Release" button and the Documents PDF viewer hit this same
     route/cache now, instead of each independently re-running it on every
     click or page load. Pass {"force": true} to regenerate anyway (e.g.
-    gates changed since the cached copy, or the weather's gone stale)."""
+    gates changed since the cached copy, or the weather's gone stale).
+
+    Two things scope this to the leg in the URL, and both matter — the
+    reported "a leg with nothing generated shows another leg's OFP and
+    documents" bug was this route having neither:
+
+      cached_only — read-only. Serves this leg's cached release or 404s.
+        The Documents view (viewDoc -> ensureRelease) uses it, because
+        merely LOOKING at a leg's document list must never mint a release
+        for it. There is deliberately no "most recent release" fallback:
+        a leg with nothing generated has nothing to show, full stop.
+      identity check — generate_release_pdfs() renders whatever OFP is on
+        the pilot's SimBrief ACCOUNT; it takes a username, not a leg, and
+        cannot tell one leg from another. Generating without first
+        confirming the account actually holds THIS flight is what wrote
+        another leg's release into this leg's cache."""
     record = _get_leg(leg_id)
     if not record:
         return jsonify({"error": "not found"}), 404
@@ -2813,6 +2863,8 @@ def generate_release(leg_id):
             **_gate_release_payload(cached.payload, record.get("fit_for_duty")),
             "cached": True, "generated_at": cached.generated_at.isoformat(),
         })
+    if body.get("cached_only"):
+        return jsonify({"error": "no release has been generated for this flight yet"}), 404
 
     if not release_engine.is_available():
         return jsonify({"error": release_engine.import_error()}), 503
@@ -2820,6 +2872,10 @@ def generate_release(leg_id):
     user_id = body.get("user_id") or os.environ.get("SIMBRIEF_USER")
     if not user_id:
         return jsonify({"error": "no SimBrief user id — pass \"user_id\" or set SIMBRIEF_USER"}), 400
+
+    matches, why_not = _ofp_is_this_leg(user_id, record)
+    if not matches:
+        return jsonify({"error": why_not}), 409
 
     try:
         rls_bytes, wb_bytes, filename = release_engine.generate_release_pdfs(
@@ -5128,7 +5184,7 @@ function generateRelease(force){
     .then(({ok, data}) => {
       btn.disabled = false;
       if(!ok){ status.textContent = 'Failed: ' + (data.error || 'unknown error'); status.style.color = '#c0392b'; return; }
-      _releaseCache = data; // ensureRelease()/viewDoc() reuse this — one generation serves both paths
+      _setReleaseCache(data); // ensureRelease()/viewDoc() reuse this — one generation serves both paths
       // Generation itself is never blocked (soft gate) — the PDF renders
       // fine via viewDoc() either way. Only the Download links here stay
       // locked until FFD is signed, same as pdf-view's Export link.
@@ -5221,19 +5277,41 @@ function showToast(msg){
   toastTimer = setTimeout(()=>t.classList.remove('show'), 1600);
 }
 
+// This leg's release, held for the life of the page. Keyed by leg id, not a
+// bare object: LEG_ID is server-rendered per page load so today a leg switch
+// is a full navigation and this can't outlive it — but this cache has already
+// caused one stale-data bug (a saved FFD signature reading as unsaved, see
+// submitSignature), and "it can't hold another leg's release" should be a
+// property of the cache itself rather than of how the page happens to be
+// reached.
 let _releaseCache = null;
+let _releaseCacheLeg = null;
+function _setReleaseCache(data){
+  _releaseCache = data;
+  _releaseCacheLeg = data ? String(LEG_ID) : null;
+}
+function _getReleaseCache(){
+  if(_releaseCache && _releaseCacheLeg === String(LEG_ID)) return _releaseCache;
+  _releaseCache = null; _releaseCacheLeg = null;
+  return null;
+}
+// READ-ONLY on purpose (cached_only). Opening a document must only ever show
+// what was actually generated FOR THIS LEG — generating on demand here is what
+// leaked another leg's OFP onto a leg nothing had been generated for, because
+// the generator renders whatever OFP is on the SimBrief account, not this leg.
+// Generating stays where the pilot asks for it explicitly: Release > Generate.
 async function ensureRelease(){
-  if(_releaseCache) return _releaseCache;
-  const userId = document.getElementById('release-user').value.trim();
-  if(!userId){ showToast('Send this flight to SimBrief first to get a username on file'); return null; }
-  showToast('Generating release…');
+  const held = _getReleaseCache();
+  if(held) return held;
+  if(!LEG_ID){ showToast('Open a flight first'); return null; }
   let r, data;
   try {
-    r = await fetch('/fos/' + LEG_ID + '/release', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({user_id:userId})});
+    r = await fetch('/fos/' + LEG_ID + '/release', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({cached_only: true})});
     data = await r.json();
   } catch(e) { showToast('Request failed: ' + e); return null; }
+  if(r.status === 404){ showToast('No release generated for this flight yet — generate one under Release'); return null; }
   if(!r.ok){ showToast('Failed: ' + (data.error || 'unknown error')); return null; }
-  _releaseCache = data;
+  _setReleaseCache(data);
   return data;
 }
 function b64ToBytes(b64){
@@ -5483,8 +5561,14 @@ async function submitSignature(){
       // re-pulling the release (server-side still instant — it's already
       // cached, this just re-reads the now-true flag) unlocks downloads
       // immediately instead of requiring a page reload to notice.
-      _releaseCache = null;
-      if(document.getElementById('release-user')) generateRelease();
+      //
+      // Only re-pull when this leg actually HAS a release — generateRelease()
+      // is the explicit "generate" path and now refuses (409) when SimBrief
+      // isn't holding this flight, so firing it after every FFD signature on a
+      // leg nothing was ever generated for would just raise a confusing error.
+      const hadRelease = !!_getReleaseCache();
+      _setReleaseCache(null);
+      if(hadRelease && document.getElementById('release-user')) generateRelease();
     }
     showToast('Signed');
     showView('allcommands');
