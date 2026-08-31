@@ -3143,10 +3143,16 @@ def parse_simbrief_data_to_howgozit_with_ofp(xml_data, takeoff_time, gate="", ar
             _hdr_dt  = datetime.fromtimestamp(_gen_ts, tz=timezone.utc).strftime("%Y-%b-%d %H:%M:%SZ").upper()
         except Exception:
             _hdr_dt = datetime.now(timezone.utc).strftime("%Y-%b-%d %H:%M:%SZ").upper()
+        # "RELEASE 6.7" is two independent counters, not a decimal version.
+        # The integer part is SimBrief's own release number for this flight;
+        # the digit after the point is how many times WE have generated a
+        # release off it, so a dispatcher comparing two printouts of the
+        # same SimBrief release can tell which one came out later. It is a
+        # single digit and wraps 9 -> 0 (see `generation` on this function).
         _rls_num  = (get_text("general/release") or "1").strip()
         try:
-            _rls_ver = f"{int(_rls_num)}.0"
-        except ValueError:
+            _rls_ver = f"{int(_rls_num)}.{int(generation) % 10}"
+        except (ValueError, TypeError):
             _rls_ver = _rls_num
         _hdr_route = f"{origin}-{destination}"
         _hdr_flt   = ''.join(c for c in f"{icao_airline}{flight_number}" if c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789- /')
@@ -8367,7 +8373,7 @@ _AI_SUB_RATE       = 0.0015    # anti-ice climb penalty (fraction of TOW per 100
 # ===========================================================================
 
 
-def generate_enhanced_howgozit(user_id, output_path=None, gate="", arr_gate=""):
+def generate_enhanced_howgozit(user_id, output_path=None, gate="", arr_gate="", generation=0):
     """Fetch SimBrief XML, parse it, generate enhanced HOWGOZIT text with OFP, and save as PDF.
 
     gate/arr_gate override the DECS pages' (NSC/FI/fuel-service) synthesized

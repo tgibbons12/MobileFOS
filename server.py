@@ -3012,14 +3012,23 @@ def generate_release(leg_id):
     if not matches:
         return jsonify({"error": why_not}), 409
 
+    # The digit after the point in the page header's "RELEASE 6.7": how many
+    # times this leg has been generated, wrapping 9 -> 0. Kept in the cached
+    # payload rather than its own column — it is one small int that belongs
+    # to exactly the row already being written, so it needs no migration.
+    # First generation is 0, which is what the header printed before this
+    # existed, so an unregenerated release reads the same as it always did.
+    generation = ((cached.payload.get("generation", -1) + 1) % 10) if cached else 0
     try:
         rls_bytes, wb_bytes, filename = release_engine.generate_release_pdfs(
-            user_id, gate=record.get("dep_gate", ""), arr_gate=record.get("arr_gate", ""))
+            user_id, gate=record.get("dep_gate", ""), arr_gate=record.get("arr_gate", ""),
+            generation=generation)
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 502
 
     payload = {
         "filename": filename,
+        "generation": generation,
         "rls_pdf_b64": base64.b64encode(rls_bytes).decode("ascii"),
     }
     if wb_bytes:
@@ -4957,6 +4966,12 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           <a id="release-rls-link" style="display:none;background:var(--blue);color:#fff;text-decoration:none;padding:9px 14px;border-radius:5px;font-size:13px;font-weight:600;">Download RLS PDF</a>
           <a id="release-wb-link" style="display:none;background:var(--blue-dark);color:#fff;text-decoration:none;padding:9px 14px;border-radius:5px;font-size:13px;font-weight:600;">Download W&amp;B PDF</a>
         </div>
+        <!-- Regenerating used to be a text link buried mid-sentence in the
+             status line, and only rendered on the branch where FFD was
+             already signed — so the one time you most want a fresh release,
+             with the paperwork not yet signed, it was not on screen at all.
+             It is its own control now, shown whenever a release exists. -->
+        <button id="release-regen-btn" style="display:none;margin-top:10px;width:100%;background:var(--card);color:var(--blue-dark);border:1px solid var(--blue-dark);padding:11px;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;" onclick="generateRelease(true)">Regenerate Release &amp; TPS</button>
         <button id="confirm-continue-btn" style="display:none;margin-top:10px;width:100%;background:var(--label);color:#fff;border:none;padding:11px;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;" onclick="showView('overview')">Continue to Flight</button>
       </div>
     </section>
@@ -5459,6 +5474,8 @@ function generateRelease(force, readOnly){
   const userId = document.getElementById('release-user').value.trim();
   if(!userId){ status.textContent = 'No SimBrief username on file — set one in Settings first.'; status.style.color = '#c0392b'; return; }
   btn.disabled = true;
+  const regenBtn = document.getElementById('release-regen-btn');
+  if(regenBtn) regenBtn.disabled = true;
   status.style.color = '';
   status.textContent = force ? 'Regenerating — this can take up to a minute…' : 'Generating release — this can take up to a minute…';
   document.getElementById('release-downloads').style.display = 'none';
@@ -5468,11 +5485,15 @@ function generateRelease(force, readOnly){
     .then(r => r.json().then(data => ({ok:r.ok, data})))
     .then(({ok, data}) => {
       btn.disabled = false;
+      if(regenBtn) regenBtn.disabled = false;
       if(!ok){ status.textContent = 'Failed: ' + (data.error || 'unknown error'); status.style.color = '#c0392b'; return; }
       _setReleaseCache(data); // ensureRelease()/viewDoc() reuse this — one generation serves both paths
       // Generation itself is never blocked (soft gate) — the PDF renders
       // fine via viewDoc() either way. Only the Download links here stay
       // locked until FFD is signed, same as pdf-view's Export link.
+      // Regenerating is possible the moment a release exists, signed or
+      // not — it rebuilds the OFP and the TPS together.
+      document.getElementById('release-regen-btn').style.display = 'block';
       if(!data.fit_for_duty){
         status.textContent = 'Release generated — sign Fit for Duty (All Commands > FFD) to unlock downloads.';
         status.style.color = 'var(--red)';
@@ -5480,8 +5501,13 @@ function generateRelease(force, readOnly){
         document.getElementById('release-wb-link').style.display = 'none';
         return;
       }
-      status.innerHTML = (data.cached ? 'Release already on file (generated ' + new Date(data.generated_at).toLocaleString() + ').' : 'Release generated.')
-        + ' <a href="#" onclick="generateRelease(true);return false;" style="color:inherit;">Regenerate</a>';
+      // The generation counter is the digit after the point in the PDF's
+      // own "RELEASE 6.7" header, so showing it here lets a pilot match the
+      // printout in front of them to what the app currently holds.
+      const _gen = (data.generation === undefined || data.generation === null) ? '' : (' \u00b7 rev .' + data.generation);
+      status.textContent = (data.cached
+        ? 'Release on file, generated ' + new Date(data.generated_at).toLocaleString()
+        : 'Release generated') + _gen;
       status.style.color = 'var(--blue-dark)';
       const rlsLink = document.getElementById('release-rls-link');
       rlsLink.href = 'data:application/pdf;base64,' + data.rls_pdf_b64;
@@ -5498,7 +5524,8 @@ function generateRelease(force, readOnly){
       document.getElementById('release-downloads').style.display = 'flex';
       document.getElementById('confirm-continue-btn').style.display = 'block';
     })
-    .catch(e => { btn.disabled = false; status.textContent = 'Request failed: ' + e; status.style.color = '#c0392b'; });
+    .catch(e => { btn.disabled = false; if(regenBtn) regenBtn.disabled = false;
+                  status.textContent = 'Request failed: ' + e; status.style.color = '#c0392b'; });
 }
 function toggleSection(name){
   const bar = document.getElementById(name+'-bar');

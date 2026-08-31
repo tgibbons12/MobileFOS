@@ -102,11 +102,14 @@ def import_error():
     return _import_error
 
 
-def generate_release_pdfs(user_id, gate="", arr_gate=""):
+def generate_release_pdfs(user_id, gate="", arr_gate="", generation=0):
     """
     Run generate_enhanced_howgozit headlessly for the given SimBrief user_id.
     gate/arr_gate (if known — e.g. from an AeroAPI suggestion applied to the
     FOS leg) override the DECS pages' synthesized placeholder gates.
+    generation is this leg's regeneration count and becomes the digit after
+    the point in the page header's "RELEASE 6.7" — see the caller in
+    server.py for where it is kept.
     Returns (rls_bytes, wb_bytes_or_None, base_filename).
     Raises RuntimeError with a human-readable message on any failure.
     """
@@ -119,7 +122,7 @@ def generate_release_pdfs(user_id, gate="", arr_gate=""):
     with tempfile.TemporaryDirectory(prefix="fos-release-") as tmpdir:
         placeholder = os.path.join(tmpdir, "placeholder.pdf")
         try:
-            result = MASTERLOG.generate_enhanced_howgozit(user_id, output_path=placeholder, gate=gate, arr_gate=arr_gate)
+            result = MASTERLOG.generate_enhanced_howgozit(user_id, output_path=placeholder, gate=gate, arr_gate=arr_gate, generation=generation)
         except SystemExit as e:
             raise RuntimeError(f"generate_enhanced_howgozit exited: {e}")
         except Exception as e:
