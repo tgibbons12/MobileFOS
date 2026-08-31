@@ -2608,7 +2608,7 @@ def get_text(xpath, root, default=""):
         LOG.error(f"Error extracting text from xpath '{xpath}': {e}")
         return default
 
-def parse_simbrief_data_to_howgozit_with_ofp(xml_data, takeoff_time, gate="", arr_gate=""):
+def parse_simbrief_data_to_howgozit_with_ofp(xml_data, takeoff_time, gate="", arr_gate="", generation=0):
     """
     Parse a SimBrief XML string and build the full OFP text blob.
 
@@ -8403,7 +8403,7 @@ def generate_enhanced_howgozit(user_id, output_path=None, gate="", arr_gate="", 
 
         # --- Generate HOWGOZIT data ---
         LOG.debug("About to call parse_simbrief_data_to_howgozit_with_ofp")
-        result = parse_simbrief_data_to_howgozit_with_ofp(xml_data, takeoff_time, gate=gate, arr_gate=arr_gate)
+        result = parse_simbrief_data_to_howgozit_with_ofp(xml_data, takeoff_time, gate=gate, arr_gate=arr_gate, generation=generation)
 
         # Add detailed debugging
         LOG.debug(f"[DBG: Result type: {type(result)}")
