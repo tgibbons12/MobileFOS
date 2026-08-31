@@ -1091,7 +1091,8 @@ AIRBUS_TAKEOFF_THRUST = {
             # resolves the plateau that two samples 22C apart could not
             # show. They agree to within 0.009 where they overlap.
             5020: {                    # KFNL, QNH 1013 — break ~24C
-                1: 1.589, 15: 1.589,   # identical: flat-rated below the break
+                1: 1.589, 5: 1.589,    # KGJT; plateau confirmed unbroken 1..15
+                15: 1.589,             # flat-rated below the ~24C break
                 24: 1.553,
                 31: 1.494,             # KGJT, PA 4858 — see below
                 38: 1.440,
