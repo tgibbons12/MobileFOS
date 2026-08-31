@@ -109,14 +109,39 @@ def _load_iata_to_icao_airports():
     return _iata_to_icao_airport
 
 
+_bundled_iata_to_icao = None
+
+
+def _bundled_iata_to_icao_airports():
+    """IATA->ICAO from the airportsdata package already bundled for
+    _AIRPORT_TZ. A fallback under the OurAirports CSV above, not a
+    replacement: OurAirports is the richer dataset and stays first.
+
+    This exists because the CSV is a runtime download with no copy in the
+    repo — one failed fetch on a container with no cache yet leaves the map
+    empty, and _airport_icao() then passes every 3-letter station straight
+    through. That silently turns every PBS-vs-SimBrief comparison keyed on
+    it ("PHX" vs "KPHX") into a non-match, which is one of the ways a
+    re-imported leg came back detached from its pairing."""
+    global _bundled_iata_to_icao
+    if _bundled_iata_to_icao is None:
+        _bundled_iata_to_icao = {
+            (rec.get("iata") or "").strip().upper(): icao
+            for icao, rec in _AIRPORT_TZ.items()
+            if (rec.get("iata") or "").strip()
+        }
+    return _bundled_iata_to_icao
+
+
 def _airport_icao(code):
     """Best-effort IATA->ICAO for a station code; passes through anything
-    already 4 letters or not found in the map (some PBS stations are
+    already 4 letters or not found in either map (some PBS stations are
     already ICAO, e.g. Canadian CYxx fields)."""
     code = (code or "").strip().upper()
     if not code or len(code) == 4:
         return code
-    return _load_iata_to_icao_airports().get(code, code)
+    found = _load_iata_to_icao_airports().get(code)
+    return found or _bundled_iata_to_icao_airports().get(code, code)
 
 
 # PBS's equipment codes are keyed by exact sub-fleet code, not a shared
@@ -744,6 +769,83 @@ def _pbs_meta():
     return (row.meta if row else None) or {}
 
 
+def _seq_pack_meta(seq):
+    """Meta for one sequence — the pool-wide PbsImport.meta, overridden by
+    this sequence's own pack stamp when it has one. Same precedence
+    generate_from_pbs and get_pbs_sequence already apply (a single pool-wide
+    meta goes stale once sequences from more than one pack share the pool)."""
+    meta = dict(_pbs_meta())
+    if seq.get("_pack_opr"):
+        meta["operator"] = seq["_pack_opr"]
+        meta["base"] = seq.get("_pack_base") or meta.get("base")
+        meta["fleet"] = seq.get("_pack_fleet") or meta.get("fleet")
+    return meta
+
+
+def _pairing_baseline_for_leg(leg):
+    """The pairing fields for `leg` — seq first among them — looked up in
+    this pilot's own PBS sequences, or None when nothing there matches it
+    unambiguously.
+
+    A SimBrief OFP has no `seq` field at all (see build_leg_from_sources):
+    it carries day-of-ops detail for one flight, nothing about the trip that
+    flight belongs to. So a re-import — a leg generated from a sequence in
+    the app, edited on SimBrief, then loaded back in — rebuilds the leg from
+    the OFP alone and comes back with no pairing linkage. That is invisible
+    while _store_leg's merge happens to land on the same row (the existing
+    seq survives), and shows up as a standalone leg the moment it doesn't:
+    a date the pilot moved past _dates_match's one-day tolerance is enough.
+
+    This re-derives the linkage from the same place it came from the first
+    time — the pilot's own sequences, run through pbs_leg_to_fos_leg — so a
+    re-imported leg is attached by the same rule as a freshly generated one
+    rather than by a second, drifting mechanism.
+
+    Matching is flight number + ICAO-normalized city pair, deliberately
+    ignoring dates (the edit that detached the leg is usually a date change,
+    and a bid pack has no calendar dates anyway). Two different sequences
+    flying the same flight is genuinely ambiguous — real bid packs repeat a
+    city pair across dozens of SEQs — so that resolves to the pilot's active
+    sequence if one of them is it, and otherwise to nothing at all. Guessing
+    would re-attach the leg to the wrong trip, which is worse than leaving
+    it standalone."""
+    flight_number = (leg.get("flight_number") or "").strip()
+    origin, destination = _airport_icao(leg.get("origin", "")), _airport_icao(leg.get("destination", ""))
+    if not flight_number or not origin or not destination:
+        return None
+
+    matches = []  # (sequence, duty day, pbs leg)
+    for seq in _pbs_sequences():
+        for day in seq.get("duty_days") or []:
+            for pbs_leg in day.get("legs") or []:
+                if (
+                    (pbs_leg.get("flight_number") or "").strip() == flight_number
+                    and _airport_icao(pbs_leg.get("origin", "")) == origin
+                    and _airport_icao(pbs_leg.get("destination", "")) == destination
+                ):
+                    matches.append((seq, day, pbs_leg))
+    if not matches:
+        return None
+    if len({s["seq"] for s, _, _ in matches}) > 1:
+        matches = [m for m in matches if m[0]["seq"] == current_user.active_seq]
+        if not matches:
+            return None
+    seq, day, pbs_leg = matches[0]  # a trip that flies the same leg twice is
+    # still that one trip — the seq is right either way, and the first match
+    # is as good a source as any for the day-level hotel/duty fields.
+
+    # Position isn't in the OFP or the bid pack: it's the pilot's own. Reuse
+    # whatever they were already flying this sequence as, falling back to the
+    # sequence's first published position.
+    flown_as = ""
+    for row in Leg.query.filter_by(user_id=current_user.id).all():
+        if row.data.get("seq") == seq["seq"] and row.data.get("position"):
+            flown_as = row.data["position"]
+            break
+    position = flown_as or (seq["positions"][0] if seq.get("positions") else "")
+    return pbs_parser.pbs_leg_to_fos_leg(_seq_pack_meta(seq), seq, day, pbs_leg, position)
+
+
 _ofp_fetch_cache = {}  # simbrief_user -> (fetched_at, ofp_fields)
 _OFP_CACHE_TTL = 15  # seconds — covers one "Generate & Cache All Legs" burst
 # (several requests, same account, milliseconds apart) without re-fetching
@@ -855,6 +957,7 @@ def generate():
     # (seq/schedule) because only gates were ever carried forward, not the
     # rest of the PBS-only context.
     carry_from = payload.pop("carry_gates_from", None)
+    from_simbrief = bool(payload.get("simbrief_user"))
     leg = build_leg_from_sources(payload)
     ofp_error = leg.pop("_ofp_error", None)
     if ofp_error and not leg.get("flight_number"):
@@ -888,6 +991,28 @@ def generate():
             ):
                 if src_row.data.get(key) and not leg.get(key):
                     leg[key] = src_row.data[key]
+    # Still no pairing linkage after all that: either this came in through
+    # "Import from SimBrief" on Home (which sends no carry_gates_from at all),
+    # or carry_from's same-flight guard above rightly declined. Look the leg
+    # up in the pilot's own sequences instead — a re-imported leg belongs to
+    # its trip just as much as a freshly generated one does, and the OFP it
+    # was rebuilt from has no field that could say so.
+    if from_simbrief and not leg.get("seq"):
+        pairing = _pairing_baseline_for_leg(leg)
+        if pairing:
+            # Only the fields a pairing owns and a SimBrief OFP has no
+            # equivalent for — the same set carry_gates_from carries, minus
+            # the ones that aren't the pairing's to give (gates, bookmarks,
+            # signatures belong to the leg, not the trip). Everything both
+            # sources describe (times, tail, load, fleet) is left to SimBrief:
+            # it's the fresher one, and having it is why the pilot re-imported.
+            for key in (
+                "seq", "position", "base", "airline_iata", "equipment_type",
+                "duty_time", "ground_time", "mot", "hotel_details", "limo_details",
+                "pairing_sched_out", "pairing_sched_in",
+            ):
+                if pairing.get(key) and not leg.get(key):
+                    leg[key] = pairing[key]
     record = _store_leg(leg)
     return jsonify({"fos_url": f"/fos/{record['id']}", "id": record["id"]})
 
