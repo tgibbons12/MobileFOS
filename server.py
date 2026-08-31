@@ -4880,6 +4880,19 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           </div>
           <div class="panel-card" id="ov-docs-card">
             <div class="panel-card-hdr">Preflight Docs</div>
+            <!-- The release is what a pilot comes to this card for, and it was
+                 the one thing not on it: the only way in was the "SimBrief /
+                 Send to Dispatch" row under External Apps, which reads as an
+                 outbound action, not as "your release lives here". The status
+                 line says whether one is on file and when it was generated,
+                 so a stale release is visible without opening anything. -->
+            <div class="doc-row" style="cursor:pointer;" onclick="showView('release')">
+              <div style="display:flex;align-items:center;gap:10px;">
+                <svg class="lead-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h5"/></svg>
+                <div><div class="code">Release &amp; TPS</div><div class="desc" id="ov-release-state">&mdash;</div></div>
+              </div>
+              <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></div>
+            </div>
             <div class="doc-row" style="cursor:pointer;" onclick="showView('saveddocs')">
               <div style="display:flex;align-items:center;gap:10px;">
                 <svg class="lead-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/><path d="M12 11v6"/><path d="M9 14l3 3 3-3"/></svg>
@@ -5926,6 +5939,29 @@ function applyAeroRoute(){
 // generating — used by the post-FFD refresh, which only needs to pick up
 // the now-true fit_for_duty flag and must not manufacture a release for a
 // leg that never had one.
+// Says whether a release is on file for THIS leg and how old it is, so a
+// stale one is visible from Overview instead of only after opening the
+// Release view. Uses the read-only path — looking must never generate.
+async function paintReleaseState(){
+  const el = document.getElementById('ov-release-state');
+  if(!el || !LEG_ID) return;
+  try {
+    const r = await fetch('/fos/' + LEG_ID + '/release', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({cached_only: true}),
+    });
+    if(r.status === 404){ el.textContent = 'Not generated yet'; return; }
+    if(!r.ok){ el.textContent = ''; return; }
+    const data = await r.json();
+    const when = data.generated_at ? new Date(data.generated_at) : null;
+    const rev = (data.generation === undefined || data.generation === null)
+      ? '' : (' \u00b7 rev .' + data.generation);
+    el.textContent = when
+      ? ('Generated ' + when.toLocaleString() + rev)
+      : ('On file' + rev);
+  } catch(e) { el.textContent = ''; }
+}
+
 function generateRelease(force, readOnly){
   const btn = document.getElementById('release-gen-btn');
   const status = document.getElementById('release-status');
@@ -5937,13 +5973,23 @@ function generateRelease(force, readOnly){
   status.style.color = '';
   status.textContent = force ? 'Regenerating — this can take up to a minute…' : 'Generating release — this can take up to a minute…';
   document.getElementById('release-downloads').style.display = 'none';
-  (readOnly
-    ? fetch('/fos/' + LEG_ID + '/release')
-    : fetch('/fos/' + LEG_ID + '/release', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({user_id:userId, force: !!force})}))
+  // Both branches POST. readOnly used to GET, from a version of the route
+  // that had a GET; the merged one is POST-only with a cached_only flag, so
+  // that GET fell through to a 404 HTML page and the JSON parse blew up with
+  // "Unexpected token '<'". Its only caller is the refresh after signing
+  // FFD, which is why this went unnoticed.
+  fetch('/fos/' + LEG_ID + '/release', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(readOnly ? {cached_only: true}
+                                  : {user_id: userId, force: !!force}),
+  })
     .then(r => r.json().then(data => ({ok:r.ok, data})))
     .then(({ok, data}) => {
       btn.disabled = false;
       if(regenBtn) regenBtn.disabled = false;
+      // cached_only 404s when nothing is on file, which is the normal state
+      // of a fresh flight rather than a failure worth a red line.
+      if(readOnly && !ok){ status.textContent = ''; return; }
       if(!ok){ status.textContent = 'Failed: ' + (data.error || 'unknown error'); status.style.color = '#c0392b'; return; }
       _setReleaseCache(data); // ensureRelease()/viewDoc() reuse this — one generation serves both paths
       // Generation itself is never blocked (soft gate) — the PDF renders
@@ -5981,6 +6027,7 @@ function generateRelease(force, readOnly){
       }
       document.getElementById('release-downloads').style.display = 'flex';
       document.getElementById('confirm-continue-btn').style.display = 'block';
+      paintReleaseState();
     })
     .catch(e => { btn.disabled = false; if(regenBtn) regenBtn.disabled = false;
                   status.textContent = 'Request failed: ' + e; status.style.color = '#c0392b'; });
@@ -6303,11 +6350,15 @@ function _pdfTabIndex(key){ return _pdfTabs.findIndex(t => t.key === key); }
 function renderPdfTabs(){
   const strip = document.getElementById('pdf-tabs');
   strip.innerHTML = '';
-  // Hidden at one tab (on a phone the title bar already names a lone
-  // document), and hidden entirely while an untabbed company document is
-  // showing — _activePdfTab is null then, so none of the chips would match
-  // what is actually on screen.
-  strip.style.display = (_pdfTabs.length > 1 && _activePdfTab) ? 'flex' : 'none';
+  // Shown from the FIRST tab. It used to wait for a second one, on the
+  // reasoning that the title bar already names a lone document and a strip
+  // holding one chip is wasted height — but that made opening a single
+  // saved doc look like the tabs were missing entirely, with no hint that
+  // opening another would keep this one. One chip is the affordance.
+  //
+  // Still hidden while an untabbed company document is showing:
+  // _activePdfTab is null then, so no chip matches what is on screen.
+  strip.style.display = (_pdfTabs.length >= 1 && _activePdfTab) ? 'flex' : 'none';
   _pdfTabs.forEach(t => {
     const el = document.createElement('button');
     el.type = 'button';
@@ -8939,6 +8990,7 @@ function renderWeather(stations){
   // working at all.
   if(view && view !== 'overview' && document.getElementById(view + '-view')) showView(view);
   else initOverviewPills();
+  paintReleaseState();
   // Repaint the AeroAPI panel from what is already on the leg. This is the
   // half of "no second API call" the server cannot do on its own: the
   // gates survive a regenerate via carry_gates_from, but without this the
