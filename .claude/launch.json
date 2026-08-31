@@ -1,0 +1,3 @@
+{ "version": "0.0.1", "configurations": [
+  { "name": "avio", "runtimeExecutable": "/private/tmp/claude-501/-Users-tobygibbons-Downloads-fos-backend/04061201-b283-4f39-bb3e-b221bac5abcd/scratchpad/avio/.venv/bin/python",
+    "runtimeArgs": ["/private/tmp/claude-501/-Users-tobygibbons-Downloads-fos-backend/04061201-b283-4f39-bb3e-b221bac5abcd/scratchpad/avio/server.py"], "port": 8742 } ] }

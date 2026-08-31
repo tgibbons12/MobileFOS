@@ -109,14 +109,39 @@ def _load_iata_to_icao_airports():
     return _iata_to_icao_airport
 
 
+_bundled_iata_to_icao = None
+
+
+def _bundled_iata_to_icao_airports():
+    """IATA->ICAO from the airportsdata package already bundled for
+    _AIRPORT_TZ. A fallback under the OurAirports CSV above, not a
+    replacement: OurAirports is the richer dataset and stays first.
+
+    This exists because the CSV is a runtime download with no copy in the
+    repo — one failed fetch on a container with no cache yet leaves the map
+    empty, and _airport_icao() then passes every 3-letter station straight
+    through. That silently turns every PBS-vs-SimBrief comparison keyed on
+    it ("PHX" vs "KPHX") into a non-match, which is one of the ways a
+    re-imported leg came back detached from its pairing."""
+    global _bundled_iata_to_icao
+    if _bundled_iata_to_icao is None:
+        _bundled_iata_to_icao = {
+            (rec.get("iata") or "").strip().upper(): icao
+            for icao, rec in _AIRPORT_TZ.items()
+            if (rec.get("iata") or "").strip()
+        }
+    return _bundled_iata_to_icao
+
+
 def _airport_icao(code):
     """Best-effort IATA->ICAO for a station code; passes through anything
-    already 4 letters or not found in the map (some PBS stations are
+    already 4 letters or not found in either map (some PBS stations are
     already ICAO, e.g. Canadian CYxx fields)."""
     code = (code or "").strip().upper()
     if not code or len(code) == 4:
         return code
-    return _load_iata_to_icao_airports().get(code, code)
+    found = _load_iata_to_icao_airports().get(code)
+    return found or _bundled_iata_to_icao_airports().get(code, code)
 
 
 # PBS's equipment codes are keyed by exact sub-fleet code, not a shared
@@ -748,6 +773,83 @@ def _pbs_meta():
     return (row.meta if row else None) or {}
 
 
+def _seq_pack_meta(seq):
+    """Meta for one sequence — the pool-wide PbsImport.meta, overridden by
+    this sequence's own pack stamp when it has one. Same precedence
+    generate_from_pbs and get_pbs_sequence already apply (a single pool-wide
+    meta goes stale once sequences from more than one pack share the pool)."""
+    meta = dict(_pbs_meta())
+    if seq.get("_pack_opr"):
+        meta["operator"] = seq["_pack_opr"]
+        meta["base"] = seq.get("_pack_base") or meta.get("base")
+        meta["fleet"] = seq.get("_pack_fleet") or meta.get("fleet")
+    return meta
+
+
+def _pairing_baseline_for_leg(leg):
+    """The pairing fields for `leg` — seq first among them — looked up in
+    this pilot's own PBS sequences, or None when nothing there matches it
+    unambiguously.
+
+    A SimBrief OFP has no `seq` field at all (see build_leg_from_sources):
+    it carries day-of-ops detail for one flight, nothing about the trip that
+    flight belongs to. So a re-import — a leg generated from a sequence in
+    the app, edited on SimBrief, then loaded back in — rebuilds the leg from
+    the OFP alone and comes back with no pairing linkage. That is invisible
+    while _store_leg's merge happens to land on the same row (the existing
+    seq survives), and shows up as a standalone leg the moment it doesn't:
+    a date the pilot moved past _dates_match's one-day tolerance is enough.
+
+    This re-derives the linkage from the same place it came from the first
+    time — the pilot's own sequences, run through pbs_leg_to_fos_leg — so a
+    re-imported leg is attached by the same rule as a freshly generated one
+    rather than by a second, drifting mechanism.
+
+    Matching is flight number + ICAO-normalized city pair, deliberately
+    ignoring dates (the edit that detached the leg is usually a date change,
+    and a bid pack has no calendar dates anyway). Two different sequences
+    flying the same flight is genuinely ambiguous — real bid packs repeat a
+    city pair across dozens of SEQs — so that resolves to the pilot's active
+    sequence if one of them is it, and otherwise to nothing at all. Guessing
+    would re-attach the leg to the wrong trip, which is worse than leaving
+    it standalone."""
+    flight_number = (leg.get("flight_number") or "").strip()
+    origin, destination = _airport_icao(leg.get("origin", "")), _airport_icao(leg.get("destination", ""))
+    if not flight_number or not origin or not destination:
+        return None
+
+    matches = []  # (sequence, duty day, pbs leg)
+    for seq in _pbs_sequences():
+        for day in seq.get("duty_days") or []:
+            for pbs_leg in day.get("legs") or []:
+                if (
+                    (pbs_leg.get("flight_number") or "").strip() == flight_number
+                    and _airport_icao(pbs_leg.get("origin", "")) == origin
+                    and _airport_icao(pbs_leg.get("destination", "")) == destination
+                ):
+                    matches.append((seq, day, pbs_leg))
+    if not matches:
+        return None
+    if len({s["seq"] for s, _, _ in matches}) > 1:
+        matches = [m for m in matches if m[0]["seq"] == current_user.active_seq]
+        if not matches:
+            return None
+    seq, day, pbs_leg = matches[0]  # a trip that flies the same leg twice is
+    # still that one trip — the seq is right either way, and the first match
+    # is as good a source as any for the day-level hotel/duty fields.
+
+    # Position isn't in the OFP or the bid pack: it's the pilot's own. Reuse
+    # whatever they were already flying this sequence as, falling back to the
+    # sequence's first published position.
+    flown_as = ""
+    for row in Leg.query.filter_by(user_id=current_user.id).all():
+        if row.data.get("seq") == seq["seq"] and row.data.get("position"):
+            flown_as = row.data["position"]
+            break
+    position = flown_as or (seq["positions"][0] if seq.get("positions") else "")
+    return pbs_parser.pbs_leg_to_fos_leg(_seq_pack_meta(seq), seq, day, pbs_leg, position)
+
+
 _ofp_fetch_cache = {}  # simbrief_user -> (fetched_at, ofp_fields)
 _OFP_CACHE_TTL = 15  # seconds — covers one "Generate & Cache All Legs" burst
 # (several requests, same account, milliseconds apart) without re-fetching
@@ -859,6 +961,7 @@ def generate():
     # (seq/schedule) because only gates were ever carried forward, not the
     # rest of the PBS-only context.
     carry_from = payload.pop("carry_gates_from", None)
+    from_simbrief = bool(payload.get("simbrief_user"))
     leg = build_leg_from_sources(payload)
     ofp_error = leg.pop("_ofp_error", None)
     if ofp_error and not leg.get("flight_number"):
@@ -893,6 +996,28 @@ def generate():
             ):
                 if src_row.data.get(key) and not leg.get(key):
                     leg[key] = src_row.data[key]
+    # Still no pairing linkage after all that: either this came in through
+    # "Import from SimBrief" on Home (which sends no carry_gates_from at all),
+    # or carry_from's same-flight guard above rightly declined. Look the leg
+    # up in the pilot's own sequences instead — a re-imported leg belongs to
+    # its trip just as much as a freshly generated one does, and the OFP it
+    # was rebuilt from has no field that could say so.
+    if from_simbrief and not leg.get("seq"):
+        pairing = _pairing_baseline_for_leg(leg)
+        if pairing:
+            # Only the fields a pairing owns and a SimBrief OFP has no
+            # equivalent for — the same set carry_gates_from carries, minus
+            # the ones that aren't the pairing's to give (gates, bookmarks,
+            # signatures belong to the leg, not the trip). Everything both
+            # sources describe (times, tail, load, fleet) is left to SimBrief:
+            # it's the fresher one, and having it is why the pilot re-imported.
+            for key in (
+                "seq", "position", "base", "airline_iata", "equipment_type",
+                "duty_time", "ground_time", "mot", "hotel_details", "limo_details",
+                "pairing_sched_out", "pairing_sched_in",
+            ):
+                if pairing.get(key) and not leg.get(key):
+                    leg[key] = pairing[key]
     record = _store_leg(leg)
     return jsonify({"fos_url": f"/fos/{record['id']}", "id": record["id"]})
 
@@ -2803,32 +2928,39 @@ def _gate_release_payload(payload, fit_for_duty):
     return {**payload, "fit_for_duty": bool(fit_for_duty)}
 
 
-@app.route("/fos/<int:leg_id>/release", methods=["GET"])
-def read_release(leg_id):
-    """Returns this leg's release if one has already been generated, and
-    NEVER generates. Split out from the POST below because generating and
-    reading had been the same call, and that leaked other flights' paperwork:
+def _ofp_is_this_leg(simbrief_user, record):
+    """Is the OFP sitting on this pilot's SimBrief account right now
+    genuinely THIS leg? Same flight number + city pair check
+    generate_from_pbs already uses — an account only ever holds one OFP,
+    and it belongs to whichever flight was dispatched last, not to
+    whichever leg the app happens to be showing.
 
-    generate_release_pdfs() is keyed on the pilot's SimBrief USERNAME and
-    takes no leg argument at all — it renders whatever OFP happens to be
-    sitting on that account right now. So opening Documents on a leg that
-    had nothing on file rendered some *other* flight's OFP and then cached
-    it against this leg permanently. Viewing must therefore be incapable of
-    generating, which is what this route is for.
-
-    {"exists": false} rather than a 404: "nothing generated yet" is the
-    normal state of a fresh leg, not an error worth a red toast."""
-    record = _get_leg(leg_id)
-    if not record:
-        return jsonify({"error": "not found"}), 404
-    cached = ReleaseCache.query.filter_by(leg_id=leg_id).first()
-    if not cached:
-        return jsonify({"exists": False})
-    return jsonify({
-        **_gate_release_payload(cached.payload, record.get("fit_for_duty")),
-        "exists": True, "cached": True,
-        "generated_at": cached.generated_at.isoformat(),
-    })
+    Returns (True, "") when it matches, (False, <reason>) otherwise.
+    A fetch that fails is a "no", not a "yes": generate_release_pdfs()
+    pulls the same OFP from the same API a moment later, so waving it
+    through on a network hiccup wouldn't rescue the generation anyway —
+    it would only reopen the leak this check exists to close."""
+    try:
+        ofp_fields = _cached_ofp_fields(simbrief_user)
+    except Exception as e:
+        LOG.warning(f"SimBrief OFP identity check failed for {simbrief_user}: {e}")
+        return False, f"couldn't reach SimBrief to confirm which flight is on the account: {e}"
+    if not ofp_fields:
+        return False, "no OFP on that SimBrief account yet"
+    if (
+        ofp_fields.get("flight_number") == record.get("flight_number")
+        and _airport_icao(ofp_fields.get("origin", "")) == _airport_icao(record.get("origin", ""))
+        and _airport_icao(ofp_fields.get("destination", "")) == _airport_icao(record.get("destination", ""))
+    ):
+        return True, ""
+    on_account = "{} {}-{}".format(
+        ofp_fields.get("flight_number") or "?",
+        ofp_fields.get("origin") or "?", ofp_fields.get("destination") or "?",
+    )
+    return False, (
+        f"SimBrief currently holds {on_account}, not this flight — send this leg "
+        "to SimBrief first, then generate its release"
+    )
 
 
 @app.route("/fos/<int:leg_id>/release", methods=["POST"])
@@ -2839,7 +2971,22 @@ def generate_release(leg_id):
     "Generate Release" button and the Documents PDF viewer hit this same
     route/cache now, instead of each independently re-running it on every
     click or page load. Pass {"force": true} to regenerate anyway (e.g.
-    gates changed since the cached copy, or the weather's gone stale)."""
+    gates changed since the cached copy, or the weather's gone stale).
+
+    Two things scope this to the leg in the URL, and both matter — the
+    reported "a leg with nothing generated shows another leg's OFP and
+    documents" bug was this route having neither:
+
+      cached_only — read-only. Serves this leg's cached release or 404s.
+        The Documents view (viewDoc -> ensureRelease) uses it, because
+        merely LOOKING at a leg's document list must never mint a release
+        for it. There is deliberately no "most recent release" fallback:
+        a leg with nothing generated has nothing to show, full stop.
+      identity check — generate_release_pdfs() renders whatever OFP is on
+        the pilot's SimBrief ACCOUNT; it takes a username, not a leg, and
+        cannot tell one leg from another. Generating without first
+        confirming the account actually holds THIS flight is what wrote
+        another leg's release into this leg's cache."""
     record = _get_leg(leg_id)
     if not record:
         return jsonify({"error": "not found"}), 404
@@ -2851,6 +2998,8 @@ def generate_release(leg_id):
             **_gate_release_payload(cached.payload, record.get("fit_for_duty")),
             "cached": True, "generated_at": cached.generated_at.isoformat(),
         })
+    if body.get("cached_only"):
+        return jsonify({"error": "no release has been generated for this flight yet"}), 404
 
     if not release_engine.is_available():
         return jsonify({"error": release_engine.import_error()}), 503
@@ -2858,6 +3007,10 @@ def generate_release(leg_id):
     user_id = body.get("user_id") or os.environ.get("SIMBRIEF_USER")
     if not user_id:
         return jsonify({"error": "no SimBrief user id — pass \"user_id\" or set SIMBRIEF_USER"}), 400
+
+    matches, why_not = _ofp_is_this_leg(user_id, record)
+    if not matches:
+        return jsonify({"error": why_not}), 409
 
     try:
         rls_bytes, wb_bytes, filename = release_engine.generate_release_pdfs(
@@ -3114,6 +3267,40 @@ def _home_tile(icon_key, title, sub, href, enabled):
 _TRASH_ICON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg>'
 
 
+def _trip_signin_banner():
+    """Home's "you haven't signed in to your trip yet" call-to-action.
+
+    Pick Up (POST /pbs/sequences/<seq>/pick-up) IS the trip check-in, but it
+    only ever existed as one button inside a sequence's detail view — three
+    taps deep, under a name that doesn't say "sign in". Pilots couldn't find
+    where to sign in to their trip. This puts it where it can't be missed on
+    the one screen everyone starts from, and only while there's actually
+    something to sign in to: a sequence in the pool and no active trip.
+    Rendered server-side (like Current Flight above) rather than fetched —
+    the server already knows both halves of that.
+
+    Deliberately a link to Schedule, not a one-tap check-in from Home: Pick
+    Up is a real logged event (TripCheckIn), and the pilot should see which
+    trip they're signing in to before it happens."""
+    if current_user.active_seq:
+        return ""
+    seqs = _pbs_sequences()
+    if not seqs:
+        return ""
+    if len(seqs) == 1:
+        s = _summarize_sequence(seqs[0])
+        routing = f'{s.get("origin") or ""}→{s.get("final_destination") or ""}'.strip("→")
+        detail = f'SEQ {s["seq"]}' + (f' · {routing}' if routing else "") + f' · {s["days"]} day{"" if s["days"] == 1 else "s"}'
+    else:
+        detail = f"{len(seqs)} trips in My Trips · pick the one you're flying"
+    return (
+        '<div class="trip-signin-banner" onclick="window.location.href=\'/schedule\'">'
+        '<div class="tsb-title">Sign in to your trip</div>'
+        f'<div class="tsb-sub">{html.escape(detail)}</div>'
+        '</div>'
+    )
+
+
 def render_launcher_html():
     archive_rows = _archive_rows()
     rows = "".join(
@@ -3141,6 +3328,7 @@ def render_launcher_html():
         current_leg_id=str(current_leg["id"]) if current_leg else "",
         current_leg_disabled="" if current_leg else " disabled",
         unacked_docs=str(_unacked_doc_count()),
+        trip_signin_banner=_trip_signin_banner(),
         app_version=APP_VERSION,
     )
 
@@ -3464,6 +3652,11 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
   .home-tile svg{width:26px;height:26px;color:var(--blue);flex:0 0 auto;}
   .home-tile .tile-title{font-size:15px;font-weight:700;color:var(--value);}
   .home-tile .tile-sub{font-size:12.5px;color:var(--label);margin-top:2px;}
+  /* Trip check-in call-to-action — blue, not the doc-ack banner's red: this
+     is "here's the thing you're looking for", not a compliance warning. */
+  .trip-signin-banner{max-width:640px;background:var(--blue);color:#fff;border-radius:10px;padding:14px 16px;margin:0 0 14px;cursor:pointer;}
+  .trip-signin-banner .tsb-title{font-size:15px;font-weight:700;}
+  .trip-signin-banner .tsb-sub{font-size:12.5px;opacity:.9;margin-top:3px;}
 </style></head><body>
 <!-- Styled inline rather than via .ffd-banner: that class lives only in
      FOS_TEMPLATE's stylesheet, and this template has its own. -->
@@ -3474,6 +3667,7 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
 </button>
 <div id="home-view" class="sub-view active">
   <h1>MobileCCI</h1>
+  $trip_signin_banner
   <div class="home-tiles">
     <button class="home-tile" onclick="showHomeView('load-sequence');showTab('manual');">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
@@ -3917,6 +4111,10 @@ FOS_TEMPLATE = """<!DOCTYPE html>
     --navy:#1d1d1f; --blue:#0071e3; --blue-dark:#0058a8;
     --bg:#f5f5f7; --card:#fff; --border:#d2d2d7; --label:#6e6e73; --value:#1d1d1f;
     --red:#ff3b30; --green:#34c759; --inactive:#9aa1ab; --radius:10px;
+    /* NAC's brand maroon, sampled from static/nac-bear.png. Distinct from
+       --red, which is the UI ALERT red and has nothing to do with the
+       livery -- keep the two apart. */
+    --nac-red:#640019;
   }
   @media (prefers-color-scheme: dark){
     :root{
@@ -4186,6 +4384,34 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .layover .rest b{color:var(--blue);}
   #sign-pad{touch-action:none;background:#fff;border:1px solid var(--border);border-radius:6px;width:100%;height:220px;}
   .placeholder-note{padding:12px 14px;color:var(--label);font-style:italic;font-size:13px;background:var(--card);}
+  /* One loading overlay for the whole app — replaces the copies of
+     <p class="placeholder-note">Loading…</p> that used to be scattered
+     through the JS. It covers ONLY the content area: top/bottom are set in
+     _positionLoadOverlay() from the active view's own .topbar and the
+     .tabbar, and z-index 15 sits between .topbar (10) and .tabbar (20) so
+     the header and the nav stay fully visible, undimmed, and still tappable
+     while something is in flight. */
+  #load-overlay{position:fixed;left:env(safe-area-inset-left);right:env(safe-area-inset-right);z-index:15;display:flex;align-items:center;justify-content:center;}
+  /* Needed explicitly: display:flex above would otherwise beat [hidden]. */
+  #load-overlay[hidden]{display:none;}
+  /* The dimming is its own layer so the 50% applies to the content showing
+     through and never to the mark and spinner sitting on top of it. */
+  .lo-scrim{position:absolute;inset:0;background:var(--bg);opacity:.5;}
+  .lo-center{position:relative;display:flex;flex-direction:column;align-items:center;gap:14px;}
+  /* NAC red square behind the bear. Its own element with a fixed size, so
+     the square and the spinner below it sit in exactly the same place
+     whether or not the artwork loads — see #lo-bear, which is removed
+     outright when it doesn't rather than rendering a broken image.
+     The colour must stay --nac-red: nac-bear.png carries that same maroon as
+     its own ground, so frame and artwork read as a single mark. Using --red
+     here instead frames the maroon in bright alert red. */
+  .lo-mark{width:88px;height:88px;background:var(--nac-red);display:flex;align-items:center;justify-content:center;box-shadow:0 2px 10px rgba(0,0,0,.18);}
+  #lo-bear{width:64px;height:64px;object-fit:contain;}
+  .lo-spinner{width:22px;height:22px;border:2.5px solid var(--border);border-top-color:var(--nac-red);border-radius:50%;animation:lo-spin .8s linear infinite;}
+  @keyframes lo-spin{to{transform:rotate(360deg);}}
+  /* The global reduce rule near the top already kills this; stated again so
+     the spinner's own behavior is readable where the spinner is defined. */
+  @media (prefers-reduced-motion: reduce){ .lo-spinner{animation:none;} }
   .view{display:none;}
   .view.active{display:block;}
   #toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(12px);background:#1a1f29;color:#fff;padding:9px 16px;border-radius:20px;font-size:13px;opacity:0;pointer-events:none;transition:opacity .18s ease, transform .18s ease;box-shadow:0 4px 14px rgba(0,0,0,.25);z-index:10;}
@@ -4418,7 +4644,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           <p>WX*$origin / WX*$destination</p>
         </div>
       </div>
-      <div id="weather-body"><p class="placeholder-note">Loading\u2026</p></div>
+      <div id="weather-body"></div>
     </section>
 
     <section id="saveddocs-view" class="view">
@@ -4434,7 +4660,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         <button class="back-link" onclick="showView('overview')" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
         <div class="topbar-title"><h1>Docs</h1></div>
       </div>
-      <div id="doclocker-body"><p class="placeholder-note">Loading…</p></div>
+      <div id="doclocker-body"></div>
     </section>
 
     <section id="messages-view" class="view">
@@ -4470,7 +4696,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           <p>Signed times and FDP remaining, per leg</p>
         </div>
       </div>
-      <div id="motlog-body"><p class="placeholder-note">Loading…</p></div>
+      <div id="motlog-body"></div>
     </section>
 
     <section id="sign-view" class="view">
@@ -4503,14 +4729,14 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         <button class="tab-btn" id="tab-layers-btn" onclick="showScheduleTab('layers')">Bid Layers</button>
       </div>
       <div id="tab-mytrip" class="tab-panel active">
-        <div id="pairing-body"><p class="placeholder-note">Loading…</p></div>
+        <div id="pairing-body"></div>
       </div>
       <div id="tab-library" class="tab-panel">
         <div id="library-crumb" style="padding:10px 14px;font-size:12.5px;color:var(--label);"></div>
-        <div id="library-body"><p class="placeholder-note">Loading…</p></div>
+        <div id="library-body"></div>
       </div>
       <div id="tab-layers" class="tab-panel">
-        <div id="layers-body"><p class="placeholder-note">Loading…</p></div>
+        <div id="layers-body"></div>
       </div>
     </section>
     <section id="recovery-view" class="view">
@@ -4672,7 +4898,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         <button class="back-link" onclick="showView('settings')" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
         <div class="topbar-title"><h1>Crew &amp; Documents</h1></div>
       </div>
-      <div id="admin-body"><p class="placeholder-note">Loading…</p></div>
+      <div id="admin-body"></div>
     </section>
     <section id="confirm-view" class="view">
       <div class="topbar">
@@ -4748,6 +4974,17 @@ FOS_TEMPLATE = """<!DOCTYPE html>
       <span>More</span>
     </button>
   </nav>
+</div>
+<!-- onerror still removes the <img> outright rather than painting a broken
+     image, and .lo-mark's size is its own, so a missing asset costs the bear
+     and nothing else — no layout shift. It starts hidden and is revealed on
+     load, so the broken state is never painted even for a frame. -->
+<div id="load-overlay" hidden role="status" aria-live="polite" aria-label="Loading">
+  <div class="lo-scrim"></div>
+  <div class="lo-center">
+    <div class="lo-mark"><img id="lo-bear" src="/static/nac-bear.png" alt="" hidden onload="this.hidden=false" onerror="this.remove()"></div>
+    <div class="lo-spinner"></div>
+  </div>
 </div>
 <div id="toast"></div>
 <script>
@@ -5216,8 +5453,7 @@ function generateRelease(force, readOnly){
     .then(({ok, data}) => {
       btn.disabled = false;
       if(!ok){ status.textContent = 'Failed: ' + (data.error || 'unknown error'); status.style.color = '#c0392b'; return; }
-      if(data.exists === false){ status.textContent = ''; return; }
-      _releaseCache = data; // ensureRelease()/viewDoc() reuse this — one generation serves both paths
+      _setReleaseCache(data); // ensureRelease()/viewDoc() reuse this — one generation serves both paths
       // Generation itself is never blocked (soft gate) — the PDF renders
       // fine via viewDoc() either way. Only the Download links here stay
       // locked until FFD is signed, same as pdf-view's Export link.
@@ -5301,6 +5537,55 @@ function exportToForeFlight(){
   document.body.removeChild(link);
   showToast('Opening in ForeFlight…');
 }
+// ---------------------------------------------------------------------------
+// Loading overlay — the one loading state in this app, in place of the copies
+// of <p class="placeholder-note">Loading…</p> that each load site used to
+// write into its own container. Sits between the header and the bottom nav
+// (see #load-overlay's CSS) and leaves both fully visible.
+//
+// showLoading(el) takes the element whose content is being loaded and takes
+// itself down again as soon as that element's content changes — so each site
+// is one call with no hideLoading() to forget on an error path. Every one of
+// them writes into that same element either way, content or error message.
+// ---------------------------------------------------------------------------
+let _loadObserver = null;
+let _loadTimer = null;
+function _positionLoadOverlay(){
+  const overlay = document.getElementById('load-overlay');
+  if(!overlay) return;
+  // Measured, not assumed: .topbar is sticky and its height moves with its
+  // own title and the device's safe-area inset, and the doc-ack banner can
+  // sit above it.
+  const topbar = document.querySelector('.view.active .topbar');
+  const tabbar = document.querySelector('.tabbar');
+  overlay.style.top = Math.max(0, topbar ? topbar.getBoundingClientRect().bottom : 0) + 'px';
+  overlay.style.bottom = (tabbar ? tabbar.getBoundingClientRect().height : 0) + 'px';
+}
+function showLoading(el){
+  const overlay = document.getElementById('load-overlay');
+  if(!overlay) return;
+  hideLoading();
+  _positionLoadOverlay();
+  overlay.hidden = false;
+  if(el && window.MutationObserver){
+    _loadObserver = new MutationObserver(hideLoading);
+    _loadObserver.observe(el, {childList: true, subtree: true, characterData: true});
+  }
+  // Backstop — nothing should stay covered forever if a load somehow neither
+  // renders nor reports.
+  _loadTimer = setTimeout(hideLoading, 45000);
+}
+function hideLoading(){
+  const overlay = document.getElementById('load-overlay');
+  if(overlay) overlay.hidden = true;
+  if(_loadObserver){ _loadObserver.disconnect(); _loadObserver = null; }
+  if(_loadTimer){ clearTimeout(_loadTimer); _loadTimer = null; }
+}
+window.addEventListener('resize', () => {
+  const overlay = document.getElementById('load-overlay');
+  if(overlay && !overlay.hidden) _positionLoadOverlay();
+});
+
 let toastTimer;
 function showToast(msg){
   const t = document.getElementById('toast');
@@ -5310,28 +5595,41 @@ function showToast(msg){
   toastTimer = setTimeout(()=>t.classList.remove('show'), 1600);
 }
 
+// This leg's release, held for the life of the page. Keyed by leg id, not a
+// bare object: LEG_ID is server-rendered per page load so today a leg switch
+// is a full navigation and this can't outlive it — but this cache has already
+// caused one stale-data bug (a saved FFD signature reading as unsaved, see
+// submitSignature), and "it can't hold another leg's release" should be a
+// property of the cache itself rather than of how the page happens to be
+// reached.
 let _releaseCache = null;
+let _releaseCacheLeg = null;
+function _setReleaseCache(data){
+  _releaseCache = data;
+  _releaseCacheLeg = data ? String(LEG_ID) : null;
+}
+function _getReleaseCache(){
+  if(_releaseCache && _releaseCacheLeg === String(LEG_ID)) return _releaseCache;
+  _releaseCache = null; _releaseCacheLeg = null;
+  return null;
+}
+// READ-ONLY on purpose (cached_only). Opening a document must only ever show
+// what was actually generated FOR THIS LEG — generating on demand here is what
+// leaked another leg's OFP onto a leg nothing had been generated for, because
+// the generator renders whatever OFP is on the SimBrief account, not this leg.
+// Generating stays where the pilot asks for it explicitly: Release > Generate.
 async function ensureRelease(){
-  if(_releaseCache) return _releaseCache;
-  const userId = document.getElementById('release-user').value.trim();
-  if(!userId){ showToast('Send this flight to SimBrief first to get a username on file'); return null; }
+  const held = _getReleaseCache();
+  if(held) return held;
+  if(!LEG_ID){ showToast('Open a flight first'); return null; }
   let r, data;
   try {
-    // GET, deliberately: this is the VIEW path. It used to POST, which
-    // generates, and generating is keyed on the SimBrief account rather
-    // than on this leg — so opening a document on a leg with nothing on
-    // file pulled whatever flight was on SimBrief at that moment and
-    // pinned it here. Generating stays behind the Release view's own
-    // explicit button.
-    r = await fetch('/fos/' + LEG_ID + '/release');
+    r = await fetch('/fos/' + LEG_ID + '/release', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({cached_only: true})});
     data = await r.json();
   } catch(e) { showToast('Request failed: ' + e); return null; }
+  if(r.status === 404){ showToast('No release generated for this flight yet — generate one under Release'); return null; }
   if(!r.ok){ showToast('Failed: ' + (data.error || 'unknown error')); return null; }
-  if(data.exists === false){
-    showToast('No release on file for this flight — generate one from Release first');
-    return null;
-  }
-  _releaseCache = data;
+  _setReleaseCache(data);
   return data;
 }
 function b64ToBytes(b64){
@@ -5434,7 +5732,7 @@ function closePdfView(){
 async function showMotLog(){
   showView('motlog');
   const body = document.getElementById('motlog-body');
-  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  showLoading(body);
   if(!LEG_SEQ){ body.innerHTML = '<p class="placeholder-note">This flight isn’t tied to a sequence.</p>'; return; }
   try {
     const r = await fetch('/pbs/sequences/' + encodeURIComponent(LEG_SEQ) + '/mot-log');
@@ -5581,8 +5879,14 @@ async function submitSignature(){
       // re-pulling the release (server-side still instant — it's already
       // cached, this just re-reads the now-true flag) unlocks downloads
       // immediately instead of requiring a page reload to notice.
-      _releaseCache = null;
-      if(document.getElementById('release-user')) generateRelease(false, true);
+      //
+      // Only re-pull when this leg actually HAS a release — generateRelease()
+      // is the explicit "generate" path and now refuses (409) when SimBrief
+      // isn't holding this flight, so firing it after every FFD signature on a
+      // leg nothing was ever generated for would just raise a confusing error.
+      const hadRelease = !!_getReleaseCache();
+      _setReleaseCache(null);
+      if(hadRelease && document.getElementById('release-user')) generateRelease();
     }
     showToast('Signed');
     showView('allcommands');
@@ -5631,7 +5935,7 @@ async function initPairingView(){
   // as before Schedule became leg-independent. Only /schedule itself
   // (LEG_SEQ empty) falls through to the pool-wide list/empty-state.
   if(LEG_SEQ){ await myTripShowDetail(LEG_SEQ, false); return; }
-  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  showLoading(body);
   try {
     const r = await fetch('/pbs/sequences');
     const seqs = await r.json();
@@ -5677,6 +5981,15 @@ function myTripShowList(seqs){
   tidyBtn.onclick = (e) => { e.stopPropagation(); tidyMyTrips(); };
   const {pane, list} = libraryPane('My Trips', null, tidyBtn);
   seqs.forEach(s => list.appendChild(sequenceListRow(s, () => myTripShowDetail(s.seq, true))));
+  // Same call-to-action Home carries, repeated here because this is where
+  // the pilot lands after tapping it — otherwise the trail goes cold at a
+  // list of trips with no indication that one of them needs signing in to.
+  if(!seqs.some(s => s.active)){
+    const hint = document.createElement('div');
+    hint.style.cssText = 'margin:0 0 10px;padding:11px 13px;background:var(--blue);color:#fff;border-radius:8px;font-size:12.5px;line-height:1.4;';
+    hint.textContent = "You're not signed in to a trip yet — open the one you're flying and tap Sign In to Trip.";
+    body.appendChild(hint);
+  }
   body.appendChild(pane);
 }
 async function tidyMyTrips(){
@@ -5691,7 +6004,7 @@ async function tidyMyTrips(){
 }
 async function myTripShowDetail(seqNumber, showBack){
   const body = document.getElementById('pairing-body');
-  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  showLoading(body);
   try {
     const r = await fetch('/pbs/sequences/' + encodeURIComponent(seqNumber));
     const data = await r.json();
@@ -5861,16 +6174,25 @@ function renderPairing(seqData){
   const pickupWrap = document.createElement('div');
   pickupWrap.style.cssText = 'padding:11px 14px;background:var(--card);border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:8px;';
   const pickupBtn = document.createElement('button');
+  // "Pick Up" alone is what pilots couldn't find when looking for where to
+  // sign in to a trip — it's the company word for it, but nothing on screen
+  // said "sign in". Both words now, and a line under the button saying what
+  // tapping it actually does.
+  const pickupNote = document.createElement('div');
+  pickupNote.style.cssText = 'font-size:12px;color:var(--label);line-height:1.35;';
   if(seqData.active){
     pickupBtn.textContent = 'Close Trip';
     pickupBtn.style.cssText = 'margin:0;width:100%;background:var(--label);color:#fff;border:none;padding:10px;border-radius:5px;font-size:13.5px;font-weight:600;cursor:pointer;';
     pickupBtn.onclick = () => closeTrip(seqData.seq);
+    pickupNote.textContent = 'Signed in to SEQ ' + seqData.seq + '. Closing it lets you sign in to a different trip.';
   } else {
-    pickupBtn.textContent = 'Pick Up';
-    pickupBtn.style.cssText = 'margin:0;width:100%;background:var(--blue);color:#fff;border:none;padding:10px;border-radius:5px;font-size:13.5px;font-weight:600;cursor:pointer;';
+    pickupBtn.textContent = 'Sign In to Trip (Pick Up)';
+    pickupBtn.style.cssText = 'margin:0;width:100%;background:var(--blue);color:#fff;border:none;padding:12px;border-radius:5px;font-size:14.5px;font-weight:700;cursor:pointer;';
     pickupBtn.onclick = () => pickUpTrip(seqData.seq);
+    pickupNote.textContent = 'Trip check-in — signs you in to SEQ ' + seqData.seq + ' and makes it your active trip.';
   }
   pickupWrap.appendChild(pickupBtn);
+  pickupWrap.appendChild(pickupNote);
   if(seqData.active && firstLeg){
     // The one clear path from "picked up" to the actual flight page —
     // previously there was no obvious way to get from a checked-in trip
@@ -5929,8 +6251,8 @@ async function pickUpTrip(seq){
   try {
     const r = await fetch('/pbs/sequences/' + encodeURIComponent(seq) + '/pick-up', {method: 'POST'});
     const data = await r.json();
-    if(!r.ok){ showToast(data.error || 'Could not pick up this trip'); return; }
-    showToast('Trip picked up');
+    if(!r.ok){ showToast(data.error || 'Could not sign in to this trip'); return; }
+    showToast('Signed in to SEQ ' + seq);
     myTripShowDetail(seq, true);
   } catch(e) { showToast('Request failed: ' + e); }
 }
@@ -6148,7 +6470,7 @@ function libraryRoutingHtml(routing, layoverIndices){
 async function libraryShowOprs(){
   _libraryPath = {opr: null, base: null, fleet: null};
   const body = document.getElementById('library-body');
-  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  showLoading(body);
   try {
     const r = await fetch('/pbs/packs');
     const packs = await r.json();
@@ -6171,7 +6493,7 @@ async function libraryShowOprs(){
 }
 async function libraryShowBases(){
   const body = document.getElementById('library-body');
-  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  showLoading(body);
   try {
     const r = await fetch('/pbs/packs');
     const packs = (await r.json()).filter(p => p.opr === _libraryPath.opr);
@@ -6188,7 +6510,7 @@ async function libraryShowBases(){
 }
 async function libraryShowFleets(){
   const body = document.getElementById('library-body');
-  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  showLoading(body);
   try {
     const r = await fetch('/pbs/packs');
     const packs = (await r.json()).filter(p => p.opr === _libraryPath.opr && p.base === _libraryPath.base);
@@ -6252,7 +6574,7 @@ async function libraryShowSequences(sort){
   sort = sort || '';
   const {opr, base, fleet} = _libraryPath;
   const body = document.getElementById('library-body');
-  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  showLoading(body);
   try {
     const r = await fetch('/pbs/packs/' + opr + '/' + base + '/' + fleet + '/sequences' + (sort ? ('?sort=' + encodeURIComponent(sort)) : ''));
     const seqs = await r.json();
@@ -6269,7 +6591,7 @@ async function libraryShowSequences(sort){
 async function libraryShowSequenceDetail(seqNumber){
   const {opr, base, fleet} = _libraryPath;
   const body = document.getElementById('library-body');
-  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  showLoading(body);
   try {
     const r = await fetch('/pbs/packs/' + opr + '/' + base + '/' + fleet + '/sequences/' + encodeURIComponent(seqNumber));
     const seqData = await r.json();
@@ -6344,7 +6666,7 @@ async function promoteAndFly(opr, base, fleet, seqNumber){
 let _layersLoaded = false;
 async function layerShowList(){
   const body = document.getElementById('layers-body');
-  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  showLoading(body);
   try {
     const r = await fetch('/pbs/layers');
     const layers = await r.json();
@@ -6775,7 +7097,7 @@ function _pairingSortControl(sort, onChange){
 async function layerShowPairings(layer, sort){
   sort = sort || '';
   const body = document.getElementById('layers-body');
-  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  showLoading(body);
   try {
     const r = await fetch('/pbs/layers/' + layer.id + '/pairings' + (sort ? ('?sort=' + encodeURIComponent(sort)) : ''));
     const data = await r.json();
@@ -6828,7 +7150,7 @@ async function layerShowSequenceDetail(layer, match){
   const {opr, base, fleet} = match;
   const seqNumber = match.seq;
   const body = document.getElementById('layers-body');
-  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  showLoading(body);
   try {
     const r = await fetch('/pbs/packs/' + opr + '/' + base + '/' + fleet + '/sequences/' + encodeURIComponent(seqNumber));
     const seqData = await r.json();
@@ -7298,7 +7620,7 @@ function _adminSection(title){
 }
 async function initAdminView(){
   const body = document.getElementById('admin-body');
-  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  showLoading(body);
   let data;
   try {
     const r = await fetch('/admin/stats');
@@ -7365,7 +7687,7 @@ async function initAdminView(){
 }
 async function adminShowUser(userId){
   const body = document.getElementById('admin-body');
-  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  showLoading(body);
   let d;
   try {
     const r = await fetch('/admin/users/' + userId);
@@ -7450,7 +7772,7 @@ function _fmtDocSize(bytes){
 }
 async function initDocLocker(){
   const body = document.getElementById('doclocker-body');
-  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  showLoading(body);
   try {
     const r = await fetch('/docs/list');
     const data = await r.json();
@@ -7774,7 +8096,7 @@ async function loadWeather(){
     body.innerHTML = '<p class="placeholder-note">Send this flight to SimBrief first to get a username on file.</p>';
     return;
   }
-  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  showLoading(body);
   try {
     const r = await fetch('/fos/' + LEG_ID + '/weather', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({user_id:userId})});
     const data = await r.json();
