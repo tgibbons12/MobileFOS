@@ -3257,6 +3257,40 @@ def _home_tile(icon_key, title, sub, href, enabled):
 _TRASH_ICON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg>'
 
 
+def _trip_signin_banner():
+    """Home's "you haven't signed in to your trip yet" call-to-action.
+
+    Pick Up (POST /pbs/sequences/<seq>/pick-up) IS the trip check-in, but it
+    only ever existed as one button inside a sequence's detail view — three
+    taps deep, under a name that doesn't say "sign in". Pilots couldn't find
+    where to sign in to their trip. This puts it where it can't be missed on
+    the one screen everyone starts from, and only while there's actually
+    something to sign in to: a sequence in the pool and no active trip.
+    Rendered server-side (like Current Flight above) rather than fetched —
+    the server already knows both halves of that.
+
+    Deliberately a link to Schedule, not a one-tap check-in from Home: Pick
+    Up is a real logged event (TripCheckIn), and the pilot should see which
+    trip they're signing in to before it happens."""
+    if current_user.active_seq:
+        return ""
+    seqs = _pbs_sequences()
+    if not seqs:
+        return ""
+    if len(seqs) == 1:
+        s = _summarize_sequence(seqs[0])
+        routing = f'{s.get("origin") or ""}→{s.get("final_destination") or ""}'.strip("→")
+        detail = f'SEQ {s["seq"]}' + (f' · {routing}' if routing else "") + f' · {s["days"]} day{"" if s["days"] == 1 else "s"}'
+    else:
+        detail = f"{len(seqs)} trips in My Trips · pick the one you're flying"
+    return (
+        '<div class="trip-signin-banner" onclick="window.location.href=\'/schedule\'">'
+        '<div class="tsb-title">Sign in to your trip</div>'
+        f'<div class="tsb-sub">{html.escape(detail)}</div>'
+        '</div>'
+    )
+
+
 def render_launcher_html():
     archive_rows = _archive_rows()
     rows = "".join(
@@ -3284,6 +3318,7 @@ def render_launcher_html():
         current_leg_id=str(current_leg["id"]) if current_leg else "",
         current_leg_disabled="" if current_leg else " disabled",
         unacked_docs=str(_unacked_doc_count()),
+        trip_signin_banner=_trip_signin_banner(),
         app_version=APP_VERSION,
     )
 
@@ -3595,6 +3630,11 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
   .home-tile svg{width:26px;height:26px;color:var(--blue);flex:0 0 auto;}
   .home-tile .tile-title{font-size:15px;font-weight:700;color:var(--value);}
   .home-tile .tile-sub{font-size:12.5px;color:var(--label);margin-top:2px;}
+  /* Trip check-in call-to-action — blue, not the doc-ack banner's red: this
+     is "here's the thing you're looking for", not a compliance warning. */
+  .trip-signin-banner{max-width:640px;background:var(--blue);color:#fff;border-radius:10px;padding:14px 16px;margin:0 0 14px;cursor:pointer;}
+  .trip-signin-banner .tsb-title{font-size:15px;font-weight:700;}
+  .trip-signin-banner .tsb-sub{font-size:12.5px;opacity:.9;margin-top:3px;}
 </style></head><body>
 <!-- Styled inline rather than via .ffd-banner: that class lives only in
      FOS_TEMPLATE's stylesheet, and this template has its own. -->
@@ -3605,6 +3645,7 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
 </button>
 <div id="home-view" class="sub-view active">
   <h1>MobileCCI</h1>
+  $trip_signin_banner
   <div class="home-tiles">
     <button class="home-tile" onclick="showHomeView('load-sequence');showTab('manual');">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
@@ -5788,6 +5829,15 @@ function myTripShowList(seqs){
   tidyBtn.onclick = (e) => { e.stopPropagation(); tidyMyTrips(); };
   const {pane, list} = libraryPane('My Trips', null, tidyBtn);
   seqs.forEach(s => list.appendChild(sequenceListRow(s, () => myTripShowDetail(s.seq, true))));
+  // Same call-to-action Home carries, repeated here because this is where
+  // the pilot lands after tapping it — otherwise the trail goes cold at a
+  // list of trips with no indication that one of them needs signing in to.
+  if(!seqs.some(s => s.active)){
+    const hint = document.createElement('div');
+    hint.style.cssText = 'margin:0 0 10px;padding:11px 13px;background:var(--blue);color:#fff;border-radius:8px;font-size:12.5px;line-height:1.4;';
+    hint.textContent = "You're not signed in to a trip yet — open the one you're flying and tap Sign In to Trip.";
+    body.appendChild(hint);
+  }
   body.appendChild(pane);
 }
 async function tidyMyTrips(){
@@ -5972,16 +6022,25 @@ function renderPairing(seqData){
   const pickupWrap = document.createElement('div');
   pickupWrap.style.cssText = 'padding:11px 14px;background:var(--card);border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:8px;';
   const pickupBtn = document.createElement('button');
+  // "Pick Up" alone is what pilots couldn't find when looking for where to
+  // sign in to a trip — it's the company word for it, but nothing on screen
+  // said "sign in". Both words now, and a line under the button saying what
+  // tapping it actually does.
+  const pickupNote = document.createElement('div');
+  pickupNote.style.cssText = 'font-size:12px;color:var(--label);line-height:1.35;';
   if(seqData.active){
     pickupBtn.textContent = 'Close Trip';
     pickupBtn.style.cssText = 'margin:0;width:100%;background:var(--label);color:#fff;border:none;padding:10px;border-radius:5px;font-size:13.5px;font-weight:600;cursor:pointer;';
     pickupBtn.onclick = () => closeTrip(seqData.seq);
+    pickupNote.textContent = 'Signed in to SEQ ' + seqData.seq + '. Closing it lets you sign in to a different trip.';
   } else {
-    pickupBtn.textContent = 'Pick Up';
-    pickupBtn.style.cssText = 'margin:0;width:100%;background:var(--blue);color:#fff;border:none;padding:10px;border-radius:5px;font-size:13.5px;font-weight:600;cursor:pointer;';
+    pickupBtn.textContent = 'Sign In to Trip (Pick Up)';
+    pickupBtn.style.cssText = 'margin:0;width:100%;background:var(--blue);color:#fff;border:none;padding:12px;border-radius:5px;font-size:14.5px;font-weight:700;cursor:pointer;';
     pickupBtn.onclick = () => pickUpTrip(seqData.seq);
+    pickupNote.textContent = 'Trip check-in — signs you in to SEQ ' + seqData.seq + ' and makes it your active trip.';
   }
   pickupWrap.appendChild(pickupBtn);
+  pickupWrap.appendChild(pickupNote);
   if(seqData.active && firstLeg){
     // The one clear path from "picked up" to the actual flight page —
     // previously there was no obvious way to get from a checked-in trip
@@ -6040,8 +6099,8 @@ async function pickUpTrip(seq){
   try {
     const r = await fetch('/pbs/sequences/' + encodeURIComponent(seq) + '/pick-up', {method: 'POST'});
     const data = await r.json();
-    if(!r.ok){ showToast(data.error || 'Could not pick up this trip'); return; }
-    showToast('Trip picked up');
+    if(!r.ok){ showToast(data.error || 'Could not sign in to this trip'); return; }
+    showToast('Signed in to SEQ ' + seq);
     myTripShowDetail(seq, true);
   } catch(e) { showToast('Request failed: ' + e); }
 }
