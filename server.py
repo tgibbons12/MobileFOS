@@ -4358,6 +4358,31 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .layover .rest b{color:var(--blue);}
   #sign-pad{touch-action:none;background:#fff;border:1px solid var(--border);border-radius:6px;width:100%;height:220px;}
   .placeholder-note{padding:12px 14px;color:var(--label);font-style:italic;font-size:13px;background:var(--card);}
+  /* One loading overlay for the whole app — replaces the copies of
+     <p class="placeholder-note">Loading…</p> that used to be scattered
+     through the JS. It covers ONLY the content area: top/bottom are set in
+     _positionLoadOverlay() from the active view's own .topbar and the
+     .tabbar, and z-index 15 sits between .topbar (10) and .tabbar (20) so
+     the header and the nav stay fully visible, undimmed, and still tappable
+     while something is in flight. */
+  #load-overlay{position:fixed;left:env(safe-area-inset-left);right:env(safe-area-inset-right);z-index:15;display:flex;align-items:center;justify-content:center;}
+  /* Needed explicitly: display:flex above would otherwise beat [hidden]. */
+  #load-overlay[hidden]{display:none;}
+  /* The dimming is its own layer so the 50% applies to the content showing
+     through and never to the mark and spinner sitting on top of it. */
+  .lo-scrim{position:absolute;inset:0;background:var(--bg);opacity:.5;}
+  .lo-center{position:relative;display:flex;flex-direction:column;align-items:center;gap:14px;}
+  /* NAC red square behind the bear. Fixed size and its own element, so the
+     square and the spinner below it sit in exactly the same place whether or
+     not static/nac-bear.svg exists — see #lo-bear, which is removed outright
+     when that file is missing rather than rendering a broken image. */
+  .lo-mark{width:88px;height:88px;background:var(--red);display:flex;align-items:center;justify-content:center;box-shadow:0 2px 10px rgba(0,0,0,.18);}
+  #lo-bear{width:64px;height:64px;object-fit:contain;}
+  .lo-spinner{width:22px;height:22px;border:2.5px solid var(--border);border-top-color:var(--red);border-radius:50%;animation:lo-spin .8s linear infinite;}
+  @keyframes lo-spin{to{transform:rotate(360deg);}}
+  /* The global reduce rule near the top already kills this; stated again so
+     the spinner's own behavior is readable where the spinner is defined. */
+  @media (prefers-reduced-motion: reduce){ .lo-spinner{animation:none;} }
   .view{display:none;}
   .view.active{display:block;}
   #toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(12px);background:#1a1f29;color:#fff;padding:9px 16px;border-radius:20px;font-size:13px;opacity:0;pointer-events:none;transition:opacity .18s ease, transform .18s ease;box-shadow:0 4px 14px rgba(0,0,0,.25);z-index:10;}
@@ -4590,7 +4615,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           <p>WX*$origin / WX*$destination</p>
         </div>
       </div>
-      <div id="weather-body"><p class="placeholder-note">Loading\u2026</p></div>
+      <div id="weather-body"></div>
     </section>
 
     <section id="saveddocs-view" class="view">
@@ -4606,7 +4631,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         <button class="back-link" onclick="showView('overview')" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
         <div class="topbar-title"><h1>Docs</h1></div>
       </div>
-      <div id="doclocker-body"><p class="placeholder-note">Loading…</p></div>
+      <div id="doclocker-body"></div>
     </section>
 
     <section id="messages-view" class="view">
@@ -4642,7 +4667,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           <p>Signed times and FDP remaining, per leg</p>
         </div>
       </div>
-      <div id="motlog-body"><p class="placeholder-note">Loading…</p></div>
+      <div id="motlog-body"></div>
     </section>
 
     <section id="sign-view" class="view">
@@ -4675,14 +4700,14 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         <button class="tab-btn" id="tab-layers-btn" onclick="showScheduleTab('layers')">Bid Layers</button>
       </div>
       <div id="tab-mytrip" class="tab-panel active">
-        <div id="pairing-body"><p class="placeholder-note">Loading…</p></div>
+        <div id="pairing-body"></div>
       </div>
       <div id="tab-library" class="tab-panel">
         <div id="library-crumb" style="padding:10px 14px;font-size:12.5px;color:var(--label);"></div>
-        <div id="library-body"><p class="placeholder-note">Loading…</p></div>
+        <div id="library-body"></div>
       </div>
       <div id="tab-layers" class="tab-panel">
-        <div id="layers-body"><p class="placeholder-note">Loading…</p></div>
+        <div id="layers-body"></div>
       </div>
     </section>
     <section id="recovery-view" class="view">
@@ -4844,7 +4869,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         <button class="back-link" onclick="showView('settings')" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
         <div class="topbar-title"><h1>Crew &amp; Documents</h1></div>
       </div>
-      <div id="admin-body"><p class="placeholder-note">Loading…</p></div>
+      <div id="admin-body"></div>
     </section>
     <section id="confirm-view" class="view">
       <div class="topbar">
@@ -4920,6 +4945,19 @@ FOS_TEMPLATE = """<!DOCTYPE html>
       <span>More</span>
     </button>
   </nav>
+</div>
+<!-- The bear artwork is NOT in this repository: static/ has only the
+     plane-and-pin app icons. Until static/nac-bear.svg is added, onerror
+     removes the <img> entirely — no broken-image icon, and no layout shift,
+     since .lo-mark's size is its own and never depends on the image. It
+     starts hidden and is only revealed on load, so the broken state is never
+     painted even for a frame. -->
+<div id="load-overlay" hidden role="status" aria-live="polite" aria-label="Loading">
+  <div class="lo-scrim"></div>
+  <div class="lo-center">
+    <div class="lo-mark"><img id="lo-bear" src="/static/nac-bear.svg" alt="" hidden onload="this.hidden=false" onerror="this.remove()"></div>
+    <div class="lo-spinner"></div>
+  </div>
 </div>
 <div id="toast"></div>
 <script>
@@ -5434,6 +5472,55 @@ function exportToForeFlight(){
   document.body.removeChild(link);
   showToast('Opening in ForeFlight…');
 }
+// ---------------------------------------------------------------------------
+// Loading overlay — the one loading state in this app, in place of the copies
+// of <p class="placeholder-note">Loading…</p> that each load site used to
+// write into its own container. Sits between the header and the bottom nav
+// (see #load-overlay's CSS) and leaves both fully visible.
+//
+// showLoading(el) takes the element whose content is being loaded and takes
+// itself down again as soon as that element's content changes — so each site
+// is one call with no hideLoading() to forget on an error path. Every one of
+// them writes into that same element either way, content or error message.
+// ---------------------------------------------------------------------------
+let _loadObserver = null;
+let _loadTimer = null;
+function _positionLoadOverlay(){
+  const overlay = document.getElementById('load-overlay');
+  if(!overlay) return;
+  // Measured, not assumed: .topbar is sticky and its height moves with its
+  // own title and the device's safe-area inset, and the doc-ack banner can
+  // sit above it.
+  const topbar = document.querySelector('.view.active .topbar');
+  const tabbar = document.querySelector('.tabbar');
+  overlay.style.top = Math.max(0, topbar ? topbar.getBoundingClientRect().bottom : 0) + 'px';
+  overlay.style.bottom = (tabbar ? tabbar.getBoundingClientRect().height : 0) + 'px';
+}
+function showLoading(el){
+  const overlay = document.getElementById('load-overlay');
+  if(!overlay) return;
+  hideLoading();
+  _positionLoadOverlay();
+  overlay.hidden = false;
+  if(el && window.MutationObserver){
+    _loadObserver = new MutationObserver(hideLoading);
+    _loadObserver.observe(el, {childList: true, subtree: true, characterData: true});
+  }
+  // Backstop — nothing should stay covered forever if a load somehow neither
+  // renders nor reports.
+  _loadTimer = setTimeout(hideLoading, 45000);
+}
+function hideLoading(){
+  const overlay = document.getElementById('load-overlay');
+  if(overlay) overlay.hidden = true;
+  if(_loadObserver){ _loadObserver.disconnect(); _loadObserver = null; }
+  if(_loadTimer){ clearTimeout(_loadTimer); _loadTimer = null; }
+}
+window.addEventListener('resize', () => {
+  const overlay = document.getElementById('load-overlay');
+  if(overlay && !overlay.hidden) _positionLoadOverlay();
+});
+
 let toastTimer;
 function showToast(msg){
   const t = document.getElementById('toast');
@@ -5580,7 +5667,7 @@ function closePdfView(){
 async function showMotLog(){
   showView('motlog');
   const body = document.getElementById('motlog-body');
-  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  showLoading(body);
   if(!LEG_SEQ){ body.innerHTML = '<p class="placeholder-note">This flight isn’t tied to a sequence.</p>'; return; }
   try {
     const r = await fetch('/pbs/sequences/' + encodeURIComponent(LEG_SEQ) + '/mot-log');
@@ -5783,7 +5870,7 @@ async function initPairingView(){
   // as before Schedule became leg-independent. Only /schedule itself
   // (LEG_SEQ empty) falls through to the pool-wide list/empty-state.
   if(LEG_SEQ){ await myTripShowDetail(LEG_SEQ, false); return; }
-  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  showLoading(body);
   try {
     const r = await fetch('/pbs/sequences');
     const seqs = await r.json();
@@ -5852,7 +5939,7 @@ async function tidyMyTrips(){
 }
 async function myTripShowDetail(seqNumber, showBack){
   const body = document.getElementById('pairing-body');
-  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  showLoading(body);
   try {
     const r = await fetch('/pbs/sequences/' + encodeURIComponent(seqNumber));
     const data = await r.json();
@@ -6318,7 +6405,7 @@ function libraryRoutingHtml(routing, layoverIndices){
 async function libraryShowOprs(){
   _libraryPath = {opr: null, base: null, fleet: null};
   const body = document.getElementById('library-body');
-  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  showLoading(body);
   try {
     const r = await fetch('/pbs/packs');
     const packs = await r.json();
@@ -6341,7 +6428,7 @@ async function libraryShowOprs(){
 }
 async function libraryShowBases(){
   const body = document.getElementById('library-body');
-  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  showLoading(body);
   try {
     const r = await fetch('/pbs/packs');
     const packs = (await r.json()).filter(p => p.opr === _libraryPath.opr);
@@ -6358,7 +6445,7 @@ async function libraryShowBases(){
 }
 async function libraryShowFleets(){
   const body = document.getElementById('library-body');
-  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  showLoading(body);
   try {
     const r = await fetch('/pbs/packs');
     const packs = (await r.json()).filter(p => p.opr === _libraryPath.opr && p.base === _libraryPath.base);
@@ -6422,7 +6509,7 @@ async function libraryShowSequences(sort){
   sort = sort || '';
   const {opr, base, fleet} = _libraryPath;
   const body = document.getElementById('library-body');
-  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  showLoading(body);
   try {
     const r = await fetch('/pbs/packs/' + opr + '/' + base + '/' + fleet + '/sequences' + (sort ? ('?sort=' + encodeURIComponent(sort)) : ''));
     const seqs = await r.json();
@@ -6439,7 +6526,7 @@ async function libraryShowSequences(sort){
 async function libraryShowSequenceDetail(seqNumber){
   const {opr, base, fleet} = _libraryPath;
   const body = document.getElementById('library-body');
-  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  showLoading(body);
   try {
     const r = await fetch('/pbs/packs/' + opr + '/' + base + '/' + fleet + '/sequences/' + encodeURIComponent(seqNumber));
     const seqData = await r.json();
@@ -6514,7 +6601,7 @@ async function promoteAndFly(opr, base, fleet, seqNumber){
 let _layersLoaded = false;
 async function layerShowList(){
   const body = document.getElementById('layers-body');
-  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  showLoading(body);
   try {
     const r = await fetch('/pbs/layers');
     const layers = await r.json();
@@ -6945,7 +7032,7 @@ function _pairingSortControl(sort, onChange){
 async function layerShowPairings(layer, sort){
   sort = sort || '';
   const body = document.getElementById('layers-body');
-  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  showLoading(body);
   try {
     const r = await fetch('/pbs/layers/' + layer.id + '/pairings' + (sort ? ('?sort=' + encodeURIComponent(sort)) : ''));
     const data = await r.json();
@@ -6998,7 +7085,7 @@ async function layerShowSequenceDetail(layer, match){
   const {opr, base, fleet} = match;
   const seqNumber = match.seq;
   const body = document.getElementById('layers-body');
-  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  showLoading(body);
   try {
     const r = await fetch('/pbs/packs/' + opr + '/' + base + '/' + fleet + '/sequences/' + encodeURIComponent(seqNumber));
     const seqData = await r.json();
@@ -7468,7 +7555,7 @@ function _adminSection(title){
 }
 async function initAdminView(){
   const body = document.getElementById('admin-body');
-  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  showLoading(body);
   let data;
   try {
     const r = await fetch('/admin/stats');
@@ -7535,7 +7622,7 @@ async function initAdminView(){
 }
 async function adminShowUser(userId){
   const body = document.getElementById('admin-body');
-  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  showLoading(body);
   let d;
   try {
     const r = await fetch('/admin/users/' + userId);
@@ -7620,7 +7707,7 @@ function _fmtDocSize(bytes){
 }
 async function initDocLocker(){
   const body = document.getElementById('doclocker-body');
-  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  showLoading(body);
   try {
     const r = await fetch('/docs/list');
     const data = await r.json();
@@ -7944,7 +8031,7 @@ async function loadWeather(){
     body.innerHTML = '<p class="placeholder-note">Send this flight to SimBrief first to get a username on file.</p>';
     return;
   }
-  body.innerHTML = '<p class="placeholder-note">Loading…</p>';
+  showLoading(body);
   try {
     const r = await fetch('/fos/' + LEG_ID + '/weather', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({user_id:userId})});
     const data = await r.json();
