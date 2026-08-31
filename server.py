@@ -4412,6 +4412,21 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   /* The global reduce rule near the top already kills this; stated again so
      the spinner's own behavior is readable where the spinner is defined. */
   @media (prefers-reduced-motion: reduce){ .lo-spinner{animation:none;} }
+  /* Tab strip for the shared PDF viewer. Hidden at one tab: on a phone the
+     title bar already names a lone document, and a strip holding a single
+     chip is pure vertical cost. Scrolls sideways rather than wrapping, so
+     the pages below never shift down as tabs are opened. */
+  .pdf-tabs{display:none;gap:6px;overflow-x:auto;padding:8px 14px;background:var(--card);
+    border-bottom:1px solid var(--border);-webkit-overflow-scrolling:touch;scrollbar-width:none;}
+  .pdf-tabs::-webkit-scrollbar{display:none;}
+  .pdf-tab{flex:0 0 auto;display:flex;align-items:center;gap:7px;margin:0;padding:6px 10px;
+    background:var(--bg);color:var(--label);border:1px solid var(--border);border-radius:7px;
+    font-size:12.5px;font-weight:600;max-width:190px;cursor:pointer;}
+  .pdf-tab.active{background:var(--blue);color:#fff;border-color:var(--blue);}
+  .pdf-tab > span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  /* A real hit target on a touch screen without making the chip taller. */
+  .pdf-tab-x{flex:0 0 auto;font-size:15px;line-height:1;opacity:.65;padding:2px 3px;margin:-2px -3px;}
+  .pdf-tab-x:hover{opacity:1;}
   .view{display:none;}
   .view.active{display:block;}
   #toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(12px);background:#1a1f29;color:#fff;padding:9px 16px;border-radius:20px;font-size:13px;opacity:0;pointer-events:none;transition:opacity .18s ease, transform .18s ease;box-shadow:0 4px 14px rgba(0,0,0,.25);z-index:10;}
@@ -4681,6 +4696,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           <h1 id="pdf-view-title"></h1>
         </div>
       </div>
+      <div id="pdf-tabs" class="pdf-tabs"></div>
       <div id="pdf-ffd-banner" class="ffd-banner" style="display:none;">Fit for Duty not signed — you can view this document, but Export is locked until you sign it.</div>
       <div id="pdf-ack-bar" style="display:none;padding:11px 14px;background:var(--card);border-bottom:1px solid var(--border);align-items:center;gap:10px;">
         <span id="pdf-ack-text" style="font-size:12.5px;color:var(--label);flex:1;"></span>
@@ -5675,49 +5691,144 @@ async function renderPdfInline(bytes){
     await page.render({canvasContext: canvas.getContext('2d'), viewport}).promise;
   }
 }
+// ---------------------------------------------------------------------
+// Tabbed PDF viewer. One #pdf-view is shared by release paperwork and by
+// company documents, so the strip covers both kinds at once and a release,
+// its W&B and a manual can all be held open together.
+//
+// A tab keeps the PDF BYTES and re-renders when selected; only the ACTIVE
+// tab has canvases in the DOM. That split is deliberate. Bytes are a few
+// hundred KB, but a rendered page at device pixel ratio is roughly 2.7 MB,
+// so an OFP is ~50 MB of canvas — keeping several tabs' pages alive is how
+// you get iOS Safari to evict the whole app mid-flight.
+let _pdfTabs = [];
+let _activePdfTab = null;
+
+function _pdfTabIndex(key){ return _pdfTabs.findIndex(t => t.key === key); }
+
+function renderPdfTabs(){
+  const strip = document.getElementById('pdf-tabs');
+  strip.innerHTML = '';
+  strip.style.display = _pdfTabs.length > 1 ? 'flex' : 'none';
+  _pdfTabs.forEach(t => {
+    const el = document.createElement('button');
+    el.type = 'button';
+    el.className = 'pdf-tab' + (t.key === _activePdfTab ? ' active' : '');
+    el.onclick = () => activatePdfTab(t.key);
+    const name = document.createElement('span');
+    name.textContent = t.label;
+    el.appendChild(name);
+    const x = document.createElement('span');
+    x.className = 'pdf-tab-x';
+    x.textContent = "\u00d7";
+    x.setAttribute('aria-label', 'Close ' + t.label);
+    x.onclick = (e) => { e.stopPropagation(); closePdfTab(t.key); };
+    el.appendChild(x);
+    strip.appendChild(el);
+  });
+  const active = strip.querySelector('.pdf-tab.active');
+  if(active && active.scrollIntoView) active.scrollIntoView({block:'nearest', inline:'nearest'});
+}
+
+// Opens a document, or focuses it if it is already open. Re-opening also
+// refreshes the stored copy, so a regenerated release replaces its tab
+// instead of leaving a stale one beside a new one.
+async function openPdfTab(tab){
+  const i = _pdfTabIndex(tab.key);
+  if(i >= 0) _pdfTabs[i] = tab; else _pdfTabs.push(tab);
+  showView('pdf');
+  await activatePdfTab(tab.key);
+}
+
+async function activatePdfTab(key){
+  const tab = _pdfTabs[_pdfTabIndex(key)];
+  if(!tab) return;
+  _activePdfTab = key;
+  renderPdfTabs();
+  document.getElementById('pdf-view-title').textContent = tab.label;
+  const exportLink = document.getElementById('pdf-export-link');
+  const banner = document.getElementById('pdf-ffd-banner');
+  // One blob URL at a time, for whichever tab is showing.
+  if(_pdfObjectUrl){ URL.revokeObjectURL(_pdfObjectUrl); _pdfObjectUrl = null; }
+  if(tab.kind === 'company'){
+    // The same object the tab holds, so acknowledging updates both at once.
+    _currentCompanyDoc = tab.meta;
+    banner.style.display = 'none';
+    // Company documents are read-in-app only: no Export control, and no
+    // blob URL minted for them either.
+    exportLink.style.display = 'none';
+    exportLink.removeAttribute('href');
+    exportLink.removeAttribute('download');
+    paintCompanyDocAckBar();
+  } else {
+    _currentCompanyDoc = null;
+    document.getElementById('pdf-ack-bar').style.display = 'none';
+    // Export uses a blob URL (fine for downloads); the inline VIEW uses
+    // PDF.js on canvas, since iOS Safari routinely refuses to render a PDF
+    // inside an iframe at all and kicks out to the system viewer instead.
+    _pdfObjectUrl = URL.createObjectURL(new Blob([tab.bytes], {type:'application/pdf'}));
+    exportLink.style.display = '';
+    // Soft gate — viewing always works; Export locks until FFD is signed.
+    if(tab.meta.fitForDuty){
+      exportLink.href = _pdfObjectUrl;
+      exportLink.download = tab.meta.exportName;
+      exportLink.style.opacity = '';
+      exportLink.onclick = null;
+      banner.style.display = 'none';
+    } else {
+      exportLink.removeAttribute('href');
+      exportLink.style.opacity = '0.4';
+      exportLink.onclick = (e) => { e.preventDefault(); showToast('Sign Fit for Duty first to export'); };
+      banner.style.display = '';
+    }
+  }
+  try {
+    // .slice() is load-bearing: PDF.js takes ownership of the buffer it is
+    // handed and detaches it, which would leave this tab holding an empty
+    // array the second time it is selected.
+    await renderPdfInline(tab.bytes.slice());
+  } catch(e) {
+    document.getElementById('pdf-pages').innerHTML = '<p style="color:#fff;padding:20px;">Failed to render this PDF: ' + e + '</p>';
+  }
+}
+
+function closePdfTab(key){
+  const i = _pdfTabIndex(key);
+  if(i < 0) return;
+  _pdfTabs.splice(i, 1);
+  if(key !== _activePdfTab){ renderPdfTabs(); return; }
+  _pdfRenderToken++; // whatever is rendering belongs to a tab that is gone
+  if(!_pdfTabs.length){
+    _activePdfTab = null;
+    renderPdfTabs();
+    closePdfView();
+    return;
+  }
+  activatePdfTab(_pdfTabs[Math.min(i, _pdfTabs.length - 1)].key);
+}
+
 async function viewDoc(kind, label){
   const data = await ensureRelease();
   if(!data) return;
   const field = {rls:'rls_pdf_b64', fi:'fi_pdf_b64', fil:'fil_pdf_b64', wb:'wb_pdf_b64', weather:'weather_pdf_b64', notams:'notams_pdf_b64', field_report:'field_report_pdf_b64'}[kind];
   const b64 = data[field];
   if(!b64){ showToast(label + ' not available in this release'); return; }
-  document.getElementById('pdf-view-title').textContent = label;
-  showView('pdf');
-  // pdf-view is shared with the company-doc viewer — clear that state so a
-  // release PDF never shows the previous document's Acknowledge bar.
-  _currentCompanyDoc = null;
-  document.getElementById('pdf-ack-bar').style.display = 'none';
-  // Export still uses a blob: URL (fine for downloads) — the inline VIEW uses
-  // PDF.js on canvas instead of an iframe, since iOS Safari routinely refuses
-  // to render PDFs inside an iframe at all (blob or data:, doesn't matter)
-  // and silently kicks out to the system PDF viewer instead.
-  if(_pdfObjectUrl) URL.revokeObjectURL(_pdfObjectUrl);
-  _pdfObjectUrl = URL.createObjectURL(new Blob([b64ToBytes(b64)], {type:'application/pdf'}));
-  const exportLink = document.getElementById('pdf-export-link');
-  // Release PDFs are exportable — restore the link the company-doc viewer
-  // hides, since both share this one pdf-view.
-  exportLink.style.display = '';
-  const banner = document.getElementById('pdf-ffd-banner');
-  // Soft gate — viewing always works; Export locks until FFD is signed,
-  // with a floating banner above the rendered pages as the reminder.
-  if(data.fit_for_duty){
-    exportLink.href = _pdfObjectUrl;
-    exportLink.download = kind === 'rls' ? data.filename : (data.filename || 'release.pdf').replace('-RLS.pdf', '-' + kind.toUpperCase() + '.pdf');
-    exportLink.style.opacity = '';
-    exportLink.onclick = null;
-    banner.style.display = 'none';
-  } else {
-    exportLink.removeAttribute('href');
-    exportLink.style.opacity = '0.4';
-    exportLink.onclick = (e) => { e.preventDefault(); showToast('Sign Fit for Duty first to export'); };
-    banner.style.display = '';
-  }
-  try {
-    await renderPdfInline(b64ToBytes(b64));
-  } catch(e) {
-    document.getElementById('pdf-pages').innerHTML = '<p style="color:#fff;padding:20px;">Failed to render this PDF: ' + e + '</p>';
-  }
+  await openPdfTab({
+    key: 'rel:' + kind,
+    label: label,
+    kind: 'release',
+    bytes: b64ToBytes(b64),
+    meta: {
+      fitForDuty: !!data.fit_for_duty,
+      exportName: kind === 'rls' ? data.filename
+                : (data.filename || 'release.pdf').replace('-RLS.pdf', '-' + kind.toUpperCase() + '.pdf'),
+    },
+  });
 }
+
+// Leaves the viewer without discarding the tabs — reopening any document
+// brings the whole set back, which is the point of having them. Only
+// closing the last tab tears the viewer down.
 function closePdfView(){
   _pdfRenderToken++; // cancel any render still in flight
   document.getElementById('pdf-pages').innerHTML = '';
@@ -5725,7 +5836,8 @@ function closePdfView(){
   // pdf-view is shared: a release PDF backs out to All Commands, but a
   // company doc came from the Docs tab — and All Commands is leg-scoped,
   // so on /docs (no leg) backing out there lands on an empty view.
-  const wasCompanyDoc = !!_currentCompanyDoc;
+  const active = _pdfTabs[_pdfTabIndex(_activePdfTab)];
+  const wasCompanyDoc = active ? active.kind === 'company' : !!_currentCompanyDoc;
   _currentCompanyDoc = null;
   showView(wasCompanyDoc ? 'doclocker' : 'allcommands');
 }
@@ -5886,6 +5998,9 @@ async function submitSignature(){
       // leg nothing was ever generated for would just raise a confusing error.
       const hadRelease = !!_getReleaseCache();
       _setReleaseCache(null);
+      // Any release tab already open still holds the pre-sign flag;
+      // without this its Export stays greyed until the tab is reopened.
+      _pdfTabs.forEach(t => { if(t.kind === 'release') t.meta.fitForDuty = true; });
       if(hadRelease && document.getElementById('release-user')) generateRelease();
     }
     showToast('Signed');
@@ -7818,35 +7933,23 @@ async function initDocLocker(){
 }
 let _currentCompanyDoc = null;
 async function viewCompanyDoc(docId){
-  showToast('Opening…');
+  showToast("Opening\u2026");
   let data;
   try {
     const r = await fetch('/docs/' + docId + '/pdf');
     data = await r.json();
     if(!r.ok){ showToast(data.error || 'Could not open that document'); return; }
   } catch(e) { showToast('Request failed: ' + e); return; }
-  _currentCompanyDoc = data;
-  document.getElementById('pdf-view-title').textContent = data.title;
-  showView('pdf');
   // No FFD gate on a company doc — that one is about a specific flight's
-  // release, not a manual.
-  document.getElementById('pdf-ffd-banner').style.display = 'none';
-  // Company documents are read-in-app only: no Export control, and
-  // deliberately no blob: URL minted for them either — _pdfObjectUrl is
-  // purely the export link's href, so creating one here would leave a
-  // downloadable handle to the file with nothing pointing at it.
-  // renderPdfInline takes the bytes directly and needs no URL.
-  if(_pdfObjectUrl){ URL.revokeObjectURL(_pdfObjectUrl); _pdfObjectUrl = null; }
-  const exportLink = document.getElementById('pdf-export-link');
-  exportLink.style.display = 'none';
-  exportLink.removeAttribute('href');
-  exportLink.removeAttribute('download');
-  paintCompanyDocAckBar();
-  try {
-    await renderPdfInline(b64ToBytes(data.pdf_b64));
-  } catch(e) {
-    document.getElementById('pdf-pages').innerHTML = '<p style="color:#fff;padding:20px;">Failed to render this PDF: ' + e + '</p>';
-  }
+  // release, not a manual. meta is the doc object itself, so acknowledging
+  // it updates the tab in place.
+  await openPdfTab({
+    key: 'doc:' + docId,
+    label: data.title,
+    kind: 'company',
+    bytes: b64ToBytes(data.pdf_b64),
+    meta: data,
+  });
 }
 function paintCompanyDocAckBar(){
   const bar = document.getElementById('pdf-ack-bar');
