@@ -8926,7 +8926,12 @@ function renderWeather(stations){
     showView(view || 'pairing');
     return;
   }
-  if(view === 'pairing' || view === 'release' || view === 'confirm' || view === 'settings' || view === 'doclocker') showView(view);
+  // Any view that actually exists, rather than a hand-kept list. Home's tab
+  // bar sends leg-scoped tabs here as /fos/<id>?view=<tab>, and 'messages'
+  // was never added to the old list — so tapping Messages on Home silently
+  // landed on Overview instead, which read as the release messages not
+  // working at all.
+  if(view && view !== 'overview' && document.getElementById(view + '-view')) showView(view);
   else initOverviewPills();
   // Repaint the AeroAPI panel from what is already on the leg. This is the
   // half of "no second API call" the server cannot do on its own: the
