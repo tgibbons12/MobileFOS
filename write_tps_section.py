@@ -1069,10 +1069,21 @@ def write_takeoff_performance_string(
         if is_erj:
             output += f"{'RWY':<5} {flap_label:<5} {'V1':>3} {'VR':>3} {'V2':>3} {'V215':>4} {'VFS':>4}   {thr_column_label:<6}   {'MTOW':<6}\n"
         elif is_airbus:
-            # AOM order and spacing: thrust setting BEFORE the V-speeds,
-            # tokens at cols 0/6/12/18/24/28/32/38/45.
-            output += (f"{'RWY':<6}{flap_label:<6}{ac_label:<6}{thr_column_label:<6}"
-                       f"{'V1':>2}  {'VR':>2}  {'V2':>2}    {'AT':<7}{'MTOW'}\n")
+            # AOM order (thrust setting BEFORE the V-speeds) on a fixed
+            # grid: RWY 0, CONF 6, APU 12, THR 17, V1 25, VR 29, V2 33,
+            # AT 38, MTOW right-aligned to end at 53. Every row type here
+            # — normal, and the non-standard-message rows further down —
+            # uses these same columns, and every one comes to 54 characters
+            # against the 58-wide separator.
+            #
+            # Two of the widths are load-bearing rather than cosmetic.
+            # THR is 8, because N1 reaches "100.0" (5) and anything
+            # narrower does not truncate, it shoves every following column
+            # right on exactly the rows that hit three digits. AT is 9,
+            # because its longest values are MAX-TEMP and MAX-SPCL at 8,
+            # and a narrower field runs them into MTOW: "MAX-TEMP205.0S".
+            output += (f"{'RWY':<6}{flap_label:<6}{ac_label:<5}{thr_column_label:<8}"
+                       f"{'V1':>3} {'VR':>3} {'V2':>3}  {'AT':<9}{'MTOW':>7}\n")
         else:
             output += f"{'RWY':<5} {flap_label:<5} {ac_label:<4} {'V1':>3} {'VR':>3} {'V2':>3}   {thr_column_label:<7} {'AT':<8}   {'MTOW':<6}\n"
         output += "-" * 58 + "\n"
@@ -1514,8 +1525,11 @@ def write_takeoff_performance_string(
 
             _MSG_MAP = {
                 'PTOW EXCEEDS MTOW ALL FLAPS': 'PTOW EXCEEDS MTOW ALL FLAPS',
-                'PTOW EXCEEDS MTOW':           'PTOW EXCEEDS MTOW - RQST NEW TPS',
-                'FLAP N/A':                    'FLAP N/A THIS RWY - RQST NEW TPS',
+                # 30 chars exactly, which is what the AT/MTOW columns leave
+                # for a message. The dash loses its surrounding spaces to get
+                # there, matching WIND ADJM-CALL directly below.
+                'PTOW EXCEEDS MTOW':           'PTOW EXCEEDS MTOW-RQST NEW TPS',
+                'FLAP N/A':                    'FLAP N/A THIS RWY-RQST NEW TPS',
                 'WIND ADJ':                    'WIND ADJM-CALL LOADS OR COMPUTE DATA',
                 'WIND ADJM':                   'WIND ADJM-CALL LOADS OR COMPUTE DATA',
             }
@@ -1727,6 +1741,13 @@ def write_takeoff_performance_string(
                 mtow_suffix = f"{mtow:<6}" if mtow else ""
                 if is_erj:
                     output += f"{rwy:<5} {flap_fmt:<5} {msg_field}{mtow_suffix}\n"
+                elif is_airbus:
+                    # The shared format below belongs to the non-Airbus table,
+                    # whose MTOW sits at col 50. Using it here put MTOW in a
+                    # third column, so one Airbus table could show it at 45,
+                    # 47 and 50 on consecutive rows. This keeps every Airbus
+                    # row's MTOW in the same place a normal row puts it.
+                    output += f"{rwy:<6}{flap_fmt:<6}{apu_status:<5}{rwy_message:<30}{mtow:>7}\n"
                 else:
                     output += f"{rwy:<5} {flap_fmt:<5} {apu_status:<4} {msg_field}{mtow_suffix}\n"
             elif is_erj:
@@ -1734,8 +1755,8 @@ def write_takeoff_performance_string(
                 output += (f"{rwy:<5} {flap_fmt:<5} {v1:>3} {vr:>3} {v2:>3} {v215_display:>4} "
                            f"{vfs_display:>4}   {thr_display:<6}   {mtow:<6}\n")
             else:
-                output += (f"{rwy:<6}{flap_fmt:<6}{apu_status:<5}{thr_display:>4}  "
-                           f"{v1:>3} {vr:>3} {v2:>3}    {at_display:<6}{mtow:>6}\n") if is_airbus else \
+                output += (f"{rwy:<6}{flap_fmt:<6}{apu_status:<5}{thr_display:<8}"
+                           f"{v1:>3} {vr:>3} {v2:>3}  {at_display:<9}{mtow:>7}\n") if is_airbus else \
                          f"{rwy:<5} {flap_fmt:<5} {apu_status:<4} {v1:>3} {vr:>3} {v2:>3}   {thr_display:<7} {at_display:<8}   {mtow:<6}\n"
             output += "-" * 58 + "\n"
 
