@@ -1025,14 +1025,18 @@ def engine_family(engine):
 # 0.010 low (AA prints 1.61 at OAT 18, 24 and 26; this grid gives 1.600).
 # That offset is expected, not a defect — do not "fix" it.
 #
-# The N1 grids are the other way round: they come from the Delta ODMs,
-# because those publish the full table and no sim measurement was needed.
-# They reproduce five real AA sheets to 0.04 N1, so manual and real
-# aircraft agree there. What is NOT established is whether ToLiss agrees
-# with them — no CFM N1 has been read out of the sim. If a pilot ever
-# reports the ECAM disagreeing with a printed N1, that is the gap to
-# check first, and the fix would be to re-key those grids the same way
-# the EPR ones are keyed.
+# The N1 grids are keyed to the real AA TPS instead, by decision — the
+# sim is not the reference for these and is not to be measured against
+# them. The Delta ODM tables are kept because they ARE that data at
+# higher resolution: they reproduce all fifteen values across the five
+# real AA A321 -5B3/P sheets to 0.04 N1, which is rounding. Five sheets
+# alone would cover four temperatures at two altitudes; the ODM covers
+# -54..54C over -1000..8000 ft and agrees with them everywhere they
+# overlap, so it is strictly the better form of the same source.
+#
+# The consequence to be aware of: EPR follows the sim, N1 follows the
+# real aircraft. If a ToLiss ECAM ever disagrees with a printed N1, that
+# is expected under this policy and is not a defect to chase.
 #
 # One real difference is also unresolved: AA's MAX EPR rises with
 # altitude (1.61 near sea level, 1.64 at PA 3653) where ToLiss falls
