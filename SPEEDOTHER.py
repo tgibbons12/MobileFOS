@@ -1015,6 +1015,31 @@ def engine_family(engine):
     return None, None
 
 
+# WHICH AIRCRAFT EACH GRID IS KEYED TO
+# -----------------------------------
+# The EPR grids are keyed to ToLiss, deliberately, and are NOT corrected
+# toward the real AA sheets. The number this app prints is a crosscheck
+# against the ECAM the pilot is actually looking at, so agreeing with the
+# aircraft in front of them beats agreeing with a document. Measured on
+# the three near-sea-level AA A321 -A5 sheets, ToLiss reads a uniform
+# 0.010 low (AA prints 1.61 at OAT 18, 24 and 26; this grid gives 1.600).
+# That offset is expected, not a defect — do not "fix" it.
+#
+# The N1 grids are the other way round: they come from the Delta ODMs,
+# because those publish the full table and no sim measurement was needed.
+# They reproduce five real AA sheets to 0.04 N1, so manual and real
+# aircraft agree there. What is NOT established is whether ToLiss agrees
+# with them — no CFM N1 has been read out of the sim. If a pilot ever
+# reports the ECAM disagreeing with a printed N1, that is the gap to
+# check first, and the fix would be to re-key those grids the same way
+# the EPR ones are keyed.
+#
+# One real difference is also unresolved: AA's MAX EPR rises with
+# altitude (1.61 near sea level, 1.64 at PA 3653) where ToLiss falls
+# (1.600 at PA 0, 1.589 at PA 5020). The published CFM N1 table rises
+# too, so ToLiss is the outlier. Keyed to ToLiss, this grid follows
+# ToLiss.
+
 # Flat-rate reference temperature (Tref) for the IAE V2533-A5, read off 112
 # takeoff-analysis pages of the A321-231 ODM (issue 10 SEP 13). Tref is the
 # temperature above which thrust starts falling off — the knee in every
