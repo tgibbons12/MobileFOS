@@ -490,7 +490,14 @@ def _require_login():
 
 AUTH_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
 <script>(function(){var t=localStorage.getItem('fos_theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);})();</script>
-<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<!-- No viewport-fit=cover. That is what makes the layout viewport span
+     the WHOLE screen, status bar included, and it is the actual reason
+     content sat under the frosted bar — the status-bar style only
+     decides how iOS paints over whatever is up there. Without it the
+     web view is laid out inside the safe area, so nothing is beneath
+     the bar to blur. It also means env(safe-area-inset-*) reports 0,
+     which every use here already handles by adding it to something. -->
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <!-- NOT black-translucent. That asks iOS to draw its status bar OVER the
@@ -3899,7 +3906,14 @@ def render_fos_html(leg, default_view=""):
 
 LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
 <script>(function(){var t=localStorage.getItem('fos_theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);})();</script>
-<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<!-- No viewport-fit=cover. That is what makes the layout viewport span
+     the WHOLE screen, status bar included, and it is the actual reason
+     content sat under the frosted bar — the status-bar style only
+     decides how iOS paints over whatever is up there. Without it the
+     web view is laid out inside the safe area, so nothing is beneath
+     the bar to blur. It also means env(safe-area-inset-*) reports 0,
+     which every use here already handles by adding it to something. -->
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="theme-color" content="#f5f5f7" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
 <meta name="mobile-web-app-capable" content="yes">
@@ -4488,7 +4502,14 @@ FOS_TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <script>(function(){var t=localStorage.getItem('fos_theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);})();</script>
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
+<!-- No viewport-fit=cover. That is what makes the layout viewport span
+     the WHOLE screen, status bar included, and it is the actual reason
+     content sat under the frosted bar — the status-bar style only
+     decides how iOS paints over whatever is up there. Without it the
+     web view is laid out inside the safe area, so nothing is beneath
+     the bar to blur. It also means env(safe-area-inset-*) reports 0,
+     which every use here already handles by adding it to something. -->
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="theme-color" content="#f5f5f7" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
 <meta name="mobile-web-app-capable" content="yes">
