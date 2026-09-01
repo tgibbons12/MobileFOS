@@ -1728,6 +1728,46 @@ def import_document():
     })
 
 
+@app.route("/docs/sync", methods=["POST"])
+def sync_documents():
+    """Body: {"slugs": [...], "dry_run": bool}. Makes the published set
+    match the uploader's folder by deleting every document whose slug is
+    NOT in the list.
+
+    Import on its own is add-or-update, so a file deleted from data/DOCS
+    stayed published forever with nothing in the app to say it was stale —
+    the reported "it caches old deleted ones". This is the other half.
+
+    Two deliberate guards, because this deletes PDFs that exist nowhere
+    else once removed (documents live in the database, not in the deployed
+    code):
+      * An empty slug list is refused outright. That is what an upload run
+        against the wrong directory looks like, and honouring it would wipe
+        every published document.
+      * dry_run returns exactly what WOULD go without touching anything,
+        so the uploader can show the list and ask before doing it.
+    """
+    denied = _admin_required("sync documents")
+    if denied:
+        return denied
+    body = request.get_json(silent=True) or {}
+    slugs = body.get("slugs")
+    if not isinstance(slugs, list) or not slugs:
+        return jsonify({"error": "slugs must be a non-empty list — refusing to "
+                                 "delete every document"}), 400
+    keep = {_doc_slug(str(x)) for x in slugs}
+    doomed = [d for d in Document.query.order_by(Document.title).all() if d.slug not in keep]
+    removed = [{"id": d.id, "slug": d.slug, "title": d.title, "filename": d.filename}
+               for d in doomed]
+    if body.get("dry_run"):
+        return jsonify({"would_remove": removed, "kept": len(keep)})
+    for d in doomed:
+        DocumentAck.query.filter_by(document_id=d.id).delete()
+        db.session.delete(d)
+    db.session.commit()
+    return jsonify({"removed": removed, "kept": len(keep)})
+
+
 @app.route("/docs/<int:doc_id>", methods=["DELETE"])
 def delete_document(doc_id):
     denied = _admin_required("delete documents")
@@ -4338,14 +4378,14 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .weight-grid>div{display:flex;flex-direction:column;align-items:center;gap:2px;background:var(--bg);border-radius:8px;padding:7px 4px;}
   .weight-grid .wg-lbl{font-size:10.5px;color:var(--label);text-transform:uppercase;letter-spacing:.03em;}
   .weight-grid .wg-val{font-size:13.5px;font-weight:700;color:var(--value);font-variant-numeric:tabular-nums;}
-  .topbar{display:flex;flex-wrap:wrap;align-items:center;margin-bottom:10px;position:sticky;top:0;z-index:10;background:var(--bg);padding-top:calc(env(safe-area-inset-top) + 6px);margin-top:-6px;margin-left:-16px;margin-right:-16px;padding-left:16px;padding-right:16px;}
+  .topbar{display:flex;flex-wrap:wrap;align-items:center;margin-bottom:10px;position:sticky;top:var(--ack-h,0px);z-index:10;background:var(--bg);padding-top:calc(env(safe-area-inset-top) + 14px);margin-top:-14px;margin-left:-16px;margin-right:-16px;padding-left:16px;padding-right:16px;}
   /* Tablet-width browsers (iPadOS Safari's tabbed mode among them) draw
      their own chrome — tab-strip controls, a floating "stoplight" cluster
      — over the top-left/top-right of the page that safe-area-inset can't
      account for (it only reports hardware notch/home-indicator, not
      browser UI). Extra clearance here is a defensive guess, not measured
      against a real device — right height still needs confirming there. */
-  @media (min-width: 768px){ .topbar{padding-top:calc(env(safe-area-inset-top) + 34px);} }
+  @media (min-width: 768px){ .topbar{padding-top:calc(env(safe-area-inset-top) + 42px);} }
   .back-link{order:1;display:flex;align-items:center;color:var(--value);background:none;border:none;cursor:pointer;padding:6px 4px;text-decoration:none;}
   .topbar-actions{order:2;margin-left:auto;display:flex;align-items:center;gap:14px;padding-right:38px;}
   .topbar-title{order:3;flex:1 1 100%;text-align:center;margin-top:2px;}
@@ -4416,6 +4456,14 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .doc-row .actions svg{width:19px;height:19px;color:var(--label);cursor:pointer;padding:7px;margin:-7px;box-sizing:content-box;}
   .doc-row .check{color:var(--inactive,#9aa1ab);cursor:pointer;}
   .ffd-banner{background:var(--red);color:#fff;font-size:13px;font-weight:600;line-height:1.4;padding:11px 17px;}
+  /* The doc-ack banner sits ABOVE .topbar in the document and used to be
+     static, so it scrolled away and came back — which reads as the header
+     growing and shrinking as you scroll. Pinning it keeps the header one
+     constant height, and keeps an unacknowledged-documents notice on screen
+     rather than only when you happen to be at the top.
+     It also has to outrank the loading overlay (15), or a load buries the
+     notice behind the translucent scrim. */
+  #doc-ack-banner{position:sticky;top:0;z-index:16;}
   .doc-row .check.signed{color:var(--blue-dark);}
   .doc-row .resign-link{font-size:12.5px;font-weight:600;color:var(--blue);cursor:pointer;text-decoration:none;white-space:nowrap;}
   .doc-row .primary-action{display:inline-flex;align-items:center;gap:10px;}
@@ -5857,9 +5905,17 @@ function hideLoading(){
   if(_loadTimer){ clearTimeout(_loadTimer); _loadTimer = null; }
 }
 window.addEventListener('resize', () => {
+  _syncAckBannerHeight();
   const overlay = document.getElementById('load-overlay');
   if(overlay && !overlay.hidden) _positionLoadOverlay();
 });
+// The overlay is positioned from the header's measured bottom edge, and a
+// sticky header's bottom edge moves while the browser chrome collapses on
+// scroll. Without this it keeps a stale top and creeps over the header.
+window.addEventListener('scroll', () => {
+  const overlay = document.getElementById('load-overlay');
+  if(overlay && !overlay.hidden) _positionLoadOverlay();
+}, {passive: true});
 
 let toastTimer;
 function showToast(msg){
@@ -8245,6 +8301,18 @@ function paintDocAckBanner(){
   } else {
     el.style.display = 'none';
   }
+  _syncAckBannerHeight();
+}
+
+// .topbar pins directly beneath the banner, so it has to know how tall the
+// banner actually is — it wraps to two lines on a narrow phone. Measured
+// rather than assumed, and re-measured on resize and rotation.
+function _syncAckBannerHeight(){
+  const el = document.getElementById('doc-ack-banner');
+  const h = (el && el.style.display !== 'none') ? el.getBoundingClientRect().height : 0;
+  document.documentElement.style.setProperty('--ack-h', h + 'px');
+  const overlay = document.getElementById('load-overlay');
+  if(overlay && !overlay.hidden) _positionLoadOverlay();
 }
 function _fmtDocSize(bytes){
   if(!bytes) return '';
