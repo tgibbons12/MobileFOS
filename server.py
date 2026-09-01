@@ -495,6 +495,30 @@ AUTH_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="MobileCCI">
+<script>
+// How much of the top of the window iOS is covering, which is NOT the same
+// as env(safe-area-inset-top).
+//
+// An iPad has no notch, so that inset is 0 — including in landscape, and
+// including when the app is installed to the home screen. But
+// apple-mobile-web-app-status-bar-style=black-translucent means iOS still
+// draws its translucent status bar OVER the page there. Trusting env()
+// alone is why the acknowledgement banner kept ending up underneath it: the
+// padding computed to 11px against a ~24pt overlay.
+//
+// So: take the inset when there is one (a notched phone reports 44-59), and
+// otherwise reserve a status bar's worth, but only in standalone — in a
+// normal browser tab nothing is overlaid and reserving space would just
+// waste it. Every top offset in the stylesheet reads this one value.
+(function(){
+  var standalone = window.navigator.standalone === true ||
+    (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+  var root = document.documentElement;
+  root.style.setProperty('--status-bar-min', standalone ? '24px' : '0px');
+  root.style.setProperty('--status-bar',
+    'max(env(safe-area-inset-top), var(--status-bar-min, 0px))');
+})();
+</script>
 <link rel="manifest" href="/static/manifest.json">
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <link rel="icon" href="/static/icon-192.png">
@@ -3771,6 +3795,30 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="MobileCCI">
+<script>
+// How much of the top of the window iOS is covering, which is NOT the same
+// as env(safe-area-inset-top).
+//
+// An iPad has no notch, so that inset is 0 — including in landscape, and
+// including when the app is installed to the home screen. But
+// apple-mobile-web-app-status-bar-style=black-translucent means iOS still
+// draws its translucent status bar OVER the page there. Trusting env()
+// alone is why the acknowledgement banner kept ending up underneath it: the
+// padding computed to 11px against a ~24pt overlay.
+//
+// So: take the inset when there is one (a notched phone reports 44-59), and
+// otherwise reserve a status bar's worth, but only in standalone — in a
+// normal browser tab nothing is overlaid and reserving space would just
+// waste it. Every top offset in the stylesheet reads this one value.
+(function(){
+  var standalone = window.navigator.standalone === true ||
+    (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+  var root = document.documentElement;
+  root.style.setProperty('--status-bar-min', standalone ? '24px' : '0px');
+  root.style.setProperty('--status-bar',
+    'max(env(safe-area-inset-top), var(--status-bar-min, 0px))');
+})();
+</script>
 <link rel="manifest" href="/static/manifest.json">
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <link rel="icon" href="/static/icon-192.png">
@@ -3797,10 +3845,9 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
      Home has no topbar of its own to hang a per-page icon off of. */
   /* Same treatment as the FOS template's copy: pinned, and it owns the
      safe-area inset because it is the topmost element. */
-  #doc-ack-banner{position:sticky;top:0;z-index:16;padding-top:calc(env(safe-area-inset-top) + 11px);}
-  .settings-fab{position:fixed;top:calc(var(--ack-h,0px) + var(--safe-top, env(safe-area-inset-top)) + 10px);right:calc(env(safe-area-inset-right) + 16px);z-index:25;background:var(--card);border:1px solid var(--border);border-radius:50%;width:34px;height:34px;display:flex;align-items:center;justify-content:center;color:var(--label);cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.12);}
+  #doc-ack-banner{position:sticky;top:0;z-index:16;padding-top:calc(var(--status-bar, 0px) + 11px);}
+  .settings-fab{position:fixed;top:calc(var(--ack-h,0px) + var(--safe-top, var(--status-bar, 0px)) + var(--topbar-lead, 14px));right:calc(env(safe-area-inset-right) + 16px);z-index:25;background:var(--card);border:1px solid var(--border);border-radius:50%;width:34px;height:34px;display:flex;align-items:center;justify-content:center;color:var(--label);cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.12);}
   .settings-fab svg{width:18px;height:18px;flex-shrink:0;}
-  @media (min-width: 768px){ .settings-fab{top:calc(var(--ack-h,0px) + var(--safe-top, env(safe-area-inset-top)) + 38px);} }
   h1{font-size:18px;color:var(--blue-dark);margin:0 0 16px;}
   label{display:block;font-size:13px;font-weight:600;margin:10px 0 4px;color:var(--value);}
   textarea, select, input[type=text]{width:100%;max-width:640px;font-family:inherit;font-size:13.5px;padding:9px 10px;border:1px solid var(--border);border-radius:5px;box-sizing:border-box;background:var(--card);color:var(--value);}
@@ -4293,6 +4340,30 @@ FOS_TEMPLATE = """<!DOCTYPE html>
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="MobileCCI">
+<script>
+// How much of the top of the window iOS is covering, which is NOT the same
+// as env(safe-area-inset-top).
+//
+// An iPad has no notch, so that inset is 0 — including in landscape, and
+// including when the app is installed to the home screen. But
+// apple-mobile-web-app-status-bar-style=black-translucent means iOS still
+// draws its translucent status bar OVER the page there. Trusting env()
+// alone is why the acknowledgement banner kept ending up underneath it: the
+// padding computed to 11px against a ~24pt overlay.
+//
+// So: take the inset when there is one (a notched phone reports 44-59), and
+// otherwise reserve a status bar's worth, but only in standalone — in a
+// normal browser tab nothing is overlaid and reserving space would just
+// waste it. Every top offset in the stylesheet reads this one value.
+(function(){
+  var standalone = window.navigator.standalone === true ||
+    (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+  var root = document.documentElement;
+  root.style.setProperty('--status-bar-min', standalone ? '24px' : '0px');
+  root.style.setProperty('--status-bar',
+    'max(env(safe-area-inset-top), var(--status-bar-min, 0px))');
+})();
+</script>
 <link rel="manifest" href="/static/manifest.json">
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <link rel="icon" href="/static/icon-192.png">
@@ -4390,20 +4461,28 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .weight-grid>div{display:flex;flex-direction:column;align-items:center;gap:2px;background:var(--bg);border-radius:8px;padding:7px 4px;}
   .weight-grid .wg-lbl{font-size:10.5px;color:var(--label);text-transform:uppercase;letter-spacing:.03em;}
   .weight-grid .wg-val{font-size:13.5px;font-weight:700;color:var(--value);font-variant-numeric:tabular-nums;}
-  .topbar{display:flex;flex-wrap:wrap;align-items:center;margin-bottom:10px;position:sticky;top:var(--ack-h,0px);z-index:10;background:var(--bg);padding-top:calc(var(--safe-top, env(safe-area-inset-top)) + var(--topbar-lead, 14px));margin-top:-14px;margin-left:-16px;margin-right:-16px;padding-left:16px;padding-right:16px;}
+  .topbar{display:flex;flex-wrap:wrap;align-items:center;margin-bottom:10px;position:sticky;top:var(--ack-h,0px);z-index:10;background:var(--bg);padding-top:calc(var(--safe-top, var(--status-bar, 0px)) + var(--topbar-lead, 14px));margin-top:-14px;margin-left:-16px;margin-right:-16px;padding-left:16px;padding-right:16px;}
   /* Tablet-width browsers (iPadOS Safari's tabbed mode among them) draw
      their own chrome — tab-strip controls, a floating "stoplight" cluster
      — over the top-left/top-right of the page that safe-area-inset can't
      account for (it only reports hardware notch/home-indicator, not
      browser UI). Extra clearance here is a defensive guess, not measured
      against a real device — right height still needs confirming there. */
-  /* Set on :root, not on .topbar, so the values below can be overridden
-     from script when the banner takes over as the topmost element —
-     an inline style on :root beats this, a rule on .topbar would not. */
-  @media (min-width: 768px){ :root{ --topbar-lead:42px; } }
+  /* --status-bar now guarantees clearance of the overlaid iOS status bar,
+     so the 42px this used to carry on tablets was doing that job twice
+     and made the header noticeably tall. The lead is just breathing
+     room now, and 18px is enough of it. */
+  @media (min-width: 768px){ :root{ --topbar-lead:18px; } }
   .back-link{order:1;display:flex;align-items:center;color:var(--value);background:none;border:none;cursor:pointer;padding:6px 4px;text-decoration:none;}
-  .topbar-actions{order:2;margin-left:auto;display:flex;align-items:center;gap:14px;padding-right:38px;}
-  .topbar-title{order:3;flex:1 1 100%;text-align:center;margin-top:2px;}
+  .topbar-actions{order:3;display:flex;align-items:center;gap:14px;padding-right:38px;}
+  /* The title used to be flex:1 1 100%, which forced it onto a SECOND row
+     under the back arrow and the actions and made the header about 30px
+     taller than it needed to be. It now shares the row, taking the space
+     between them; min-width:0 lets a long title ellipsise rather than
+     pushing the actions off the edge, and .topbar still wraps if a really
+     narrow screen leaves it no room. */
+  .topbar-title{order:2;flex:1 1 auto;min-width:0;text-align:center;}
+  .topbar-title h1{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .topbar-title h1{font-size:19px;margin:0;font-weight:600;color:var(--blue-dark);}
   .topbar-title p{font-size:12px;margin:2px 0 0;color:var(--label);}
   .icon-btn{background:none;border:none;color:var(--label);cursor:pointer;padding:2px;display:flex;}
@@ -4414,9 +4493,8 @@ FOS_TEMPLATE = """<!DOCTYPE html>
      way to guarantee it's on every single page without duplicating it
      into all 14 view sections. Sits clear of the topbar's own
      actions/title since it's positioned independently. */
-  .settings-fab{position:fixed;top:calc(var(--ack-h,0px) + var(--safe-top, env(safe-area-inset-top)) + 10px);right:calc(env(safe-area-inset-right) + 16px);z-index:25;background:var(--card);border:1px solid var(--border);border-radius:50%;width:34px;height:34px;display:flex;align-items:center;justify-content:center;color:var(--label);cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.12);}
+  .settings-fab{position:fixed;top:calc(var(--ack-h,0px) + var(--safe-top, var(--status-bar, 0px)) + var(--topbar-lead, 14px));right:calc(env(safe-area-inset-right) + 16px);z-index:25;background:var(--card);border:1px solid var(--border);border-radius:50%;width:34px;height:34px;display:flex;align-items:center;justify-content:center;color:var(--label);cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.12);}
   .settings-fab svg{width:18px;height:18px;flex-shrink:0;}
-  @media (min-width: 768px){ .settings-fab{top:calc(var(--ack-h,0px) + var(--safe-top, env(safe-area-inset-top)) + 38px);} }
   .status-bar{background:var(--navy);color:#fff;display:flex;align-items:center;justify-content:space-between;padding:8px 14px;border-radius:var(--radius) var(--radius) 0 0;font-size:13px;font-weight:600;}
   .flight-summary{background:var(--card);display:flex;align-items:center;padding:12px 14px;border-bottom:1px solid var(--border);font-size:13px;gap:18px;flex-wrap:wrap;}
   .flight-summary .fnum{font-size:15px;font-weight:700;}
@@ -4485,7 +4563,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
      the bar is no longer the thing holding the header off the screen
      edge. Both of those were double-counted on a real iPad and are
      invisible in a desktop emulator, where the inset is 0. */
-  #doc-ack-banner{position:sticky;top:0;z-index:16;padding-top:calc(env(safe-area-inset-top) + 11px);}
+  #doc-ack-banner{position:sticky;top:0;z-index:16;padding-top:calc(var(--status-bar, 0px) + 11px);}
   .doc-row .check.signed{color:var(--blue-dark);}
   .doc-row .resign-link{font-size:12.5px;font-weight:600;color:var(--blue);cursor:pointer;text-decoration:none;white-space:nowrap;}
   .doc-row .primary-action{display:inline-flex;align-items:center;gap:10px;}
