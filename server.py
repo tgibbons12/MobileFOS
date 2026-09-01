@@ -1316,6 +1316,68 @@ _CRITERION_VALUE_FOR = {
     "legs_per_day": lambda seq, summary: _seq_max_legs_per_day(seq),
 }
 _STATION_CRITERIA = {"layover_include", "include_stations", "avoid_stations"}
+# Equipment is per LEG, not per pairing — a trip can change aircraft between
+# days — so both the filter and the search look at every leg's code.
+_AC_CRITERIA = {"include_ac", "avoid_ac"}
+
+
+def _sequence_ac_codes(seq):
+    return {
+        (leg.get("equipment") or "").strip().upper()
+        for day in seq.get("duty_days") or []
+        for leg in day.get("legs") or []
+        if (leg.get("equipment") or "").strip()
+    }
+
+
+def _sequence_flight_numbers(seq):
+    return {
+        (leg.get("flight_number") or "").strip().upper()
+        for day in seq.get("duty_days") or []
+        for leg in day.get("legs") or []
+        if (leg.get("flight_number") or "").strip()
+    }
+
+
+def _sequence_matches_query(seq, summary, q):
+    """Free-text search over one pairing. One box, because a pilot looking
+    for "LAX" or "320S" or "1704" should not first have to say which KIND of
+    thing it is. Terms are ANDed, so "LAX 320S" means both.
+
+    Understands, per term:
+      SEQ number            exact or prefix on the sequence number
+      station               any stop in the routing
+      A-B                   a leg flown from A to B, in that order, plus the
+                            pairing's own origin-destination
+      AC code               any leg's equipment
+      flight number         any leg's flight number
+    """
+    q = (q or "").strip().upper()
+    if not q:
+        return True
+    routing = [str(x).upper() for x in summary.get("routing") or []]
+    route_set = set(routing)
+    pairs = {f"{a}-{b}" for a, b in zip(routing, routing[1:])}
+    if routing:
+        pairs.add(f"{routing[0]}-{routing[-1]}")
+    acs = _sequence_ac_codes(seq)
+    flts = _sequence_flight_numbers(seq)
+    seq_no = str(summary.get("seq") or "").upper()
+
+    for term in q.replace(",", " ").split():
+        if "-" in term and term in pairs:
+            continue
+        if term in route_set or term in acs or term in flts:
+            continue
+        if seq_no == term or seq_no.startswith(term):
+            continue
+        # Partial equipment ("320" finding 320S/320N) and partial flight
+        # numbers, which is how people actually half-remember them.
+        if any(a.startswith(term) for a in acs) or any(f.startswith(term) for f in flts):
+            continue
+        return False
+    return True
+
 
 
 def _criterion_matches(seq, summary, criterion):
@@ -1344,6 +1406,16 @@ def _criterion_matches(seq, summary, criterion):
             return bool(layovers & wanted)
         route = set(summary["routing"])
         return bool(route & wanted) if field == "include_stations" else not (route & wanted)
+
+    if field in _AC_CRITERIA:
+        wanted = {a.strip().upper() for a in (value or []) if a and a.strip()}
+        if not wanted:
+            return True
+        flown = _sequence_ac_codes(seq)
+        # Prefix, so "320" covers 320S/320N/320D without listing each — the
+        # 4-character sub-fleet codes are what the packs carry now.
+        hit = any(any(a.startswith(w) for a in flown) for w in wanted)
+        return hit if field == "include_ac" else not hit
 
     getter = _CRITERION_VALUE_FOR.get(field)
     if getter is None:
@@ -1583,12 +1655,17 @@ def list_bid_layer_pairings(layer_id):
     packs = _packs_for_scope(layer["opr"], layer["base"], layer["fleet"])
     if not packs:
         return jsonify({"error": "no pack found for that operator/base/fleet"}), 404
+    # Search narrows the RESULTS, not the funnel: total_in_scope and the
+    # per-layer counts below still describe what the stack itself does, so
+    # typing in the box cannot make a layer look like it filters differently
+    # than it does.
+    _q = request.args.get("q") or ""
     matches, scoped = [], []
     for pack in packs:
         for s in (pack.sequences or []):
             summary = _summarize_sequence(s)
             scoped.append((s, summary))
-            if _layer_matches_any(s, summary, layer):
+            if _layer_matches_any(s, summary, layer) and _sequence_matches_query(s, summary, _q):
                 # Tagged per-match rather than trusting the layer's own
                 # opr/base/fleet — those can be ALL_SCOPE, spanning
                 # several packs, so each result needs its own real pack
@@ -1598,6 +1675,7 @@ def list_bid_layer_pairings(layer_id):
     matches = _sort_summaries(matches, request.args.get("sort"))
     return jsonify({
         "layer": layer,
+        "q": _q,
         "pairings": matches,
         # Empty for a legacy properties-only layer, which has no stack to
         # walk — the frontend only renders a funnel when there is one.
@@ -2162,7 +2240,12 @@ def list_pack_sequences(opr, base, fleet):
     row = _pack_row(opr, base, fleet)
     if not row:
         return jsonify({"error": "pack not found"}), 404
-    summaries = [_summarize_sequence(s) for s in (row.sequences or [])]
+    q = request.args.get("q") or ""
+    summaries = []
+    for seq in (row.sequences or []):
+        summary = _summarize_sequence(seq)
+        if _sequence_matches_query(seq, summary, q):
+            summaries.append(summary)
     return jsonify(_sort_summaries(summaries, request.args.get("sort")))
 
 
@@ -3036,6 +3119,17 @@ def _ofp_is_this_leg(simbrief_user, record):
 # Flight-deck messages
 # ---------------------------------------------------------------------------
 
+def _ofp_time_generated(user_id):
+    """SimBrief's own timestamp for the OFP currently on an account, or "".
+    Never raises: this is recorded alongside a release that has already been
+    built, and failing to label it must not throw that work away."""
+    try:
+        return str(simbrief_ofp.fetch_ofp_generated_at(user_id) or "")
+    except Exception as e:
+        LOG.warning(f"Could not read SimBrief generation time for {user_id}: {e}")
+        return ""
+
+
 def _msg_prefix(record):
     """"FLT 1234 31AUG" — the flight this message is about, in the form a
     crew reads it off a release."""
@@ -3225,6 +3319,10 @@ def generate_release(leg_id):
     payload = {
         "filename": filename,
         "generation": generation,
+        # SimBrief's own generation timestamp for the OFP this was built
+        # from. Our generated_at is a wall clock and says nothing about
+        # whether the PLAN changed; this is what Refresh OFP compares.
+        "ofp_time_generated": _ofp_time_generated(user_id),
         "rls_pdf_b64": base64.b64encode(rls_bytes).decode("ascii"),
     }
     if wb_bytes:
@@ -4780,6 +4878,13 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .pdf-tab-x:hover{opacity:1;}
   /* Messages read like ACARS lines: monospace, one flight per card, with
      the acknowledgement kept as a record rather than dismissing the card. */
+  .pf-hdr{display:flex;align-items:center;justify-content:space-between;gap:10px;}
+  .pf-more{margin:0;padding:2px 6px;background:none;border:none;color:var(--blue);
+    font-weight:800;font-size:18px;letter-spacing:1px;line-height:1;cursor:pointer;}
+  .pairing-search{padding:10px 14px 4px;}
+  .pairing-search input{width:100%;box-sizing:border-box;padding:9px 12px;font-size:14px;
+    border:1px solid var(--border);border-radius:7px;background:var(--bg);color:var(--value);
+    -webkit-appearance:none;}
   .msg-card{padding:13px 16px;border-bottom:1px solid var(--border);background:var(--card);}
   .msg-card.acked{opacity:.62;}
   .msg-line{font-family:ui-monospace,Menlo,monospace;font-size:13px;font-weight:600;
@@ -4879,19 +4984,22 @@ FOS_TEMPLATE = """<!DOCTYPE html>
             </div>
           </div>
           <div class="panel-card" id="ov-docs-card">
-            <div class="panel-card-hdr">Preflight Docs</div>
-            <!-- The release is what a pilot comes to this card for, and it was
-                 the one thing not on it: the only way in was the "SimBrief /
-                 Send to Dispatch" row under External Apps, which reads as an
-                 outbound action, not as "your release lives here". The status
-                 line says whether one is on file and when it was generated,
-                 so a stale release is visible without opening anything. -->
-            <div class="doc-row" style="cursor:pointer;" onclick="showView('release')">
-              <div style="display:flex;align-items:center;gap:10px;">
-                <svg class="lead-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h5"/></svg>
-                <div><div class="code">Release &amp; TPS</div><div class="desc" id="ov-release-state">&mdash;</div></div>
+            <div class="panel-card-hdr pf-hdr">
+              <span>Preflight Docs</span>
+              <button type="button" class="pf-more" onclick="togglePreflightMore()" aria-expanded="false" aria-controls="preflight-more" title="More">&bull;&bull;&bull;</button>
+            </div>
+            <!-- Behind the ... deliberately: this is an occasional action, not
+                 something to step past on every look at the card. The status
+                 line says which OFP the release was built from, so whether it
+                 is stale is answerable before pressing anything. -->
+            <div id="preflight-more" style="display:none;">
+              <div class="doc-row" style="cursor:pointer;" onclick="refreshOfp()">
+                <div style="display:flex;align-items:center;gap:10px;">
+                  <svg class="lead-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                  <div><div class="code">Refresh OFP</div><div class="desc" id="ov-release-state">&mdash;</div></div>
+                </div>
+                <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></div>
               </div>
-              <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></div>
             </div>
             <div class="doc-row" style="cursor:pointer;" onclick="showView('saveddocs')">
               <div style="display:flex;align-items:center;gap:10px;">
@@ -5939,9 +6047,69 @@ function applyAeroRoute(){
 // generating — used by the post-FFD refresh, which only needs to pick up
 // the now-true fit_for_duty flag and must not manufacture a release for a
 // leg that never had one.
-// Says whether a release is on file for THIS leg and how old it is, so a
-// stale one is visible from Overview instead of only after opening the
-// Release view. Uses the read-only path — looking must never generate.
+function togglePreflightMore(){
+  const el = document.getElementById('preflight-more');
+  const btn = document.querySelector('.pf-more');
+  if(!el) return;
+  const open = el.style.display === 'none';
+  el.style.display = open ? 'block' : 'none';
+  if(btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+// Checks whether SimBrief has a NEWER plan than the one this release was
+// built from, and only regenerates if so. Comparing SimBrief's own
+// time_generated rather than our generated_at: ours is a wall clock and
+// says nothing about whether the PLAN changed, so it would rebuild on
+// every press.
+let _ofpRefreshBusy = false;
+async function refreshOfp(){
+  if(_ofpRefreshBusy) return;
+  const user = _simbriefUser();
+  if(!user){ showToast('Add a SimBrief username in Settings first'); return; }
+  _ofpRefreshBusy = true;
+  const el = document.getElementById('ov-release-state');
+  const was = el ? el.textContent : '';
+  if(el) el.textContent = 'Checking SimBrief\u2026';
+  try {
+    const [liveR, mineR] = await Promise.all([
+      fetch('/simbrief-api/generated-at?user=' + encodeURIComponent(user)),
+      fetch('/fos/' + LEG_ID + '/release', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({cached_only: true}),
+      }),
+    ]);
+    const live = liveR.ok ? String((await liveR.json()).time_generated || '') : '';
+    // 404 here is "nothing generated for this leg yet", the normal state of
+    // a fresh flight — there is no comparison to make, so just build it.
+    const mine = mineR.ok ? String((await mineR.json()).ofp_time_generated || '') : null;
+
+    if(mine === null){
+      if(el) el.textContent = 'Generating\u2026';
+      showView('release');
+      generateRelease();
+      return;
+    }
+    if(live && mine && live === mine){
+      if(el) el.textContent = was;
+      showToast('OFP is already current');
+      return;
+    }
+    // Either SimBrief has moved on, or one side has no timestamp to compare
+    // — rebuild rather than guess, since a stale release is the worse error.
+    if(el) el.textContent = 'Refreshing\u2026';
+    showView('release');
+    generateRelease(true);
+  } catch(e) {
+    if(el) el.textContent = was;
+    showToast('Could not check SimBrief: ' + e);
+  } finally {
+    _ofpRefreshBusy = false;
+  }
+}
+
+// Says which OFP the release on file was built from, so whether it is stale
+// is visible before pressing anything. Uses the read-only path — looking
+// must never generate.
 async function paintReleaseState(){
   const el = document.getElementById('ov-release-state');
   if(!el || !LEG_ID) return;
@@ -5956,9 +6124,7 @@ async function paintReleaseState(){
     const when = data.generated_at ? new Date(data.generated_at) : null;
     const rev = (data.generation === undefined || data.generation === null)
       ? '' : (' \u00b7 rev .' + data.generation);
-    el.textContent = when
-      ? ('Generated ' + when.toLocaleString() + rev)
-      : ('On file' + rev);
+    el.textContent = when ? ('Generated ' + when.toLocaleString() + rev) : ('On file' + rev);
   } catch(e) { el.textContent = ''; }
 }
 
@@ -7337,22 +7503,42 @@ function sequenceListRow(s, onClick){
   row.onclick = onClick;
   return row;
 }
-async function libraryShowSequences(sort){
+let _librarySearch = '';
+async function libraryShowSequences(sort, q){
   sort = sort || '';
+  if(q !== undefined) _librarySearch = q;
   const {opr, base, fleet} = _libraryPath;
   const body = document.getElementById('library-body');
   showLoading(body);
   try {
-    const r = await fetch('/pbs/packs/' + opr + '/' + base + '/' + fleet + '/sequences' + (sort ? ('?sort=' + encodeURIComponent(sort)) : ''));
+    const params = [];
+    if(sort) params.push('sort=' + encodeURIComponent(sort));
+    if(_librarySearch) params.push('q=' + encodeURIComponent(_librarySearch));
+    const r = await fetch('/pbs/packs/' + opr + '/' + base + '/' + fleet + '/sequences'
+                          + (params.length ? ('?' + params.join('&')) : ''));
     const seqs = await r.json();
     if(!r.ok){ body.innerHTML = '<p class="placeholder-note">' + (seqs.error || 'Failed to load') + '</p>'; return; }
     body.innerHTML = '';
     body.appendChild(libraryCrumb());
-    if(!seqs.length){ body.innerHTML += '<p class="placeholder-note">No sequences in this pack.</p>'; return; }
     const {pane, list} = libraryPane('Sequences', libraryShowFleets);
+    // Search and sort stay on screen even with no results — otherwise a
+    // search that matches nothing removes the box you would clear it in.
     list.parentNode.insertBefore(_pairingSortControl(sort, (v) => libraryShowSequences(v)), list);
+    list.parentNode.insertBefore(
+      _pairingSearchControl(_librarySearch, (v) => libraryShowSequences(sort, v)), list);
+    if(!seqs.length){
+      const none = document.createElement('p');
+      none.className = 'placeholder-note';
+      none.textContent = _librarySearch
+        ? ('Nothing matches \u201c' + _librarySearch + '\u201d in this pack.')
+        : 'No sequences in this pack.';
+      list.appendChild(none);
+    }
     seqs.forEach(s => list.appendChild(sequenceListRow(s, () => libraryShowSequenceDetail(s.seq))));
     body.appendChild(pane);
+    const inp = pane.querySelector('.pairing-search input');
+    // Typing re-fetches and rebuilds the pane, so put the caret back.
+    if(inp && _librarySearch){ inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); }
   } catch(e) { body.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>'; }
 }
 async function libraryShowSequenceDetail(seqNumber){
@@ -7536,11 +7722,38 @@ const _CRITERION_FIELDS = [
   {v: 'layover_include',  label: 'Layover At',      kind: 'stations', ph: 'e.g. MIA, LAX'},
   {v: 'include_stations', label: 'Include Station', kind: 'stations', ph: 'e.g. STT'},
   {v: 'avoid_stations',   label: 'Avoid Station',   kind: 'stations', ph: 'e.g. ORD'},
+  // Matched by prefix server-side, so 320 covers 320S/320N/320D rather than
+  // making the pilot list every sub-fleet code.
+  {v: 'include_ac',       label: 'Include AC Code', kind: 'stations', ph: 'e.g. 320S, 738'},
+  {v: 'avoid_ac',         label: 'Ignore AC Code',  kind: 'stations', ph: 'e.g. E45X'},
 ];
 const _CRITERION_OPS = {
   num:  [['min', 'at least'], ['max', 'at most'], ['exact', 'exactly']],
   time: [['max', 'before'], ['min', 'after'], ['exact', 'exactly']],
 };
+// One box for station, AC code, route (LAX-JFK), sequence number and flight
+// number, because someone hunting a pairing knows the string, not which
+// field it belongs to. Debounced — every keystroke otherwise re-filters a
+// pack of several thousand sequences server-side.
+function _pairingSearchControl(value, onChange){
+  const wrap = document.createElement('div');
+  wrap.className = 'pairing-search';
+  const input = document.createElement('input');
+  input.type = 'search';
+  input.value = value || '';
+  input.placeholder = 'Search station, AC code, LAX-JFK, SEQ, flight\u2026';
+  input.setAttribute('aria-label', 'Search pairings');
+  let t = null;
+  input.oninput = () => {
+    clearTimeout(t);
+    t = setTimeout(() => onChange(input.value.trim()), 300);
+  };
+  // Enter applies immediately rather than waiting out the debounce.
+  input.onkeydown = (e) => { if(e.key === 'Enter'){ clearTimeout(t); onChange(input.value.trim()); } };
+  wrap.appendChild(input);
+  return wrap;
+}
+
 function _criterionField(v){ return _CRITERION_FIELDS.find(f => f.v === v) || _CRITERION_FIELDS[0]; }
 function _hhmmLabel(v){
   const s = String(v).padStart(4, '0');
@@ -7861,12 +8074,18 @@ function _pairingSortControl(sort, onChange){
   wrap.appendChild(label); wrap.appendChild(sel);
   return wrap;
 }
-async function layerShowPairings(layer, sort){
+let _layerSearch = '';
+async function layerShowPairings(layer, sort, q){
   sort = sort || '';
+  if(q !== undefined) _layerSearch = q;
   const body = document.getElementById('layers-body');
   showLoading(body);
   try {
-    const r = await fetch('/pbs/layers/' + layer.id + '/pairings' + (sort ? ('?sort=' + encodeURIComponent(sort)) : ''));
+    const params = [];
+    if(sort) params.push('sort=' + encodeURIComponent(sort));
+    if(_layerSearch) params.push('q=' + encodeURIComponent(_layerSearch));
+    const r = await fetch('/pbs/layers/' + layer.id + '/pairings'
+                          + (params.length ? ('?' + params.join('&')) : ''));
     const data = await r.json();
     if(!r.ok){ body.innerHTML = '<p class="placeholder-note">' + (data.error || 'Failed to load') + '</p>'; return; }
     body.innerHTML = '';
@@ -7898,13 +8117,26 @@ async function layerShowPairings(layer, sort){
       });
       list.parentNode.insertBefore(funnelEl, list);
     }
-    if(data.pairings.length){
-      list.parentNode.insertBefore(_pairingSortControl(sort, (v) => layerShowPairings(layer, v)), list);
-    } else {
-      list.innerHTML = '<p class="placeholder-note" style="padding:14px;">Nothing matches every layer in this bid.</p>';
+    // Both controls stay up even with no results — a search that matches
+    // nothing must not remove the box you would clear it in.
+    list.parentNode.insertBefore(_pairingSortControl(sort, (v) => layerShowPairings(layer, v)), list);
+    list.parentNode.insertBefore(
+      _pairingSearchControl(_layerSearch, (v) => layerShowPairings(layer, sort, v)), list);
+    if(!data.pairings.length){
+      const none = document.createElement('p');
+      none.className = 'placeholder-note';
+      none.style.padding = '14px';
+      // Distinguish "your stack excludes everything" from "your search does",
+      // since the fix is different in each case.
+      none.textContent = _layerSearch
+        ? ('No match for \u201c' + _layerSearch + '\u201d among this bid\u2019s pairings.')
+        : 'Nothing matches every layer in this bid.';
+      list.appendChild(none);
     }
     data.pairings.forEach(s => list.appendChild(sequenceListRow(s, () => layerShowSequenceDetail(layer, s))));
     body.appendChild(pane);
+    const inp = pane.querySelector('.pairing-search input');
+    if(inp && _layerSearch){ inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); }
   } catch(e) { body.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>'; }
 }
 // Structurally parallel to libraryShowSequenceDetail — same detail route,
