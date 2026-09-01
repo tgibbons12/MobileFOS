@@ -514,7 +514,14 @@ AUTH_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
   var standalone = window.navigator.standalone === true ||
     (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
   var root = document.documentElement;
-  root.style.setProperty('--status-bar-min', standalone ? '24px' : '0px');
+  // 44px, not the 24pt a status bar nominally measures. On an installed
+  // iPad app the translucent treatment washes out noticeably further down
+  // than the bar's own height -- measured off a device screenshot, the red
+  // only reaches full saturation around 56pt -- and text sitting in that
+  // band is legible but visibly faded, which is not good enough for a
+  // compliance notice. This is the one number to change if it still reads
+  // wrong; everything that offsets from the top derives from it.
+  root.style.setProperty('--status-bar-min', standalone ? '44px' : '0px');
   root.style.setProperty('--status-bar',
     'max(env(safe-area-inset-top), var(--status-bar-min, 0px))');
 })();
@@ -3814,7 +3821,14 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
   var standalone = window.navigator.standalone === true ||
     (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
   var root = document.documentElement;
-  root.style.setProperty('--status-bar-min', standalone ? '24px' : '0px');
+  // 44px, not the 24pt a status bar nominally measures. On an installed
+  // iPad app the translucent treatment washes out noticeably further down
+  // than the bar's own height -- measured off a device screenshot, the red
+  // only reaches full saturation around 56pt -- and text sitting in that
+  // band is legible but visibly faded, which is not good enough for a
+  // compliance notice. This is the one number to change if it still reads
+  // wrong; everything that offsets from the top derives from it.
+  root.style.setProperty('--status-bar-min', standalone ? '44px' : '0px');
   root.style.setProperty('--status-bar',
     'max(env(safe-area-inset-top), var(--status-bar-min, 0px))');
 })();
@@ -4359,7 +4373,14 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   var standalone = window.navigator.standalone === true ||
     (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
   var root = document.documentElement;
-  root.style.setProperty('--status-bar-min', standalone ? '24px' : '0px');
+  // 44px, not the 24pt a status bar nominally measures. On an installed
+  // iPad app the translucent treatment washes out noticeably further down
+  // than the bar's own height -- measured off a device screenshot, the red
+  // only reaches full saturation around 56pt -- and text sitting in that
+  // band is legible but visibly faded, which is not good enough for a
+  // compliance notice. This is the one number to change if it still reads
+  // wrong; everything that offsets from the top derives from it.
+  root.style.setProperty('--status-bar-min', standalone ? '44px' : '0px');
   root.style.setProperty('--status-bar',
     'max(env(safe-area-inset-top), var(--status-bar-min, 0px))');
 })();
