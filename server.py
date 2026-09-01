@@ -514,14 +514,12 @@ AUTH_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
   var standalone = window.navigator.standalone === true ||
     (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
   var root = document.documentElement;
-  // 44px, not the 24pt a status bar nominally measures. On an installed
-  // iPad app the translucent treatment washes out noticeably further down
-  // than the bar's own height -- measured off a device screenshot, the red
-  // only reaches full saturation around 56pt -- and text sitting in that
-  // band is legible but visibly faded, which is not good enough for a
-  // compliance notice. This is the one number to change if it still reads
-  // wrong; everything that offsets from the top derives from it.
-  root.style.setProperty('--status-bar-min', standalone ? '44px' : '0px');
+  // Back to a real status bar's height. The 44px this briefly carried was
+  // to lift the acknowledgement banner's text clear of the translucent
+  // wash, which reaches further down than the bar itself; that banner is
+  // now a blocking overlay in the content area, so nothing sits in the
+  // washed band and there is nothing to lift.
+  root.style.setProperty('--status-bar-min', standalone ? '24px' : '0px');
   root.style.setProperty('--status-bar',
     'max(env(safe-area-inset-top), var(--status-bar-min, 0px))');
 })();
@@ -3821,14 +3819,12 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
   var standalone = window.navigator.standalone === true ||
     (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
   var root = document.documentElement;
-  // 44px, not the 24pt a status bar nominally measures. On an installed
-  // iPad app the translucent treatment washes out noticeably further down
-  // than the bar's own height -- measured off a device screenshot, the red
-  // only reaches full saturation around 56pt -- and text sitting in that
-  // band is legible but visibly faded, which is not good enough for a
-  // compliance notice. This is the one number to change if it still reads
-  // wrong; everything that offsets from the top derives from it.
-  root.style.setProperty('--status-bar-min', standalone ? '44px' : '0px');
+  // Back to a real status bar's height. The 44px this briefly carried was
+  // to lift the acknowledgement banner's text clear of the translucent
+  // wash, which reaches further down than the bar itself; that banner is
+  // now a blocking overlay in the content area, so nothing sits in the
+  // washed band and there is nothing to lift.
+  root.style.setProperty('--status-bar-min', standalone ? '24px' : '0px');
   root.style.setProperty('--status-bar',
     'max(env(safe-area-inset-top), var(--status-bar-min, 0px))');
 })();
@@ -3859,7 +3855,24 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
      Home has no topbar of its own to hang a per-page icon off of. */
   /* Same treatment as the FOS template's copy: pinned, and it owns the
      safe-area inset because it is the topmost element. */
-  #doc-ack-banner{position:sticky;top:0;z-index:16;padding-top:calc(var(--status-bar, 0px) + 11px);}
+  /* Blocking, not advisory: opaque rather than the loading overlay's 50%,
+     because there is nothing behind it worth reading until the documents
+     are acknowledged. Same top/bottom geometry though, so the header and
+     the tab bar stay visible and tappable. z-index 17 puts it over the
+     loading overlay (15) — a load finishing must not reveal the app. */
+  #doc-lock{position:fixed;left:env(safe-area-inset-left);right:env(safe-area-inset-right);
+    z-index:17;display:flex;align-items:center;justify-content:center;padding:24px;}
+  #doc-lock[hidden]{display:none;}
+  .dl-scrim{position:absolute;inset:0;background:var(--bg);}
+  .dl-card{position:relative;max-width:420px;text-align:center;display:flex;
+    flex-direction:column;align-items:center;gap:14px;}
+  .dl-mark{width:76px;height:76px;background:var(--nac-red);display:flex;align-items:center;
+    justify-content:center;box-shadow:0 2px 10px rgba(0,0,0,.18);flex-shrink:0;}
+  .dl-mark img{width:56px;height:56px;object-fit:contain;}
+  .dl-card h2{margin:0;font-size:19px;font-weight:700;color:var(--value);}
+  .dl-card p{margin:0;font-size:14px;line-height:1.45;color:var(--label);}
+  .dl-card button{margin:4px 0 0;padding:12px 22px;font-size:15px;font-weight:600;
+    background:var(--blue);color:#fff;border:none;border-radius:7px;cursor:pointer;}
   .settings-fab{position:fixed;top:calc(var(--ack-h,0px) + var(--safe-top, var(--status-bar, 0px)) + var(--topbar-lead, 14px));right:calc(env(safe-area-inset-right) + 16px);z-index:25;background:var(--card);border:1px solid var(--border);border-radius:50%;width:34px;height:34px;display:flex;align-items:center;justify-content:center;color:var(--label);cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.12);}
   .settings-fab svg{width:18px;height:18px;flex-shrink:0;}
   h1{font-size:18px;color:var(--blue-dark);margin:0 0 16px;}
@@ -3904,7 +3917,15 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
 </style></head><body>
 <!-- Styled inline rather than via .ffd-banner: that class lives only in
      FOS_TEMPLATE's stylesheet, and this template has its own. -->
-<div id="doc-ack-banner" style="display:none;cursor:pointer;background:var(--red);color:#fff;font-size:13px;font-weight:600;line-height:1.4;padding:11px 17px;" onclick="window.location.href='/docs'"></div>
+<div id="doc-lock" hidden role="alertdialog" aria-labelledby="doc-lock-title-home">
+  <div class="dl-scrim"></div>
+  <div class="dl-card">
+    <div class="dl-mark"><img src="/static/nac-bear.png" alt="" onerror="this.remove()"></div>
+    <h2 id="doc-lock-title-home">Acknowledgement Required</h2>
+    <p id="doc-lock-body"></p>
+    <button type="button" onclick="window.location.href='/docs'">Review Documents</button>
+  </div>
+</div>
 
 <button class="settings-fab" title="Settings" onclick="window.location.href='/schedule?view=settings'">
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.34 1.87l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.7 1.7 0 00-1.87-.34 1.7 1.7 0 00-1 1.55V21a2 2 0 11-4 0v-.09A1.7 1.7 0 009 19.4a1.7 1.7 0 00-1.87.34l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.7 1.7 0 004.6 15a1.7 1.7 0 00-1.55-1H3a2 2 0 110-4h.09A1.7 1.7 0 004.6 9a1.7 1.7 0 00-.34-1.87l-.06-.06a2 2 0 112.83-2.83l.06.06A1.7 1.7 0 009 4.6a1.7 1.7 0 001-1.55V3a2 2 0 114 0v.09a1.7 1.7 0 001 1.55 1.7 1.7 0 001.87-.34l.06-.06a2 2 0 112.83 2.83l-.06.06A1.7 1.7 0 0019.4 9a1.7 1.7 0 001.55 1H21a2 2 0 110 4h-.09a1.7 1.7 0 00-1.55 1z"/></svg>
@@ -4041,23 +4062,29 @@ function homeNavTab(view){
   window.location.href = '/fos/' + CURRENT_LEG_ID + '?view=' + view;
 }
 // Company documents need acknowledging whether or not a leg is loaded, so
-// this banner is on Home too (FOS_TEMPLATE renders its own copy).
+// Home carries the same lock (FOS_TEMPLATE renders its own copy). There is
+// no exempt view here — Docs is a page of its own, and the button goes to
+// it, so the lock always has an exit.
+function _positionDocLock(){
+  const el = document.getElementById('doc-lock');
+  if(!el || el.hidden) return;
+  const topbar = document.querySelector('.view.active .topbar') || document.querySelector('.topbar');
+  const tabbar = document.querySelector('.tabbar');
+  el.style.top = Math.max(0, topbar ? topbar.getBoundingClientRect().bottom : 0) + 'px';
+  el.style.bottom = (tabbar ? tabbar.getBoundingClientRect().height : 0) + 'px';
+}
 (function(){
   const n = parseInt("$unacked_docs", 10) || 0;
   if(!n) return;
-  const el = document.getElementById('doc-ack-banner');
-  el.textContent = n + ' company document' + (n === 1 ? '' : 's')
-    + ' need' + (n === 1 ? 's' : '') + ' your acknowledgement — tap to review.';
-  el.style.display = '';
-  // The banner now clears the status bar itself, so the settings gear must
-  // stop adding the same inset and drop below the banner instead of
-  // floating on top of it.
-  const root = document.documentElement.style;
-  root.setProperty('--safe-top', '0px');
-  root.setProperty('--ack-h', el.getBoundingClientRect().height + 'px');
-  window.addEventListener('resize', () => {
-    root.setProperty('--ack-h', el.getBoundingClientRect().height + 'px');
-  });
+  const el = document.getElementById('doc-lock');
+  if(!el) return;
+  document.getElementById('doc-lock-body').textContent =
+    n + ' company document' + (n === 1 ? '' : 's') + ' need' + (n === 1 ? 's' : '') +
+    ' your acknowledgement before you can use the app.';
+  el.hidden = false;
+  _positionDocLock();
+  window.addEventListener('resize', _positionDocLock);
+  window.addEventListener('scroll', _positionDocLock, {passive: true});
 })();
 function showHomeView(view){
   document.getElementById('home-view').classList.toggle('active', view==='home');
@@ -4373,14 +4400,12 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   var standalone = window.navigator.standalone === true ||
     (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
   var root = document.documentElement;
-  // 44px, not the 24pt a status bar nominally measures. On an installed
-  // iPad app the translucent treatment washes out noticeably further down
-  // than the bar's own height -- measured off a device screenshot, the red
-  // only reaches full saturation around 56pt -- and text sitting in that
-  // band is legible but visibly faded, which is not good enough for a
-  // compliance notice. This is the one number to change if it still reads
-  // wrong; everything that offsets from the top derives from it.
-  root.style.setProperty('--status-bar-min', standalone ? '44px' : '0px');
+  // Back to a real status bar's height. The 44px this briefly carried was
+  // to lift the acknowledgement banner's text clear of the translucent
+  // wash, which reaches further down than the bar itself; that banner is
+  // now a blocking overlay in the content area, so nothing sits in the
+  // washed band and there is nothing to lift.
+  root.style.setProperty('--status-bar-min', standalone ? '24px' : '0px');
   root.style.setProperty('--status-bar',
     'max(env(safe-area-inset-top), var(--status-bar-min, 0px))');
 })();
@@ -4584,7 +4609,24 @@ FOS_TEMPLATE = """<!DOCTYPE html>
      the bar is no longer the thing holding the header off the screen
      edge. Both of those were double-counted on a real iPad and are
      invisible in a desktop emulator, where the inset is 0. */
-  #doc-ack-banner{position:sticky;top:0;z-index:16;padding-top:calc(var(--status-bar, 0px) + 11px);}
+  /* Blocking, not advisory: opaque rather than the loading overlay's 50%,
+     because there is nothing behind it worth reading until the documents
+     are acknowledged. Same top/bottom geometry though, so the header and
+     the tab bar stay visible and tappable. z-index 17 puts it over the
+     loading overlay (15) — a load finishing must not reveal the app. */
+  #doc-lock{position:fixed;left:env(safe-area-inset-left);right:env(safe-area-inset-right);
+    z-index:17;display:flex;align-items:center;justify-content:center;padding:24px;}
+  #doc-lock[hidden]{display:none;}
+  .dl-scrim{position:absolute;inset:0;background:var(--bg);}
+  .dl-card{position:relative;max-width:420px;text-align:center;display:flex;
+    flex-direction:column;align-items:center;gap:14px;}
+  .dl-mark{width:76px;height:76px;background:var(--nac-red);display:flex;align-items:center;
+    justify-content:center;box-shadow:0 2px 10px rgba(0,0,0,.18);flex-shrink:0;}
+  .dl-mark img{width:56px;height:56px;object-fit:contain;}
+  .dl-card h2{margin:0;font-size:19px;font-weight:700;color:var(--value);}
+  .dl-card p{margin:0;font-size:14px;line-height:1.45;color:var(--label);}
+  .dl-card button{margin:4px 0 0;padding:12px 22px;font-size:15px;font-weight:600;
+    background:var(--blue);color:#fff;border:none;border-radius:7px;cursor:pointer;}
   .doc-row .check.signed{color:var(--blue-dark);}
   .doc-row .resign-link{font-size:12.5px;font-weight:600;color:var(--blue);cursor:pointer;text-decoration:none;white-space:nowrap;}
   .doc-row .primary-action{display:inline-flex;align-items:center;gap:10px;}
@@ -4790,7 +4832,19 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.34 1.87l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.7 1.7 0 00-1.87-.34 1.7 1.7 0 00-1 1.55V21a2 2 0 11-4 0v-.09A1.7 1.7 0 009 19.4a1.7 1.7 0 00-1.87.34l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.7 1.7 0 004.6 15a1.7 1.7 0 00-1.55-1H3a2 2 0 110-4h.09A1.7 1.7 0 004.6 9a1.7 1.7 0 00-.34-1.87l-.06-.06a2 2 0 112.83-2.83l.06.06A1.7 1.7 0 009 4.6a1.7 1.7 0 001-1.55V3a2 2 0 114 0v.09a1.7 1.7 0 001 1.55 1.7 1.7 0 001.87-.34l.06-.06a2 2 0 112.83 2.83l-.06.06A1.7 1.7 0 0019.4 9a1.7 1.7 0 001.55 1H21a2 2 0 110 4h-.09a1.7 1.7 0 00-1.55 1z"/></svg>
 </button>
 <div class="app-shell">
-  <div id="doc-ack-banner" class="ffd-banner" style="display:none;cursor:pointer;" onclick="showView('doclocker')"></div>
+  <!-- Sits between the header and the tab bar exactly like the loading
+       overlay, so both stay visible and usable — the pilot has to be able
+       to REACH Docs to clear it. Suppressed on the Docs list and the PDF
+       viewer for the same reason. -->
+  <div id="doc-lock" hidden role="alertdialog" aria-labelledby="doc-lock-title">
+    <div class="dl-scrim"></div>
+    <div class="dl-card">
+      <div class="dl-mark"><img src="/static/nac-bear.png" alt="" onerror="this.remove()"></div>
+      <h2 id="doc-lock-title">Acknowledgement Required</h2>
+      <p id="doc-lock-body"></p>
+      <button type="button" onclick="showView('doclocker')">Review Documents</button>
+    </div>
+  </div>
   <main class="main">
     <section id="overview-view" class="view active">
       <div class="topbar">
@@ -5407,6 +5461,9 @@ function showView(view){
   if(view === 'admin') initAdminView();
   if(view === 'saveddocs') initSavedDocs();
   if(view === 'messages') initMessages();
+  // Exempt on Docs and the PDF viewer, so every view change has to
+  // re-evaluate — leaving those puts the lock back up.
+  paintDocAckBanner();
   if(view === 'doclocker') initDocLocker();
   if(view === 'pairing') initPairingView();
   if(view === 'overview') initOverviewPills();
@@ -6026,7 +6083,6 @@ function hideLoading(){
   if(_loadTimer){ clearTimeout(_loadTimer); _loadTimer = null; }
 }
 window.addEventListener('resize', () => {
-  _syncAckBannerHeight();
   const overlay = document.getElementById('load-overlay');
   if(overlay && !overlay.hidden) _positionLoadOverlay();
 });
@@ -6036,6 +6092,8 @@ window.addEventListener('resize', () => {
 window.addEventListener('scroll', () => {
   const overlay = document.getElementById('load-overlay');
   if(overlay && !overlay.hidden) _positionLoadOverlay();
+  const lock = document.getElementById('doc-lock');
+  if(lock && !lock.hidden) _positionDocLock();
 }, {passive: true});
 
 let toastTimer;
@@ -8412,41 +8470,43 @@ async function adminShowUser(userId){
 // of a SimBrief OFP, these are uploaded manuals/bulletins.
 const IS_ADMIN = "$is_admin" === "1";
 let _unackedDocs = parseInt("$unacked_docs", 10) || 0;
+// Blocks the app until every company document is acknowledged. Keeps the
+// old name because a dozen call sites already invoke it whenever the
+// unacknowledged count could have moved.
+//
+// Two views are deliberately exempt: the Docs list and the PDF viewer.
+// Locking those would leave no way to READ the documents or press
+// Acknowledge, so the lock would have no exit.
+const _DOC_LOCK_EXEMPT = ['doclocker', 'pdf'];
+
 function paintDocAckBanner(){
-  const el = document.getElementById('doc-ack-banner');
+  const el = document.getElementById('doc-lock');
   if(!el) return;
-  if(_unackedDocs > 0){
-    el.textContent = _unackedDocs + ' company document' + (_unackedDocs === 1 ? '' : 's')
-      + ' need' + (_unackedDocs === 1 ? 's' : '') + ' your acknowledgement — tap to review.';
-    el.style.display = '';
+  const active = (document.querySelector('.view.active') || {}).id || '';
+  const onExemptView = _DOC_LOCK_EXEMPT.some(v => active === v + '-view');
+  if(_unackedDocs > 0 && !onExemptView){
+    const n = _unackedDocs;
+    document.getElementById('doc-lock-body').textContent =
+      n + ' company document' + (n === 1 ? '' : 's') + ' need' + (n === 1 ? 's' : '') +
+      ' your acknowledgement before you can use the app.';
+    _positionDocLock();
+    el.hidden = false;
   } else {
-    el.style.display = 'none';
+    el.hidden = true;
   }
-  _syncAckBannerHeight();
 }
 
-// .topbar pins directly beneath the banner, so it has to know how tall the
-// banner actually is — it wraps to two lines on a narrow phone. Measured
-// rather than assumed, and re-measured on resize and rotation.
-function _syncAckBannerHeight(){
-  const el = document.getElementById('doc-ack-banner');
-  const showing = !!el && el.style.display !== 'none';
-  const root = document.documentElement.style;
-  if(showing){
-    // The banner is now the topmost element, so it clears the status bar
-    // and .topbar must not add the inset again. The lead shrinks too: the
-    // bar is no longer what holds the header off the top of the screen.
-    root.setProperty('--safe-top', '0px');
-    root.setProperty('--topbar-lead', '10px');
-  } else {
-    root.removeProperty('--safe-top');
-    root.removeProperty('--topbar-lead');
-  }
-  const h = showing ? el.getBoundingClientRect().height : 0;
-  document.documentElement.style.setProperty('--ack-h', h + 'px');
-  const overlay = document.getElementById('load-overlay');
-  if(overlay && !overlay.hidden) _positionLoadOverlay();
+// Same geometry as the loading overlay: between the header's measured
+// bottom edge and the tab bar, so both stay visible and usable.
+function _positionDocLock(){
+  const el = document.getElementById('doc-lock');
+  if(!el) return;
+  const topbar = document.querySelector('.view.active .topbar');
+  const tabbar = document.querySelector('.tabbar');
+  el.style.top = Math.max(0, topbar ? topbar.getBoundingClientRect().bottom : 0) + 'px';
+  el.style.bottom = (tabbar ? tabbar.getBoundingClientRect().height : 0) + 'px';
 }
+
 function _fmtDocSize(bytes){
   if(!bytes) return '';
   const mb = bytes / (1024 * 1024);
