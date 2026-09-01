@@ -38,7 +38,10 @@ def check(label, ok, detail=""):
 ACCOUNT_OFP = {"flight_number": "101", "origin": "KPHX", "destination": "KLAX"}
 
 
-def fake_generate_release_pdfs(user_id, gate="", arr_gate=""):
+# **kwargs deliberately: generate_release_pdfs has gained keyword arguments
+# (gate, arr_gate, generation) as the release engine grew, and a stub pinned to
+# today's exact signature turns the next one into a spurious 500 here.
+def fake_generate_release_pdfs(user_id, **kwargs):
     return (b"%PDF-1.4 leg-A-release", b"%PDF-1.4 leg-A-wb", "AA101-KPHX-KLAX-RLS.pdf")
 
 
@@ -106,7 +109,7 @@ check("Documents view (cached_only) serves leg A's own release",
 #    normally — the guard is an identity check, not a lockout.
 ACCOUNT_OFP.update({"flight_number": "202", "origin": "KLAX", "destination": "KSEA"})
 server._ofp_fetch_cache.clear()
-release_engine.generate_release_pdfs = lambda user_id, gate="", arr_gate="": (
+release_engine.generate_release_pdfs = lambda user_id, **kwargs: (
     b"%PDF-1.4 leg-B-release", None, "AA202-KLAX-KSEA-RLS.pdf")
 r = client.post(f"/fos/{b_id}/release", json={"user_id": "tester"})
 body = r.get_json()
@@ -119,20 +122,60 @@ r = client.post(f"/fos/{a_id}/release", json={"user_id": "tester", "cached_only"
 check("leg A still serves its own release afterwards",
       r.get_json().get("filename") == "AA101-KPHX-KLAX-RLS.pdf", str(r.get_json().get("filename")))
 
-# 8. The release URL serves exactly the methods the page actually calls.
-#    A read path that GETs a POST-only route is a 405 the page reports as a
-#    failed request — and the read/generate split is the whole fix above, so
-#    the two halves drifting apart is the way it would silently come undone.
+# 8. Every call the page makes to the release URL uses a method that route
+#    actually serves. A read path that GETs a POST-only route falls through
+#    to a 404 HTML page, and the JSON parse then blows up with "Unexpected
+#    token '<'" — which is exactly what happened when the route's read/
+#    generate split (the whole fix above) was reshaped without its callers.
+#    That has now happened twice, so it is worth a check rather than care.
+#
+#    Deliberately NOT a line-bounded regex over the call: these fetches are
+#    written both inline and across several lines, and matching to end-of-line
+#    silently saw only the inline one — passing while two multi-line callers,
+#    including the one that actually broke, went unexamined. Locate every
+#    occurrence of the URL instead, then read the method out of the call that
+#    follows it.
+RELEASE_URL = "'/fos/' + LEG_ID + '/release'"
 methods = set()
 for rule in server.app.url_map.iter_rules():
     if rule.rule == "/fos/<int:leg_id>/release":
         methods |= (rule.methods - {"HEAD", "OPTIONS"})
-called = set()
+
+def _enclosing_call(tpl, url_start):
+    """Just the fetch(...) call the URL at url_start belongs to, paren-matched
+    from its own opening bracket. A fixed-size window instead of this reads
+    past the end of the call: with two fetches side by side in a ternary, the
+    GET branch picked up the POST branch's own method option and the check
+    passed on a call that was plainly wrong."""
+    open_paren = tpl.rindex("(", 0, url_start)
+    depth = 0
+    for i in range(open_paren, len(tpl)):
+        if tpl[i] == "(":
+            depth += 1
+        elif tpl[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return tpl[open_paren:i + 1]
+    return tpl[open_paren:]
+
+
+called, uncovered = set(), 0
 for name in ("LAUNCHER_TEMPLATE", "FOS_TEMPLATE"):
-    for m in re.finditer(r"fetch\('/fos/' \+ LEG_ID \+ '/release'(.*?)\)", getattr(server, name)):
-        called.add("POST" if "method:'POST'" in m.group(1) else "GET")
+    tpl = getattr(server, name)
+    for m in re.finditer(re.escape(RELEASE_URL), tpl):
+        # Only fetch() calls carry an HTTP verb — anything else referencing the
+        # URL is counted as uncovered rather than quietly assumed harmless.
+        if not re.search(r"fetch\(\s*$", tpl[max(0, m.start() - 40):m.start()]):
+            uncovered += 1
+            continue
+        verb = re.search(r"method\s*:\s*['\"](\w+)['\"]", _enclosing_call(tpl, m.start()))
+        # No method option means fetch()'s own default, which is GET.
+        called.add(verb.group(1).upper() if verb else "GET")
+
 check("every /release fetch in the page uses a method the route serves",
-      called and called <= methods, f"page calls {sorted(called)}, route serves {sorted(methods)}")
+      bool(called) and not uncovered and called <= methods,
+      f"page calls {sorted(called)}, route serves {sorted(methods)}"
+      + (f", {uncovered} call site(s) not recognised" if uncovered else ""))
 
 print("\n" + ("FAILED: " + ", ".join(FAILURES) if FAILURES else "All checks passed."))
 sys.exit(1 if FAILURES else 0)

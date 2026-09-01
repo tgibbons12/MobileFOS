@@ -7,6 +7,11 @@ Deliberately parallel to bulk_import_packs.py (same --url/--username/--dir
 flags, same interactive getpass, same per-file OK/FAIL report), so there's
 one upload idiom to remember rather than two.
 
+By default the published set is made to MATCH this folder: anything still
+published that is no longer here is listed and, once confirmed, removed.
+Import on its own only ever adds or updates, which is why deleted files
+used to stay in the Docs tab. Pass --no-prune to keep the old behaviour.
+
 Two things differ from pack import, both because a document forces work on
 every other pilot:
   * The account must be an admin (User.is_admin) — the server rejects
@@ -52,6 +57,11 @@ def main():
     ap.add_argument("--url", required=True, help="Base URL of the running server, e.g. https://mobilefos-production.up.railway.app")
     ap.add_argument("--username", required=True, help="An admin account (User.is_admin)")
     ap.add_argument("--dir", default="data/DOCS", help="Directory of *.pdf files (default: data/DOCS)")
+    ap.add_argument("--no-prune", action="store_true",
+                    help="Leave published documents that are no longer in --dir. By default the "
+                         "published set is made to MATCH the folder, asking first.")
+    ap.add_argument("--yes", action="store_true",
+                    help="Do not ask before removing documents that are no longer in --dir")
     args = ap.parse_args()
 
     base_url = args.url.rstrip("/")
@@ -129,6 +139,64 @@ def main():
             failed += 1
 
     print(f"\n{ok} document(s) published, {failed} failed.")
+
+    # ---- make the published set match the folder ----------------------
+    # Import alone is add-or-update, so a file deleted from data/DOCS stayed
+    # published forever. This is the other half of "the Docs tab shows what
+    # is in the folder".
+    #
+    # Skipped when any upload failed: the folder listing would then be a
+    # claim about a state we did not actually reach, and acting on it could
+    # delete a document whose replacement never landed.
+    if args.no_prune:
+        print("Prune skipped (--no-prune): documents no longer in the folder stay published.")
+    elif failed:
+        print("Prune skipped: an upload failed, so the folder is not a safe picture "
+              "of what should be published. Fix the failure and re-run.")
+    elif not files:
+        print("Prune skipped: no PDFs found, and an empty folder is far more likely "
+              "to be the wrong --dir than a request to unpublish everything.")
+    else:
+        try:
+            r = session.post(f"{base_url}/docs/sync",
+                             json={"slugs": [f.name for f in files], "dry_run": True},
+                             timeout=60)
+            r.raise_for_status()
+            doomed = r.json().get("would_remove", [])
+        except (requests.RequestException, ValueError) as e:
+            print(f"Could not check for stale documents: {e}")
+            sys.exit(1 if failed else 0)
+
+        if not doomed:
+            print("Nothing stale — the Docs tab already matches this folder.")
+        else:
+            print(f"\n{len(doomed)} published document(s) are NOT in {docs_dir}:")
+            for d in doomed:
+                print(f"    {d['title']}  ({d['filename']})")
+            print("Removing them also deletes every pilot's acknowledgement of them,")
+            print("and the PDF itself — these live in the database, not in the repo.")
+            go = args.yes
+            if not go:
+                try:
+                    go = input("Remove them? [y/N] ").strip().lower() in ("y", "yes")
+                except EOFError:
+                    go = False
+            if not go:
+                print("Left alone.")
+            else:
+                r = session.post(f"{base_url}/docs/sync",
+                                 json={"slugs": [f.name for f in files]}, timeout=60)
+                if r.ok:
+                    print(f"Removed {len(r.json().get('removed', []))} stale document(s).")
+                else:
+                    detail = ""
+                    try:
+                        detail = r.json().get("error", "")
+                    except ValueError:
+                        detail = r.text[:200]
+                    print(f"FAIL  remove: {r.status_code} {detail}")
+                    failed += 1
+
     sys.exit(1 if failed else 0)
 
 

@@ -41,7 +41,7 @@ import release_engine
 from fos_pages import AIRLINE_IATA, synthesize_crew
 from models import (
     db, User, Leg, PbsImport, PairingPack, SignatureLog, ReleaseCache, TripCheckIn,
-    Document, DocumentAck,
+    Document, DocumentAck, Message,
 )
 import simbrief_ofp
 
@@ -495,6 +495,35 @@ AUTH_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="MobileCCI">
+<script>
+// How much of the top of the window iOS is covering, which is NOT the same
+// as env(safe-area-inset-top).
+//
+// An iPad has no notch, so that inset is 0 — including in landscape, and
+// including when the app is installed to the home screen. But
+// apple-mobile-web-app-status-bar-style=black-translucent means iOS still
+// draws its translucent status bar OVER the page there. Trusting env()
+// alone is why the acknowledgement banner kept ending up underneath it: the
+// padding computed to 11px against a ~24pt overlay.
+//
+// So: take the inset when there is one (a notched phone reports 44-59), and
+// otherwise reserve a status bar's worth, but only in standalone — in a
+// normal browser tab nothing is overlaid and reserving space would just
+// waste it. Every top offset in the stylesheet reads this one value.
+(function(){
+  var standalone = window.navigator.standalone === true ||
+    (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+  var root = document.documentElement;
+  // Back to a real status bar's height. The 44px this briefly carried was
+  // to lift the acknowledgement banner's text clear of the translucent
+  // wash, which reaches further down than the bar itself; that banner is
+  // now a blocking overlay in the content area, so nothing sits in the
+  // washed band and there is nothing to lift.
+  root.style.setProperty('--status-bar-min', standalone ? '24px' : '0px');
+  root.style.setProperty('--status-bar',
+    'max(env(safe-area-inset-top), var(--status-bar-min, 0px))');
+})();
+</script>
 <link rel="manifest" href="/static/manifest.json">
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <link rel="icon" href="/static/icon-192.png">
@@ -1726,6 +1755,46 @@ def import_document():
         "revision": doc.revision, "size_bytes": doc.size_bytes,
         "acks_cleared": doc.revision > 1,
     })
+
+
+@app.route("/docs/sync", methods=["POST"])
+def sync_documents():
+    """Body: {"slugs": [...], "dry_run": bool}. Makes the published set
+    match the uploader's folder by deleting every document whose slug is
+    NOT in the list.
+
+    Import on its own is add-or-update, so a file deleted from data/DOCS
+    stayed published forever with nothing in the app to say it was stale —
+    the reported "it caches old deleted ones". This is the other half.
+
+    Two deliberate guards, because this deletes PDFs that exist nowhere
+    else once removed (documents live in the database, not in the deployed
+    code):
+      * An empty slug list is refused outright. That is what an upload run
+        against the wrong directory looks like, and honouring it would wipe
+        every published document.
+      * dry_run returns exactly what WOULD go without touching anything,
+        so the uploader can show the list and ask before doing it.
+    """
+    denied = _admin_required("sync documents")
+    if denied:
+        return denied
+    body = request.get_json(silent=True) or {}
+    slugs = body.get("slugs")
+    if not isinstance(slugs, list) or not slugs:
+        return jsonify({"error": "slugs must be a non-empty list — refusing to "
+                                 "delete every document"}), 400
+    keep = {_doc_slug(str(x)) for x in slugs}
+    doomed = [d for d in Document.query.order_by(Document.title).all() if d.slug not in keep]
+    removed = [{"id": d.id, "slug": d.slug, "title": d.title, "filename": d.filename}
+               for d in doomed]
+    if body.get("dry_run"):
+        return jsonify({"would_remove": removed, "kept": len(keep)})
+    for d in doomed:
+        DocumentAck.query.filter_by(document_id=d.id).delete()
+        db.session.delete(d)
+    db.session.commit()
+    return jsonify({"removed": removed, "kept": len(keep)})
 
 
 @app.route("/docs/<int:doc_id>", methods=["DELETE"])
@@ -2963,6 +3032,133 @@ def _ofp_is_this_leg(simbrief_user, record):
     )
 
 
+# ---------------------------------------------------------------------------
+# Flight-deck messages
+# ---------------------------------------------------------------------------
+
+def _msg_prefix(record):
+    """"FLT 1234 31AUG" — the flight this message is about, in the form a
+    crew reads it off a release."""
+    flt = (record.get("flight_number") or "").strip() or "----"
+    raw = (record.get("dep_date") or record.get("date") or "").strip()
+    day = ""
+    for fmt in ("%Y-%m-%d", "%m/%d/%y", "%m/%d/%Y", "%d%b%y", "%d%b"):
+        try:
+            day = datetime.strptime(raw, fmt).strftime("%d%b").upper()
+            break
+        except (ValueError, TypeError):
+            continue
+    if not day:
+        day = raw.upper()
+    return f"FLT {flt} {day}".strip()
+
+
+def _add_message(user_id, kind, body, dedupe, record=None, leg_id=None):
+    """Writes one message unless one already carries the same dedupe key.
+
+    This is what makes it safe to call from the 3-minute sync tick. The
+    check deliberately counts ACKNOWLEDGED messages too: an earlier version
+    ignored them, which meant acknowledging a drift got it re-posted on the
+    very next tick and every three minutes after that. A condition the
+    pilot has already seen and dealt with must stay quiet.
+
+    Saying something new therefore requires a new key, which is why the
+    drift key includes the flight SimBrief actually holds — drifting to a
+    *different* flight is a different key and does speak up."""
+    existing = Message.query.filter_by(user_id=user_id, dedupe=dedupe).first()
+    if existing:
+        return None
+    record = record or {}
+    msg = Message(
+        user_id=user_id, leg_id=leg_id, kind=kind,
+        flight_number=(record.get("flight_number") or "")[:16],
+        dep_date=(record.get("dep_date") or "")[:16],
+        body=body[:200], dedupe=dedupe[:200],
+    )
+    db.session.add(msg)
+    db.session.commit()
+    return msg
+
+
+def _unacked_message_count():
+    try:
+        return Message.query.filter_by(user_id=current_user.id, acknowledged_at=None).count()
+    except Exception:
+        return 0
+
+
+@app.route("/messages")
+def list_messages():
+    rows = (Message.query.filter_by(user_id=current_user.id)
+            .order_by(Message.created_at.desc(), Message.id.desc()).limit(100).all())
+    return jsonify({
+        "unacknowledged": _unacked_message_count(),
+        "messages": [{
+            "id": m.id, "kind": m.kind, "body": m.body,
+            "leg_id": m.leg_id, "flight_number": m.flight_number,
+            "created_at": _iso(m.created_at), "acknowledged_at": m.acknowledged_at,
+        } for m in rows],
+    })
+
+
+@app.route("/messages/<int:msg_id>/ack", methods=["POST"])
+def ack_message(msg_id):
+    m = Message.query.filter_by(id=msg_id, user_id=current_user.id).first()
+    if not m:
+        return jsonify({"error": "not found"}), 404
+    if not m.acknowledged_at:
+        m.acknowledged_at = datetime.now(timezone.utc).isoformat()
+        db.session.commit()
+    return jsonify({"ok": True, "unacknowledged": _unacked_message_count()})
+
+
+@app.route("/messages/check", methods=["POST"])
+def check_messages():
+    """Called from the auto-sync tick. Asks one question: does the release
+    we hold for this leg still describe what SimBrief has on the account?
+
+    The FIRST message for a leg is posted when its release is generated
+    ("[NEW] RLS AVAILABLE" — see generate_release). Everything after that
+    is drift: the pilot re-dispatched on SimBrief and what is in the app is
+    now stale. Nothing is posted for a leg with no release, because there
+    is nothing yet to be out of date.
+    """
+    body = request.get_json(silent=True) or {}
+    try:
+        leg_id = int(body.get("leg_id") or 0)
+    except (TypeError, ValueError):
+        leg_id = 0
+    if not leg_id:
+        return jsonify({"unacknowledged": _unacked_message_count()})
+    record = _get_leg(leg_id)
+    if not record:
+        return jsonify({"unacknowledged": _unacked_message_count()})
+    if not ReleaseCache.query.filter_by(leg_id=leg_id).first():
+        return jsonify({"unacknowledged": _unacked_message_count()})
+
+    simbrief_user = (body.get("simbrief_user") or "").strip() or current_user.default_simbrief_user
+    if not simbrief_user:
+        return jsonify({"unacknowledged": _unacked_message_count()})
+
+    matches, _why = _ofp_is_this_leg(simbrief_user, record)
+    if not matches:
+        fields = {}
+        try:
+            fields = _cached_ofp_fields(simbrief_user) or {}
+        except Exception:
+            fields = {}
+        on_account = "{} {}-{}".format(
+            (fields.get("flight_number") or "?"),
+            (fields.get("origin") or "?"), (fields.get("destination") or "?"))
+        _add_message(
+            current_user.id, "rls_drift",
+            f"{_msg_prefix(record)} [UPD] RLS DIFFERS FROM SIMBRIEF - NOW {on_account}",
+            # Keyed on what SimBrief holds, so drifting to a different
+            # flight later is a NEW message rather than a silenced repeat.
+            f"rls-drift:{leg_id}:{on_account}", record=record, leg_id=leg_id)
+    return jsonify({"unacknowledged": _unacked_message_count()})
+
+
 @app.route("/fos/<int:leg_id>/release", methods=["POST"])
 def generate_release(leg_id):
     """Generates (or, by far the common case, just returns) this leg's
@@ -3012,14 +3208,23 @@ def generate_release(leg_id):
     if not matches:
         return jsonify({"error": why_not}), 409
 
+    # The digit after the point in the page header's "RELEASE 6.7": how many
+    # times this leg has been generated, wrapping 9 -> 0. Kept in the cached
+    # payload rather than its own column — it is one small int that belongs
+    # to exactly the row already being written, so it needs no migration.
+    # First generation is 0, which is what the header printed before this
+    # existed, so an unregenerated release reads the same as it always did.
+    generation = ((cached.payload.get("generation", -1) + 1) % 10) if cached else 0
     try:
         rls_bytes, wb_bytes, filename = release_engine.generate_release_pdfs(
-            user_id, gate=record.get("dep_gate", ""), arr_gate=record.get("arr_gate", ""))
+            user_id, gate=record.get("dep_gate", ""), arr_gate=record.get("arr_gate", ""),
+            generation=generation)
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 502
 
     payload = {
         "filename": filename,
+        "generation": generation,
         "rls_pdf_b64": base64.b64encode(rls_bytes).decode("ascii"),
     }
     if wb_bytes:
@@ -3042,6 +3247,10 @@ def generate_release(leg_id):
         db.session.add(ReleaseCache(leg_id=leg_id, filename=filename, payload=payload, generated_at=generated_at))
     db.session.commit()
 
+    _add_message(
+        current_user.id, "rls_new",
+        f"{_msg_prefix(record)} [NEW] RLS AVAILABLE",
+        f"rls-new:{leg_id}", record=record, leg_id=leg_id)
     return jsonify({
         **_gate_release_payload(payload, record.get("fit_for_duty")),
         "cached": False, "generated_at": generated_at.isoformat(),
@@ -3591,6 +3800,35 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="MobileCCI">
+<script>
+// How much of the top of the window iOS is covering, which is NOT the same
+// as env(safe-area-inset-top).
+//
+// An iPad has no notch, so that inset is 0 — including in landscape, and
+// including when the app is installed to the home screen. But
+// apple-mobile-web-app-status-bar-style=black-translucent means iOS still
+// draws its translucent status bar OVER the page there. Trusting env()
+// alone is why the acknowledgement banner kept ending up underneath it: the
+// padding computed to 11px against a ~24pt overlay.
+//
+// So: take the inset when there is one (a notched phone reports 44-59), and
+// otherwise reserve a status bar's worth, but only in standalone — in a
+// normal browser tab nothing is overlaid and reserving space would just
+// waste it. Every top offset in the stylesheet reads this one value.
+(function(){
+  var standalone = window.navigator.standalone === true ||
+    (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+  var root = document.documentElement;
+  // Back to a real status bar's height. The 44px this briefly carried was
+  // to lift the acknowledgement banner's text clear of the translucent
+  // wash, which reaches further down than the bar itself; that banner is
+  // now a blocking overlay in the content area, so nothing sits in the
+  // washed band and there is nothing to lift.
+  root.style.setProperty('--status-bar-min', standalone ? '24px' : '0px');
+  root.style.setProperty('--status-bar',
+    'max(env(safe-area-inset-top), var(--status-bar-min, 0px))');
+})();
+</script>
 <link rel="manifest" href="/static/manifest.json">
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <link rel="icon" href="/static/icon-192.png">
@@ -3615,9 +3853,28 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
   .navtab:disabled{opacity:.4;cursor:default;}
   /* Same fixed gear as FOS_TEMPLATE (see its own .settings-fab comment) —
      Home has no topbar of its own to hang a per-page icon off of. */
-  .settings-fab{position:fixed;top:calc(env(safe-area-inset-top) + 10px);right:calc(env(safe-area-inset-right) + 16px);z-index:25;background:var(--card);border:1px solid var(--border);border-radius:50%;width:34px;height:34px;display:flex;align-items:center;justify-content:center;color:var(--label);cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.12);}
+  /* Same treatment as the FOS template's copy: pinned, and it owns the
+     safe-area inset because it is the topmost element. */
+  /* Blocking, not advisory: opaque rather than the loading overlay's 50%,
+     because there is nothing behind it worth reading until the documents
+     are acknowledged. Same top/bottom geometry though, so the header and
+     the tab bar stay visible and tappable. z-index 17 puts it over the
+     loading overlay (15) — a load finishing must not reveal the app. */
+  #doc-lock{position:fixed;left:env(safe-area-inset-left);right:env(safe-area-inset-right);
+    z-index:17;display:flex;align-items:center;justify-content:center;padding:24px;}
+  #doc-lock[hidden]{display:none;}
+  .dl-scrim{position:absolute;inset:0;background:var(--bg);}
+  .dl-card{position:relative;max-width:420px;text-align:center;display:flex;
+    flex-direction:column;align-items:center;gap:14px;}
+  .dl-mark{width:76px;height:76px;background:var(--nac-red);display:flex;align-items:center;
+    justify-content:center;box-shadow:0 2px 10px rgba(0,0,0,.18);flex-shrink:0;}
+  .dl-mark img{width:56px;height:56px;object-fit:contain;}
+  .dl-card h2{margin:0;font-size:19px;font-weight:700;color:var(--value);}
+  .dl-card p{margin:0;font-size:14px;line-height:1.45;color:var(--label);}
+  .dl-card button{margin:4px 0 0;padding:12px 22px;font-size:15px;font-weight:600;
+    background:var(--blue);color:#fff;border:none;border-radius:7px;cursor:pointer;}
+  .settings-fab{position:fixed;top:calc(var(--ack-h,0px) + var(--safe-top, var(--status-bar, 0px)) + var(--topbar-lead, 14px));right:calc(env(safe-area-inset-right) + 16px);z-index:25;background:var(--card);border:1px solid var(--border);border-radius:50%;width:34px;height:34px;display:flex;align-items:center;justify-content:center;color:var(--label);cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.12);}
   .settings-fab svg{width:18px;height:18px;flex-shrink:0;}
-  @media (min-width: 768px){ .settings-fab{top:calc(env(safe-area-inset-top) + 38px);} }
   h1{font-size:18px;color:var(--blue-dark);margin:0 0 16px;}
   label{display:block;font-size:13px;font-weight:600;margin:10px 0 4px;color:var(--value);}
   textarea, select, input[type=text]{width:100%;max-width:640px;font-family:inherit;font-size:13.5px;padding:9px 10px;border:1px solid var(--border);border-radius:5px;box-sizing:border-box;background:var(--card);color:var(--value);}
@@ -3660,7 +3917,15 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
 </style></head><body>
 <!-- Styled inline rather than via .ffd-banner: that class lives only in
      FOS_TEMPLATE's stylesheet, and this template has its own. -->
-<div id="doc-ack-banner" style="display:none;cursor:pointer;background:var(--red);color:#fff;font-size:13px;font-weight:600;line-height:1.4;padding:11px 17px;" onclick="window.location.href='/docs'"></div>
+<div id="doc-lock" hidden role="alertdialog" aria-labelledby="doc-lock-title-home">
+  <div class="dl-scrim"></div>
+  <div class="dl-card">
+    <div class="dl-mark"><img src="/static/nac-bear.png" alt="" onerror="this.remove()"></div>
+    <h2 id="doc-lock-title-home">Acknowledgement Required</h2>
+    <p id="doc-lock-body"></p>
+    <button type="button" onclick="window.location.href='/docs'">Review Documents</button>
+  </div>
+</div>
 
 <button class="settings-fab" title="Settings" onclick="window.location.href='/schedule?view=settings'">
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.34 1.87l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.7 1.7 0 00-1.87-.34 1.7 1.7 0 00-1 1.55V21a2 2 0 11-4 0v-.09A1.7 1.7 0 009 19.4a1.7 1.7 0 00-1.87.34l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.7 1.7 0 004.6 15a1.7 1.7 0 00-1.55-1H3a2 2 0 110-4h.09A1.7 1.7 0 004.6 9a1.7 1.7 0 00-.34-1.87l-.06-.06a2 2 0 112.83-2.83l.06.06A1.7 1.7 0 009 4.6a1.7 1.7 0 001-1.55V3a2 2 0 114 0v.09a1.7 1.7 0 001 1.55 1.7 1.7 0 001.87-.34l.06-.06a2 2 0 112.83 2.83l-.06.06A1.7 1.7 0 0019.4 9a1.7 1.7 0 001.55 1H21a2 2 0 110 4h-.09a1.7 1.7 0 00-1.55 1z"/></svg>
@@ -3797,14 +4062,29 @@ function homeNavTab(view){
   window.location.href = '/fos/' + CURRENT_LEG_ID + '?view=' + view;
 }
 // Company documents need acknowledging whether or not a leg is loaded, so
-// this banner is on Home too (FOS_TEMPLATE renders its own copy).
+// Home carries the same lock (FOS_TEMPLATE renders its own copy). There is
+// no exempt view here — Docs is a page of its own, and the button goes to
+// it, so the lock always has an exit.
+function _positionDocLock(){
+  const el = document.getElementById('doc-lock');
+  if(!el || el.hidden) return;
+  const topbar = document.querySelector('.view.active .topbar') || document.querySelector('.topbar');
+  const tabbar = document.querySelector('.tabbar');
+  el.style.top = Math.max(0, topbar ? topbar.getBoundingClientRect().bottom : 0) + 'px';
+  el.style.bottom = (tabbar ? tabbar.getBoundingClientRect().height : 0) + 'px';
+}
 (function(){
   const n = parseInt("$unacked_docs", 10) || 0;
   if(!n) return;
-  const el = document.getElementById('doc-ack-banner');
-  el.textContent = n + ' company document' + (n === 1 ? '' : 's')
-    + ' need' + (n === 1 ? 's' : '') + ' your acknowledgement — tap to review.';
-  el.style.display = '';
+  const el = document.getElementById('doc-lock');
+  if(!el) return;
+  document.getElementById('doc-lock-body').textContent =
+    n + ' company document' + (n === 1 ? '' : 's') + ' need' + (n === 1 ? 's' : '') +
+    ' your acknowledgement before you can use the app.';
+  el.hidden = false;
+  _positionDocLock();
+  window.addEventListener('resize', _positionDocLock);
+  window.addEventListener('scroll', _positionDocLock, {passive: true});
 })();
 function showHomeView(view){
   document.getElementById('home-view').classList.toggle('active', view==='home');
@@ -4101,6 +4381,35 @@ FOS_TEMPLATE = """<!DOCTYPE html>
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="MobileCCI">
+<script>
+// How much of the top of the window iOS is covering, which is NOT the same
+// as env(safe-area-inset-top).
+//
+// An iPad has no notch, so that inset is 0 — including in landscape, and
+// including when the app is installed to the home screen. But
+// apple-mobile-web-app-status-bar-style=black-translucent means iOS still
+// draws its translucent status bar OVER the page there. Trusting env()
+// alone is why the acknowledgement banner kept ending up underneath it: the
+// padding computed to 11px against a ~24pt overlay.
+//
+// So: take the inset when there is one (a notched phone reports 44-59), and
+// otherwise reserve a status bar's worth, but only in standalone — in a
+// normal browser tab nothing is overlaid and reserving space would just
+// waste it. Every top offset in the stylesheet reads this one value.
+(function(){
+  var standalone = window.navigator.standalone === true ||
+    (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+  var root = document.documentElement;
+  // Back to a real status bar's height. The 44px this briefly carried was
+  // to lift the acknowledgement banner's text clear of the translucent
+  // wash, which reaches further down than the bar itself; that banner is
+  // now a blocking overlay in the content area, so nothing sits in the
+  // washed band and there is nothing to lift.
+  root.style.setProperty('--status-bar-min', standalone ? '24px' : '0px');
+  root.style.setProperty('--status-bar',
+    'max(env(safe-area-inset-top), var(--status-bar-min, 0px))');
+})();
+</script>
 <link rel="manifest" href="/static/manifest.json">
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <link rel="icon" href="/static/icon-192.png">
@@ -4198,17 +4507,28 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .weight-grid>div{display:flex;flex-direction:column;align-items:center;gap:2px;background:var(--bg);border-radius:8px;padding:7px 4px;}
   .weight-grid .wg-lbl{font-size:10.5px;color:var(--label);text-transform:uppercase;letter-spacing:.03em;}
   .weight-grid .wg-val{font-size:13.5px;font-weight:700;color:var(--value);font-variant-numeric:tabular-nums;}
-  .topbar{display:flex;flex-wrap:wrap;align-items:center;margin-bottom:10px;position:sticky;top:0;z-index:10;background:var(--bg);padding-top:calc(env(safe-area-inset-top) + 6px);margin-top:-6px;margin-left:-16px;margin-right:-16px;padding-left:16px;padding-right:16px;}
+  .topbar{display:flex;flex-wrap:wrap;align-items:center;margin-bottom:10px;position:sticky;top:var(--ack-h,0px);z-index:10;background:var(--bg);padding-top:calc(var(--safe-top, var(--status-bar, 0px)) + var(--topbar-lead, 14px));margin-top:-14px;margin-left:-16px;margin-right:-16px;padding-left:16px;padding-right:16px;}
   /* Tablet-width browsers (iPadOS Safari's tabbed mode among them) draw
      their own chrome — tab-strip controls, a floating "stoplight" cluster
      — over the top-left/top-right of the page that safe-area-inset can't
      account for (it only reports hardware notch/home-indicator, not
      browser UI). Extra clearance here is a defensive guess, not measured
      against a real device — right height still needs confirming there. */
-  @media (min-width: 768px){ .topbar{padding-top:calc(env(safe-area-inset-top) + 34px);} }
+  /* --status-bar now guarantees clearance of the overlaid iOS status bar,
+     so the 42px this used to carry on tablets was doing that job twice
+     and made the header noticeably tall. The lead is just breathing
+     room now, and 18px is enough of it. */
+  @media (min-width: 768px){ :root{ --topbar-lead:18px; } }
   .back-link{order:1;display:flex;align-items:center;color:var(--value);background:none;border:none;cursor:pointer;padding:6px 4px;text-decoration:none;}
-  .topbar-actions{order:2;margin-left:auto;display:flex;align-items:center;gap:14px;padding-right:38px;}
-  .topbar-title{order:3;flex:1 1 100%;text-align:center;margin-top:2px;}
+  .topbar-actions{order:3;display:flex;align-items:center;gap:14px;padding-right:38px;}
+  /* The title used to be flex:1 1 100%, which forced it onto a SECOND row
+     under the back arrow and the actions and made the header about 30px
+     taller than it needed to be. It now shares the row, taking the space
+     between them; min-width:0 lets a long title ellipsise rather than
+     pushing the actions off the edge, and .topbar still wraps if a really
+     narrow screen leaves it no room. */
+  .topbar-title{order:2;flex:1 1 auto;min-width:0;text-align:center;}
+  .topbar-title h1{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .topbar-title h1{font-size:19px;margin:0;font-weight:600;color:var(--blue-dark);}
   .topbar-title p{font-size:12px;margin:2px 0 0;color:var(--label);}
   .icon-btn{background:none;border:none;color:var(--label);cursor:pointer;padding:2px;display:flex;}
@@ -4219,9 +4539,8 @@ FOS_TEMPLATE = """<!DOCTYPE html>
      way to guarantee it's on every single page without duplicating it
      into all 14 view sections. Sits clear of the topbar's own
      actions/title since it's positioned independently. */
-  .settings-fab{position:fixed;top:calc(env(safe-area-inset-top) + 10px);right:calc(env(safe-area-inset-right) + 16px);z-index:25;background:var(--card);border:1px solid var(--border);border-radius:50%;width:34px;height:34px;display:flex;align-items:center;justify-content:center;color:var(--label);cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.12);}
+  .settings-fab{position:fixed;top:calc(var(--ack-h,0px) + var(--safe-top, var(--status-bar, 0px)) + var(--topbar-lead, 14px));right:calc(env(safe-area-inset-right) + 16px);z-index:25;background:var(--card);border:1px solid var(--border);border-radius:50%;width:34px;height:34px;display:flex;align-items:center;justify-content:center;color:var(--label);cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.12);}
   .settings-fab svg{width:18px;height:18px;flex-shrink:0;}
-  @media (min-width: 768px){ .settings-fab{top:calc(env(safe-area-inset-top) + 38px);} }
   .status-bar{background:var(--navy);color:#fff;display:flex;align-items:center;justify-content:space-between;padding:8px 14px;border-radius:var(--radius) var(--radius) 0 0;font-size:13px;font-weight:600;}
   .flight-summary{background:var(--card);display:flex;align-items:center;padding:12px 14px;border-bottom:1px solid var(--border);font-size:13px;gap:18px;flex-wrap:wrap;}
   .flight-summary .fnum{font-size:15px;font-weight:700;}
@@ -4276,6 +4595,38 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .doc-row .actions svg{width:19px;height:19px;color:var(--label);cursor:pointer;padding:7px;margin:-7px;box-sizing:content-box;}
   .doc-row .check{color:var(--inactive,#9aa1ab);cursor:pointer;}
   .ffd-banner{background:var(--red);color:#fff;font-size:13px;font-weight:600;line-height:1.4;padding:11px 17px;}
+  /* The doc-ack banner sits ABOVE .topbar in the document and used to be
+     static, so it scrolled away and came back — which reads as the header
+     growing and shrinking as you scroll. Pinning it keeps the header one
+     constant height, and keeps an unacknowledged-documents notice on screen
+     rather than only when you happen to be at the top.
+     It also has to outrank the loading overlay (15), or a load buries the
+     notice behind the translucent scrim. */
+  /* Topmost element on the page, so it owns the safe-area inset: pinned
+     at top:0, its text would otherwise sit underneath the iOS status
+     bar. When it is showing, script zeroes --safe-top so .topbar stops
+     adding the same inset a second time, and trims --topbar-lead --
+     the bar is no longer the thing holding the header off the screen
+     edge. Both of those were double-counted on a real iPad and are
+     invisible in a desktop emulator, where the inset is 0. */
+  /* Blocking, not advisory: opaque rather than the loading overlay's 50%,
+     because there is nothing behind it worth reading until the documents
+     are acknowledged. Same top/bottom geometry though, so the header and
+     the tab bar stay visible and tappable. z-index 17 puts it over the
+     loading overlay (15) — a load finishing must not reveal the app. */
+  #doc-lock{position:fixed;left:env(safe-area-inset-left);right:env(safe-area-inset-right);
+    z-index:17;display:flex;align-items:center;justify-content:center;padding:24px;}
+  #doc-lock[hidden]{display:none;}
+  .dl-scrim{position:absolute;inset:0;background:var(--bg);}
+  .dl-card{position:relative;max-width:420px;text-align:center;display:flex;
+    flex-direction:column;align-items:center;gap:14px;}
+  .dl-mark{width:76px;height:76px;background:var(--nac-red);display:flex;align-items:center;
+    justify-content:center;box-shadow:0 2px 10px rgba(0,0,0,.18);flex-shrink:0;}
+  .dl-mark img{width:56px;height:56px;object-fit:contain;}
+  .dl-card h2{margin:0;font-size:19px;font-weight:700;color:var(--value);}
+  .dl-card p{margin:0;font-size:14px;line-height:1.45;color:var(--label);}
+  .dl-card button{margin:4px 0 0;padding:12px 22px;font-size:15px;font-weight:600;
+    background:var(--blue);color:#fff;border:none;border-radius:7px;cursor:pointer;}
   .doc-row .check.signed{color:var(--blue-dark);}
   .doc-row .resign-link{font-size:12.5px;font-weight:600;color:var(--blue);cursor:pointer;text-decoration:none;white-space:nowrap;}
   .doc-row .primary-action{display:inline-flex;align-items:center;gap:10px;}
@@ -4427,6 +4778,19 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   /* A real hit target on a touch screen without making the chip taller. */
   .pdf-tab-x{flex:0 0 auto;font-size:15px;line-height:1;opacity:.65;padding:2px 3px;margin:-2px -3px;}
   .pdf-tab-x:hover{opacity:1;}
+  /* Messages read like ACARS lines: monospace, one flight per card, with
+     the acknowledgement kept as a record rather than dismissing the card. */
+  .msg-card{padding:13px 16px;border-bottom:1px solid var(--border);background:var(--card);}
+  .msg-card.acked{opacity:.62;}
+  .msg-line{font-family:ui-monospace,Menlo,monospace;font-size:13px;font-weight:600;
+    color:var(--value);letter-spacing:.02em;word-break:break-word;}
+  .msg-meta{margin-top:5px;font-size:11.5px;color:var(--label);}
+  .msg-ackbar{margin-top:10px;}
+  .msg-ackbar button{margin:0;padding:8px 15px;font-size:13px;font-weight:600;
+    background:var(--blue);color:#fff;border:none;border-radius:5px;cursor:pointer;}
+  .msg-badge{position:absolute;top:3px;right:calc(50% - 22px);min-width:16px;height:16px;
+    padding:0 4px;border-radius:8px;background:var(--red);color:#fff;font-size:10px;
+    font-weight:700;line-height:16px;text-align:center;}
   .view{display:none;}
   .view.active{display:block;}
   #toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(12px);background:#1a1f29;color:#fff;padding:9px 16px;border-radius:20px;font-size:13px;opacity:0;pointer-events:none;transition:opacity .18s ease, transform .18s ease;box-shadow:0 4px 14px rgba(0,0,0,.25);z-index:10;}
@@ -4468,7 +4832,19 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.34 1.87l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.7 1.7 0 00-1.87-.34 1.7 1.7 0 00-1 1.55V21a2 2 0 11-4 0v-.09A1.7 1.7 0 009 19.4a1.7 1.7 0 00-1.87.34l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.7 1.7 0 004.6 15a1.7 1.7 0 00-1.55-1H3a2 2 0 110-4h.09A1.7 1.7 0 004.6 9a1.7 1.7 0 00-.34-1.87l-.06-.06a2 2 0 112.83-2.83l.06.06A1.7 1.7 0 009 4.6a1.7 1.7 0 001-1.55V3a2 2 0 114 0v.09a1.7 1.7 0 001 1.55 1.7 1.7 0 001.87-.34l.06-.06a2 2 0 112.83 2.83l-.06.06A1.7 1.7 0 0019.4 9a1.7 1.7 0 001.55 1H21a2 2 0 110 4h-.09a1.7 1.7 0 00-1.55 1z"/></svg>
 </button>
 <div class="app-shell">
-  <div id="doc-ack-banner" class="ffd-banner" style="display:none;cursor:pointer;" onclick="showView('doclocker')"></div>
+  <!-- Sits between the header and the tab bar exactly like the loading
+       overlay, so both stay visible and usable — the pilot has to be able
+       to REACH Docs to clear it. Suppressed on the Docs list and the PDF
+       viewer for the same reason. -->
+  <div id="doc-lock" hidden role="alertdialog" aria-labelledby="doc-lock-title">
+    <div class="dl-scrim"></div>
+    <div class="dl-card">
+      <div class="dl-mark"><img src="/static/nac-bear.png" alt="" onerror="this.remove()"></div>
+      <h2 id="doc-lock-title">Acknowledgement Required</h2>
+      <p id="doc-lock-body"></p>
+      <button type="button" onclick="showView('doclocker')">Review Documents</button>
+    </div>
+  </div>
   <main class="main">
     <section id="overview-view" class="view active">
       <div class="topbar">
@@ -4504,6 +4880,19 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           </div>
           <div class="panel-card" id="ov-docs-card">
             <div class="panel-card-hdr">Preflight Docs</div>
+            <!-- The release is what a pilot comes to this card for, and it was
+                 the one thing not on it: the only way in was the "SimBrief /
+                 Send to Dispatch" row under External Apps, which reads as an
+                 outbound action, not as "your release lives here". The status
+                 line says whether one is on file and when it was generated,
+                 so a stale release is visible without opening anything. -->
+            <div class="doc-row" style="cursor:pointer;" onclick="showView('release')">
+              <div style="display:flex;align-items:center;gap:10px;">
+                <svg class="lead-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h5"/></svg>
+                <div><div class="code">Release &amp; TPS</div><div class="desc" id="ov-release-state">&mdash;</div></div>
+              </div>
+              <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></div>
+            </div>
             <div class="doc-row" style="cursor:pointer;" onclick="showView('saveddocs')">
               <div style="display:flex;align-items:center;gap:10px;">
                 <svg class="lead-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/><path d="M12 11v6"/><path d="M9 14l3 3 3-3"/></svg>
@@ -4683,7 +5072,7 @@ FOS_TEMPLATE = """<!DOCTYPE html>
         <button class="back-link" onclick="showView('overview')" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
         <div class="topbar-title"><h1>Messages</h1></div>
       </div>
-      <p class="placeholder-note">No messages.</p>
+      <div id="messages-body"></div>
     </section>
 
     <section id="pdf-view" class="view">
@@ -4957,6 +5346,12 @@ FOS_TEMPLATE = """<!DOCTYPE html>
           <a id="release-rls-link" style="display:none;background:var(--blue);color:#fff;text-decoration:none;padding:9px 14px;border-radius:5px;font-size:13px;font-weight:600;">Download RLS PDF</a>
           <a id="release-wb-link" style="display:none;background:var(--blue-dark);color:#fff;text-decoration:none;padding:9px 14px;border-radius:5px;font-size:13px;font-weight:600;">Download W&amp;B PDF</a>
         </div>
+        <!-- Regenerating used to be a text link buried mid-sentence in the
+             status line, and only rendered on the branch where FFD was
+             already signed — so the one time you most want a fresh release,
+             with the paperwork not yet signed, it was not on screen at all.
+             It is its own control now, shown whenever a release exists. -->
+        <button id="release-regen-btn" style="display:none;margin-top:10px;width:100%;background:var(--card);color:var(--blue-dark);border:1px solid var(--blue-dark);padding:11px;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;" onclick="generateRelease(true)">Regenerate Release &amp; TPS</button>
         <button id="confirm-continue-btn" style="display:none;margin-top:10px;width:100%;background:var(--label);color:#fff;border:none;padding:11px;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;" onclick="showView('overview')">Continue to Flight</button>
       </div>
     </section>
@@ -5078,6 +5473,10 @@ function showView(view){
   }
   if(view === 'admin') initAdminView();
   if(view === 'saveddocs') initSavedDocs();
+  if(view === 'messages') initMessages();
+  // Exempt on Docs and the PDF viewer, so every view change has to
+  // re-evaluate — leaving those puts the lock back up.
+  paintDocAckBanner();
   if(view === 'doclocker') initDocLocker();
   if(view === 'pairing') initPairingView();
   if(view === 'overview') initOverviewPills();
@@ -5224,6 +5623,93 @@ async function checkForSimbriefUpdate(){
     }
     _lastKnownOfpTs = ts;
   } catch(e) { /* best-effort — try again next interval */ }
+  // Same tick asks whether the release we hold still matches what SimBrief
+  // has. Kept separate from the block above deliberately: that one only
+  // fires when the OFP TIMESTAMP moves, and a pilot who re-dispatches a
+  // different flight onto the account is exactly the case where our
+  // release goes stale without this leg's own timestamp telling us.
+  try {
+    const mr = await fetch('/messages/check', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({leg_id: LEG_ID ? Number(LEG_ID) : 0, simbrief_user: user}),
+    });
+    if(mr.ok) paintMessageBadge((await mr.json()).unacknowledged || 0);
+  } catch(e) { /* best-effort */ }
+}
+
+// The nav tab carries the unacknowledged count, so a message posted by the
+// background tick is visible without opening Messages to look.
+function paintMessageBadge(n){
+  _unackedMessages = n;
+  ['tab-messages'].forEach(id => {
+    const tab = document.getElementById(id);
+    if(!tab) return;
+    let dot = tab.querySelector('.msg-badge');
+    if(!n){ if(dot) dot.remove(); return; }
+    if(!dot){
+      dot = document.createElement('span');
+      dot.className = 'msg-badge';
+      tab.appendChild(dot);
+    }
+    dot.textContent = n > 9 ? '9+' : String(n);
+  });
+}
+let _unackedMessages = 0;
+
+async function initMessages(){
+  const body = document.getElementById('messages-body');
+  showLoading(body);
+  let data;
+  try {
+    const r = await fetch('/messages');
+    data = await r.json();
+    if(!r.ok){ body.innerHTML = '<p class="placeholder-note">' + (data.error || 'Failed to load') + '</p>'; return; }
+  } catch(e) { body.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>'; return; }
+  paintMessageBadge(data.unacknowledged || 0);
+  if(!data.messages.length){
+    body.innerHTML = '<p class="placeholder-note">No messages.</p>';
+    return;
+  }
+  body.innerHTML = '';
+  data.messages.forEach(m => {
+    const card = document.createElement('div');
+    card.className = 'msg-card' + (m.acknowledged_at ? ' acked' : '');
+    const line = document.createElement('div');
+    line.className = 'msg-line';
+    line.textContent = m.body;
+    card.appendChild(line);
+    const meta = document.createElement('div');
+    meta.className = 'msg-meta';
+    meta.textContent = m.created_at ? new Date(m.created_at).toLocaleString() : '';
+    card.appendChild(meta);
+    if(m.acknowledged_at){
+      const done = document.createElement('div');
+      done.className = 'msg-meta';
+      done.textContent = 'Acknowledged ' + new Date(m.acknowledged_at).toLocaleString();
+      card.appendChild(done);
+    } else {
+      const bar = document.createElement('div');
+      bar.className = 'msg-ackbar';
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = 'Acknowledge';
+      btn.onclick = () => acknowledgeMessage(m.id, btn);
+      bar.appendChild(btn);
+      card.appendChild(bar);
+    }
+    body.appendChild(card);
+  });
+}
+
+async function acknowledgeMessage(id, btn){
+  btn.disabled = true;
+  try {
+    const r = await fetch('/messages/' + id + '/ack', {method: 'POST'});
+    const data = await r.json();
+    if(!r.ok){ btn.disabled = false; showToast(data.error || 'Could not acknowledge'); return; }
+    paintMessageBadge(data.unacknowledged || 0);
+    initMessages();
+  } catch(e) { btn.disabled = false; showToast('Request failed: ' + e); }
 }
 function startAutoSync(){
   if(_autoSyncTimer || !isAutoSyncOn()) return;
@@ -5449,27 +5935,69 @@ async function fetchAeroSuggestions(){
 function applyAeroRoute(){
   if(_aeroSuggestion && _aeroSuggestion.route) document.getElementById('sbgen-route').value = _aeroSuggestion.route;
 }
-// The explicit "generate" path — the Release view's own button and its
-// Regenerate link. Reading what is already on file goes through
-// ensureRelease() instead, which passes cached_only and never generates.
-function generateRelease(force){
+// readOnly re-reads what is already on file and repaints, without ever
+// generating — used by the post-FFD refresh, which only needs to pick up
+// the now-true fit_for_duty flag and must not manufacture a release for a
+// leg that never had one.
+// Says whether a release is on file for THIS leg and how old it is, so a
+// stale one is visible from Overview instead of only after opening the
+// Release view. Uses the read-only path — looking must never generate.
+async function paintReleaseState(){
+  const el = document.getElementById('ov-release-state');
+  if(!el || !LEG_ID) return;
+  try {
+    const r = await fetch('/fos/' + LEG_ID + '/release', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({cached_only: true}),
+    });
+    if(r.status === 404){ el.textContent = 'Not generated yet'; return; }
+    if(!r.ok){ el.textContent = ''; return; }
+    const data = await r.json();
+    const when = data.generated_at ? new Date(data.generated_at) : null;
+    const rev = (data.generation === undefined || data.generation === null)
+      ? '' : (' \u00b7 rev .' + data.generation);
+    el.textContent = when
+      ? ('Generated ' + when.toLocaleString() + rev)
+      : ('On file' + rev);
+  } catch(e) { el.textContent = ''; }
+}
+
+function generateRelease(force, readOnly){
   const btn = document.getElementById('release-gen-btn');
   const status = document.getElementById('release-status');
   const userId = document.getElementById('release-user').value.trim();
   if(!userId){ status.textContent = 'No SimBrief username on file — set one in Settings first.'; status.style.color = '#c0392b'; return; }
   btn.disabled = true;
+  const regenBtn = document.getElementById('release-regen-btn');
+  if(regenBtn) regenBtn.disabled = true;
   status.style.color = '';
   status.textContent = force ? 'Regenerating — this can take up to a minute…' : 'Generating release — this can take up to a minute…';
   document.getElementById('release-downloads').style.display = 'none';
-  fetch('/fos/' + LEG_ID + '/release', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({user_id:userId, force: !!force})})
+  // Both branches POST. readOnly used to GET, from a version of the route
+  // that had a GET; the merged one is POST-only with a cached_only flag, so
+  // that GET fell through to a 404 HTML page and the JSON parse blew up with
+  // "Unexpected token '<'". Its only caller is the refresh after signing
+  // FFD, which is why this went unnoticed.
+  fetch('/fos/' + LEG_ID + '/release', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(readOnly ? {cached_only: true}
+                                  : {user_id: userId, force: !!force}),
+  })
     .then(r => r.json().then(data => ({ok:r.ok, data})))
     .then(({ok, data}) => {
       btn.disabled = false;
+      if(regenBtn) regenBtn.disabled = false;
+      // cached_only 404s when nothing is on file, which is the normal state
+      // of a fresh flight rather than a failure worth a red line.
+      if(readOnly && !ok){ status.textContent = ''; return; }
       if(!ok){ status.textContent = 'Failed: ' + (data.error || 'unknown error'); status.style.color = '#c0392b'; return; }
       _setReleaseCache(data); // ensureRelease()/viewDoc() reuse this — one generation serves both paths
       // Generation itself is never blocked (soft gate) — the PDF renders
       // fine via viewDoc() either way. Only the Download links here stay
       // locked until FFD is signed, same as pdf-view's Export link.
+      // Regenerating is possible the moment a release exists, signed or
+      // not — it rebuilds the OFP and the TPS together.
+      document.getElementById('release-regen-btn').style.display = 'block';
       if(!data.fit_for_duty){
         status.textContent = 'Release generated — sign Fit for Duty (All Commands > FFD) to unlock downloads.';
         status.style.color = 'var(--red)';
@@ -5477,8 +6005,13 @@ function generateRelease(force){
         document.getElementById('release-wb-link').style.display = 'none';
         return;
       }
-      status.innerHTML = (data.cached ? 'Release already on file (generated ' + new Date(data.generated_at).toLocaleString() + ').' : 'Release generated.')
-        + ' <a href="#" onclick="generateRelease(true);return false;" style="color:inherit;">Regenerate</a>';
+      // The generation counter is the digit after the point in the PDF's
+      // own "RELEASE 6.7" header, so showing it here lets a pilot match the
+      // printout in front of them to what the app currently holds.
+      const _gen = (data.generation === undefined || data.generation === null) ? '' : (' \u00b7 rev .' + data.generation);
+      status.textContent = (data.cached
+        ? 'Release on file, generated ' + new Date(data.generated_at).toLocaleString()
+        : 'Release generated') + _gen;
       status.style.color = 'var(--blue-dark)';
       const rlsLink = document.getElementById('release-rls-link');
       rlsLink.href = 'data:application/pdf;base64,' + data.rls_pdf_b64;
@@ -5494,8 +6027,10 @@ function generateRelease(force){
       }
       document.getElementById('release-downloads').style.display = 'flex';
       document.getElementById('confirm-continue-btn').style.display = 'block';
+      paintReleaseState();
     })
-    .catch(e => { btn.disabled = false; status.textContent = 'Request failed: ' + e; status.style.color = '#c0392b'; });
+    .catch(e => { btn.disabled = false; if(regenBtn) regenBtn.disabled = false;
+                  status.textContent = 'Request failed: ' + e; status.style.color = '#c0392b'; });
 }
 function toggleSection(name){
   const bar = document.getElementById(name+'-bar');
@@ -5598,6 +6133,15 @@ window.addEventListener('resize', () => {
   const overlay = document.getElementById('load-overlay');
   if(overlay && !overlay.hidden) _positionLoadOverlay();
 });
+// The overlay is positioned from the header's measured bottom edge, and a
+// sticky header's bottom edge moves while the browser chrome collapses on
+// scroll. Without this it keeps a stale top and creeps over the header.
+window.addEventListener('scroll', () => {
+  const overlay = document.getElementById('load-overlay');
+  if(overlay && !overlay.hidden) _positionLoadOverlay();
+  const lock = document.getElementById('doc-lock');
+  if(lock && !lock.hidden) _positionDocLock();
+}, {passive: true});
 
 let toastTimer;
 function showToast(msg){
@@ -5656,37 +6200,137 @@ if(window.pdfjsLib){
 }
 let _pdfObjectUrl = null;
 let _pdfRenderToken = 0;
+// Every page gets a correctly-sized placeholder up front, but only the
+// pages near the viewport are ever rasterised, and they are released again
+// once they scroll well clear. Rendering the whole document eagerly is what
+// crashed the tab on the bigger company manuals: a page at device pixel
+// ratio is roughly 2.7 MB of canvas, so a 200-page FOM asked the browser
+// for gigabytes in one go.
+//
+// The placeholders carry each page's real aspect ratio, so the scrollbar is
+// honest from the first paint and nothing jumps around as pages fill in.
+let _pdfObserver = null;
+
+function _teardownPdfObserver(){
+  if(_pdfObserver){ _pdfObserver.disconnect(); _pdfObserver = null; }
+}
+
 async function renderPdfInline(bytes){
   const token = ++_pdfRenderToken;
   const container = document.getElementById('pdf-pages');
+  _teardownPdfObserver();
   container.innerHTML = '<p style="color:#fff;">Rendering…</p>';
   const pdf = await pdfjsLib.getDocument({data: bytes}).promise;
-  if(token !== _pdfRenderToken) return; // a newer viewDoc() call superseded this one
+  if(token !== _pdfRenderToken) return; // a newer open superseded this one
   container.innerHTML = '';
   const targetWidth = Math.max(container.clientWidth - 24, 280);
   // Render the bitmap at the screen's real device pixel ratio, not just
   // the CSS width — a canvas sized 1:1 to CSS pixels looks soft once the
   // browser upscales it on a Retina/high-DPI iPad. Same DPR-scaling
-  // pattern the signature pad canvas already uses; canvas.style.width
-  // stays at targetWidth so the displayed size is unchanged, only the
-  // underlying bitmap gets sharper.
+  // pattern the signature pad canvas already uses.
   const dpr = window.devicePixelRatio || 1;
-  for(let pageNum = 1; pageNum <= pdf.numPages; pageNum++){
-    if(token !== _pdfRenderToken) return;
-    const page = await pdf.getPage(pageNum);
-    const scale = (targetWidth / page.getViewport({scale:1}).width) * dpr;
-    const viewport = page.getViewport({scale});
-    const canvas = document.createElement('canvas');
-    canvas.className = 'pdf-page';
-    canvas.width = viewport.width;
-    canvas.height = viewport.height;
-    canvas.style.width = '100%';
-    canvas.style.maxWidth = targetWidth + 'px';
-    canvas.style.background = '#fff';
-    canvas.style.boxShadow = '0 1px 4px rgba(0,0,0,.35)';
-    container.appendChild(canvas);
-    await page.render({canvasContext: canvas.getContext('2d'), viewport}).promise;
+
+  // Every slot is sized from page 1 rather than from its own page. getPage
+  // is per-page work even though it rasterises nothing, and asking for all
+  // of them up front is what made a 200-page manual sit blank for the best
+  // part of a minute before the first page appeared. Documents are
+  // overwhelmingly uniform, and the rare page that is not corrects its own
+  // slot when it renders — a late nudge on one page beats a stall on all
+  // of them. Opening is now O(1) in page count.
+  const first = await pdf.getPage(1);
+  if(token !== _pdfRenderToken) return;
+  const nominal = first.getViewport({scale: 1});
+  const slots = [];
+  for(let n = 1; n <= pdf.numPages; n++){
+    const slot = document.createElement('div');
+    slot.className = 'pdf-slot';
+    slot.style.width = '100%';
+    slot.style.maxWidth = targetWidth + 'px';
+    // Reserve the height this page is expected to occupy, so the scrollbar
+    // is honest from the first paint.
+    slot.style.aspectRatio = nominal.width + ' / ' + nominal.height;
+    slot.style.background = '#fff';
+    slot.style.boxShadow = '0 1px 4px rgba(0,0,0,.35)';
+    slot.dataset.page = String(n);
+    container.appendChild(slot);
+    slots.push({slot, page: (n === 1 ? first : null), rendered: false, rendering: false});
   }
+  if(!slots.length) return;
+
+  async function fill(entry){
+    if(entry.rendered || entry.rendering || token !== _pdfRenderToken) return;
+    entry.rendering = true;
+    try {
+      // Fetched here, not up front — this is the per-page cost that used to
+      // be paid for the whole document before anything was shown.
+      if(!entry.page) entry.page = await pdf.getPage(Number(entry.slot.dataset.page));
+      if(token !== _pdfRenderToken) return;
+      const base = entry.page.getViewport({scale: 1});
+      // A page that is not the nominal size fixes its own slot.
+      const want = base.width + ' / ' + base.height;
+      if(entry.slot.style.aspectRatio.replace(/\s/g, '') !== want.replace(/\s/g, '')){
+        entry.slot.style.aspectRatio = want;
+      }
+      const scale = (targetWidth / base.width) * dpr;
+      const viewport = entry.page.getViewport({scale});
+      const canvas = document.createElement('canvas');
+      canvas.className = 'pdf-page';
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      canvas.style.width = '100%';
+      canvas.style.display = 'block';
+      await entry.page.render({canvasContext: canvas.getContext('2d'), viewport}).promise;
+      if(token !== _pdfRenderToken) return;
+      entry.slot.innerHTML = '';
+      entry.slot.appendChild(canvas);
+      entry.rendered = true;
+    } catch(e) {
+      // A page that will not render should not take the document with it.
+      entry.slot.innerHTML = '<p style="color:#900;padding:12px;font-size:12px;">page ' +
+        entry.slot.dataset.page + ' failed to render</p>';
+      entry.rendered = true;
+    } finally {
+      entry.rendering = false;
+    }
+  }
+
+  function release(entry){
+    if(!entry.rendered) return;
+    // Zero the canvas before dropping it: some browsers hold the backing
+    // store until the element is collected otherwise.
+    const c = entry.slot.querySelector('canvas');
+    if(c){ c.width = 0; c.height = 0; }
+    entry.slot.innerHTML = '';
+    entry.rendered = false;
+  }
+
+  // Without IntersectionObserver there is no way to know what is on screen,
+  // and a viewer stuck on page 1 forever is worse than a heavy one. Fall
+  // back to the old eager render — correct, just costly, and only on
+  // browsers old enough to lack an API iOS has had since 12.2.
+  if(typeof IntersectionObserver === 'undefined'){
+    for(const e of slots){
+      if(token !== _pdfRenderToken) return;
+      await fill(e);
+    }
+    return;
+  }
+
+  // rootMargin renders a screen ahead and behind, so scrolling at a normal
+  // speed never catches a blank page; anything further out is released.
+  _pdfObserver = new IntersectionObserver((entries) => {
+    if(token !== _pdfRenderToken) return;
+    entries.forEach(e => {
+      const entry = slots[Number(e.target.dataset.page) - 1];
+      if(!entry) return;
+      if(e.isIntersecting) fill(entry); else release(entry);
+    });
+  }, {root: null, rootMargin: '150% 0px', threshold: 0.01});
+  slots.forEach(e => _pdfObserver.observe(e.slot));
+
+  // The observer only fires on the next frame; paint page 1 immediately so
+  // the viewer is never briefly blank.
+  await fill(slots[0]);
 }
 // ---------------------------------------------------------------------
 // Tabbed PDF viewer. One #pdf-view is shared by release paperwork and by
@@ -5706,7 +6350,15 @@ function _pdfTabIndex(key){ return _pdfTabs.findIndex(t => t.key === key); }
 function renderPdfTabs(){
   const strip = document.getElementById('pdf-tabs');
   strip.innerHTML = '';
-  strip.style.display = _pdfTabs.length > 1 ? 'flex' : 'none';
+  // Shown from the FIRST tab. It used to wait for a second one, on the
+  // reasoning that the title bar already names a lone document and a strip
+  // holding one chip is wasted height — but that made opening a single
+  // saved doc look like the tabs were missing entirely, with no hint that
+  // opening another would keep this one. One chip is the affordance.
+  //
+  // Still hidden while an untabbed company document is showing:
+  // _activePdfTab is null then, so no chip matches what is on screen.
+  strip.style.display = (_pdfTabs.length >= 1 && _activePdfTab) ? 'flex' : 'none';
   _pdfTabs.forEach(t => {
     const el = document.createElement('button');
     el.type = 'button';
@@ -5733,6 +6385,8 @@ function renderPdfTabs(){
 async function openPdfTab(tab){
   const i = _pdfTabIndex(tab.key);
   if(i >= 0) _pdfTabs[i] = tab; else _pdfTabs.push(tab);
+  // Coming back from an untabbed company document.
+  _currentCompanyDoc = null;
   showView('pdf');
   await activatePdfTab(tab.key);
 }
@@ -5828,6 +6482,7 @@ async function viewDoc(kind, label){
 // closing the last tab tears the viewer down.
 function closePdfView(){
   _pdfRenderToken++; // cancel any render still in flight
+  _teardownPdfObserver();
   document.getElementById('pdf-pages').innerHTML = '';
   if(_pdfObjectUrl){ URL.revokeObjectURL(_pdfObjectUrl); _pdfObjectUrl = null; }
   // pdf-view is shared: a release PDF backs out to All Commands, but a
@@ -7866,17 +8521,49 @@ async function adminShowUser(userId){
 // of a SimBrief OFP, these are uploaded manuals/bulletins.
 const IS_ADMIN = "$is_admin" === "1";
 let _unackedDocs = parseInt("$unacked_docs", 10) || 0;
+// Blocks the app until every company document is acknowledged. Keeps the
+// old name because a dozen call sites already invoke it whenever the
+// unacknowledged count could have moved.
+//
+// Two views are exempt, and only two: the Docs list and the PDF viewer.
+// Locking those would leave no way to READ the documents or press
+// Acknowledge, so the lock would have no exit at all.
+//
+// Messages is NOT exempt, and that is a decision rather than an oversight
+// (asked and confirmed 2026-08-31). It is the tempting one to add, since a
+// release-drift line is operational and the documents are paperwork — but
+// the lock is meant to be a lock. Outstanding acknowledgements come first,
+// and a message that has waited for them is still there afterwards.
+const _DOC_LOCK_EXEMPT = ['doclocker', 'pdf'];
+
 function paintDocAckBanner(){
-  const el = document.getElementById('doc-ack-banner');
+  const el = document.getElementById('doc-lock');
   if(!el) return;
-  if(_unackedDocs > 0){
-    el.textContent = _unackedDocs + ' company document' + (_unackedDocs === 1 ? '' : 's')
-      + ' need' + (_unackedDocs === 1 ? 's' : '') + ' your acknowledgement — tap to review.';
-    el.style.display = '';
+  const active = (document.querySelector('.view.active') || {}).id || '';
+  const onExemptView = _DOC_LOCK_EXEMPT.some(v => active === v + '-view');
+  if(_unackedDocs > 0 && !onExemptView){
+    const n = _unackedDocs;
+    document.getElementById('doc-lock-body').textContent =
+      n + ' company document' + (n === 1 ? '' : 's') + ' need' + (n === 1 ? 's' : '') +
+      ' your acknowledgement before you can use the app.';
+    _positionDocLock();
+    el.hidden = false;
   } else {
-    el.style.display = 'none';
+    el.hidden = true;
   }
 }
+
+// Same geometry as the loading overlay: between the header's measured
+// bottom edge and the tab bar, so both stay visible and usable.
+function _positionDocLock(){
+  const el = document.getElementById('doc-lock');
+  if(!el) return;
+  const topbar = document.querySelector('.view.active .topbar');
+  const tabbar = document.querySelector('.tabbar');
+  el.style.top = Math.max(0, topbar ? topbar.getBoundingClientRect().bottom : 0) + 'px';
+  el.style.bottom = (tabbar ? tabbar.getBoundingClientRect().height : 0) + 'px';
+}
+
 function _fmtDocSize(bytes){
   if(!bytes) return '';
   const mb = bytes / (1024 * 1024);
@@ -7937,16 +8624,33 @@ async function viewCompanyDoc(docId){
     data = await r.json();
     if(!r.ok){ showToast(data.error || 'Could not open that document'); return; }
   } catch(e) { showToast('Request failed: ' + e); return; }
+  // Company documents are deliberately NOT tabbed. Tabs are for the handful
+  // of small release PDFs a pilot compares against each other; a manual is
+  // one big thing you read on its own, and holding several of them open
+  // would keep that many multi-hundred-page documents in memory at once.
+  // Opening one therefore stands alone and leaves any release tabs intact
+  // underneath — going back to a release brings its strip straight back.
+  _activePdfTab = null;
+  renderPdfTabs();
+  _currentCompanyDoc = data;
+  showView('pdf');
+  document.getElementById('pdf-view-title').textContent = data.title;
   // No FFD gate on a company doc — that one is about a specific flight's
-  // release, not a manual. meta is the doc object itself, so acknowledging
-  // it updates the tab in place.
-  await openPdfTab({
-    key: 'doc:' + docId,
-    label: data.title,
-    kind: 'company',
-    bytes: b64ToBytes(data.pdf_b64),
-    meta: data,
-  });
+  // release, not a manual.
+  document.getElementById('pdf-ffd-banner').style.display = 'none';
+  // Read-in-app only: no Export control, and deliberately no blob URL
+  // minted either, since that would leave a downloadable handle to it.
+  if(_pdfObjectUrl){ URL.revokeObjectURL(_pdfObjectUrl); _pdfObjectUrl = null; }
+  const exportLink = document.getElementById('pdf-export-link');
+  exportLink.style.display = 'none';
+  exportLink.removeAttribute('href');
+  exportLink.removeAttribute('download');
+  paintCompanyDocAckBar();
+  try {
+    await renderPdfInline(b64ToBytes(data.pdf_b64));
+  } catch(e) {
+    document.getElementById('pdf-pages').innerHTML = '<p style="color:#fff;padding:20px;">Failed to render this PDF: ' + e + '</p>';
+  }
 }
 function paintCompanyDocAckBar(){
   const bar = document.getElementById('pdf-ack-bar');
@@ -8279,8 +8983,14 @@ function renderWeather(stations){
     showView(view || 'pairing');
     return;
   }
-  if(view === 'pairing' || view === 'release' || view === 'confirm' || view === 'settings' || view === 'doclocker') showView(view);
+  // Any view that actually exists, rather than a hand-kept list. Home's tab
+  // bar sends leg-scoped tabs here as /fos/<id>?view=<tab>, and 'messages'
+  // was never added to the old list — so tapping Messages on Home silently
+  // landed on Overview instead, which read as the release messages not
+  // working at all.
+  if(view && view !== 'overview' && document.getElementById(view + '-view')) showView(view);
   else initOverviewPills();
+  paintReleaseState();
   // Repaint the AeroAPI panel from what is already on the leg. This is the
   // half of "no second API call" the server cannot do on its own: the
   // gates survive a regenerate via carry_gates_from, but without this the
