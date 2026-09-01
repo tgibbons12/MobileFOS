@@ -3795,9 +3795,12 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
   .navtab:disabled{opacity:.4;cursor:default;}
   /* Same fixed gear as FOS_TEMPLATE (see its own .settings-fab comment) —
      Home has no topbar of its own to hang a per-page icon off of. */
-  .settings-fab{position:fixed;top:calc(env(safe-area-inset-top) + 10px);right:calc(env(safe-area-inset-right) + 16px);z-index:25;background:var(--card);border:1px solid var(--border);border-radius:50%;width:34px;height:34px;display:flex;align-items:center;justify-content:center;color:var(--label);cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.12);}
+  /* Same treatment as the FOS template's copy: pinned, and it owns the
+     safe-area inset because it is the topmost element. */
+  #doc-ack-banner{position:sticky;top:0;z-index:16;padding-top:calc(env(safe-area-inset-top) + 11px);}
+  .settings-fab{position:fixed;top:calc(var(--ack-h,0px) + var(--safe-top, env(safe-area-inset-top)) + 10px);right:calc(env(safe-area-inset-right) + 16px);z-index:25;background:var(--card);border:1px solid var(--border);border-radius:50%;width:34px;height:34px;display:flex;align-items:center;justify-content:center;color:var(--label);cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.12);}
   .settings-fab svg{width:18px;height:18px;flex-shrink:0;}
-  @media (min-width: 768px){ .settings-fab{top:calc(env(safe-area-inset-top) + 38px);} }
+  @media (min-width: 768px){ .settings-fab{top:calc(var(--ack-h,0px) + var(--safe-top, env(safe-area-inset-top)) + 38px);} }
   h1{font-size:18px;color:var(--blue-dark);margin:0 0 16px;}
   label{display:block;font-size:13px;font-weight:600;margin:10px 0 4px;color:var(--value);}
   textarea, select, input[type=text]{width:100%;max-width:640px;font-family:inherit;font-size:13.5px;padding:9px 10px;border:1px solid var(--border);border-radius:5px;box-sizing:border-box;background:var(--card);color:var(--value);}
@@ -3985,6 +3988,15 @@ function homeNavTab(view){
   el.textContent = n + ' company document' + (n === 1 ? '' : 's')
     + ' need' + (n === 1 ? 's' : '') + ' your acknowledgement — tap to review.';
   el.style.display = '';
+  // The banner now clears the status bar itself, so the settings gear must
+  // stop adding the same inset and drop below the banner instead of
+  // floating on top of it.
+  const root = document.documentElement.style;
+  root.setProperty('--safe-top', '0px');
+  root.setProperty('--ack-h', el.getBoundingClientRect().height + 'px');
+  window.addEventListener('resize', () => {
+    root.setProperty('--ack-h', el.getBoundingClientRect().height + 'px');
+  });
 })();
 function showHomeView(view){
   document.getElementById('home-view').classList.toggle('active', view==='home');
@@ -4378,14 +4390,17 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   .weight-grid>div{display:flex;flex-direction:column;align-items:center;gap:2px;background:var(--bg);border-radius:8px;padding:7px 4px;}
   .weight-grid .wg-lbl{font-size:10.5px;color:var(--label);text-transform:uppercase;letter-spacing:.03em;}
   .weight-grid .wg-val{font-size:13.5px;font-weight:700;color:var(--value);font-variant-numeric:tabular-nums;}
-  .topbar{display:flex;flex-wrap:wrap;align-items:center;margin-bottom:10px;position:sticky;top:var(--ack-h,0px);z-index:10;background:var(--bg);padding-top:calc(env(safe-area-inset-top) + 14px);margin-top:-14px;margin-left:-16px;margin-right:-16px;padding-left:16px;padding-right:16px;}
+  .topbar{display:flex;flex-wrap:wrap;align-items:center;margin-bottom:10px;position:sticky;top:var(--ack-h,0px);z-index:10;background:var(--bg);padding-top:calc(var(--safe-top, env(safe-area-inset-top)) + var(--topbar-lead, 14px));margin-top:-14px;margin-left:-16px;margin-right:-16px;padding-left:16px;padding-right:16px;}
   /* Tablet-width browsers (iPadOS Safari's tabbed mode among them) draw
      their own chrome — tab-strip controls, a floating "stoplight" cluster
      — over the top-left/top-right of the page that safe-area-inset can't
      account for (it only reports hardware notch/home-indicator, not
      browser UI). Extra clearance here is a defensive guess, not measured
      against a real device — right height still needs confirming there. */
-  @media (min-width: 768px){ .topbar{padding-top:calc(env(safe-area-inset-top) + 42px);} }
+  /* Set on :root, not on .topbar, so the values below can be overridden
+     from script when the banner takes over as the topmost element —
+     an inline style on :root beats this, a rule on .topbar would not. */
+  @media (min-width: 768px){ :root{ --topbar-lead:42px; } }
   .back-link{order:1;display:flex;align-items:center;color:var(--value);background:none;border:none;cursor:pointer;padding:6px 4px;text-decoration:none;}
   .topbar-actions{order:2;margin-left:auto;display:flex;align-items:center;gap:14px;padding-right:38px;}
   .topbar-title{order:3;flex:1 1 100%;text-align:center;margin-top:2px;}
@@ -4399,9 +4414,9 @@ FOS_TEMPLATE = """<!DOCTYPE html>
      way to guarantee it's on every single page without duplicating it
      into all 14 view sections. Sits clear of the topbar's own
      actions/title since it's positioned independently. */
-  .settings-fab{position:fixed;top:calc(env(safe-area-inset-top) + 10px);right:calc(env(safe-area-inset-right) + 16px);z-index:25;background:var(--card);border:1px solid var(--border);border-radius:50%;width:34px;height:34px;display:flex;align-items:center;justify-content:center;color:var(--label);cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.12);}
+  .settings-fab{position:fixed;top:calc(var(--ack-h,0px) + var(--safe-top, env(safe-area-inset-top)) + 10px);right:calc(env(safe-area-inset-right) + 16px);z-index:25;background:var(--card);border:1px solid var(--border);border-radius:50%;width:34px;height:34px;display:flex;align-items:center;justify-content:center;color:var(--label);cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.12);}
   .settings-fab svg{width:18px;height:18px;flex-shrink:0;}
-  @media (min-width: 768px){ .settings-fab{top:calc(env(safe-area-inset-top) + 38px);} }
+  @media (min-width: 768px){ .settings-fab{top:calc(var(--ack-h,0px) + var(--safe-top, env(safe-area-inset-top)) + 38px);} }
   .status-bar{background:var(--navy);color:#fff;display:flex;align-items:center;justify-content:space-between;padding:8px 14px;border-radius:var(--radius) var(--radius) 0 0;font-size:13px;font-weight:600;}
   .flight-summary{background:var(--card);display:flex;align-items:center;padding:12px 14px;border-bottom:1px solid var(--border);font-size:13px;gap:18px;flex-wrap:wrap;}
   .flight-summary .fnum{font-size:15px;font-weight:700;}
@@ -4463,7 +4478,14 @@ FOS_TEMPLATE = """<!DOCTYPE html>
      rather than only when you happen to be at the top.
      It also has to outrank the loading overlay (15), or a load buries the
      notice behind the translucent scrim. */
-  #doc-ack-banner{position:sticky;top:0;z-index:16;}
+  /* Topmost element on the page, so it owns the safe-area inset: pinned
+     at top:0, its text would otherwise sit underneath the iOS status
+     bar. When it is showing, script zeroes --safe-top so .topbar stops
+     adding the same inset a second time, and trims --topbar-lead --
+     the bar is no longer the thing holding the header off the screen
+     edge. Both of those were double-counted on a real iPad and are
+     invisible in a desktop emulator, where the inset is 0. */
+  #doc-ack-banner{position:sticky;top:0;z-index:16;padding-top:calc(env(safe-area-inset-top) + 11px);}
   .doc-row .check.signed{color:var(--blue-dark);}
   .doc-row .resign-link{font-size:12.5px;font-weight:600;color:var(--blue);cursor:pointer;text-decoration:none;white-space:nowrap;}
   .doc-row .primary-action{display:inline-flex;align-items:center;gap:10px;}
@@ -8309,7 +8331,19 @@ function paintDocAckBanner(){
 // rather than assumed, and re-measured on resize and rotation.
 function _syncAckBannerHeight(){
   const el = document.getElementById('doc-ack-banner');
-  const h = (el && el.style.display !== 'none') ? el.getBoundingClientRect().height : 0;
+  const showing = !!el && el.style.display !== 'none';
+  const root = document.documentElement.style;
+  if(showing){
+    // The banner is now the topmost element, so it clears the status bar
+    // and .topbar must not add the inset again. The lead shrinks too: the
+    // bar is no longer what holds the header off the top of the screen.
+    root.setProperty('--safe-top', '0px');
+    root.setProperty('--topbar-lead', '10px');
+  } else {
+    root.removeProperty('--safe-top');
+    root.removeProperty('--topbar-lead');
+  }
+  const h = showing ? el.getBoundingClientRect().height : 0;
   document.documentElement.style.setProperty('--ack-h', h + 'px');
   const overlay = document.getElementById('load-overlay');
   if(overlay && !overlay.hidden) _positionLoadOverlay();
