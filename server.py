@@ -493,7 +493,13 @@ AUTH_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<!-- NOT black-translucent. That asks iOS to draw its status bar OVER the
+     page, which is what put a frosted band across the top of every
+     screen. "default" makes iOS reserve the space instead, so the app
+     starts below the bar and nothing is drawn on top of it. Paired with
+     --status-bar-min below, which drops to 0 because there is no longer
+     an overlay to sit clear of. -->
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="MobileCCI">
 <script>
 // How much of the top of the window iOS is covering, which is NOT the same
@@ -514,12 +520,14 @@ AUTH_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
   var standalone = window.navigator.standalone === true ||
     (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
   var root = document.documentElement;
-  // Back to a real status bar's height. The 44px this briefly carried was
-  // to lift the acknowledgement banner's text clear of the translucent
-  // wash, which reaches further down than the bar itself; that banner is
-  // now a blocking overlay in the content area, so nothing sits in the
-  // washed band and there is nothing to lift.
-  root.style.setProperty('--status-bar-min', standalone ? '24px' : '0px');
+  // Zero now, in both cases. This reserve existed because
+  // black-translucent had iOS painting its status bar over the page, so
+  // the top of the app had to be held clear of it. The meta above is
+  // "default" now: iOS reserves that space itself and the web view starts
+  // below the bar, so reserving it again here would just be a band of dead
+  // space. env() stays the source of truth for a device that does report
+  // an inset.
+  root.style.setProperty('--status-bar-min', '0px');
   root.style.setProperty('--status-bar',
     'max(env(safe-area-inset-top), var(--status-bar-min, 0px))');
 })();
@@ -3896,7 +3904,13 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
 <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<!-- NOT black-translucent. That asks iOS to draw its status bar OVER the
+     page, which is what put a frosted band across the top of every
+     screen. "default" makes iOS reserve the space instead, so the app
+     starts below the bar and nothing is drawn on top of it. Paired with
+     --status-bar-min below, which drops to 0 because there is no longer
+     an overlay to sit clear of. -->
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="MobileCCI">
 <script>
 // How much of the top of the window iOS is covering, which is NOT the same
@@ -3917,12 +3931,14 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
   var standalone = window.navigator.standalone === true ||
     (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
   var root = document.documentElement;
-  // Back to a real status bar's height. The 44px this briefly carried was
-  // to lift the acknowledgement banner's text clear of the translucent
-  // wash, which reaches further down than the bar itself; that banner is
-  // now a blocking overlay in the content area, so nothing sits in the
-  // washed band and there is nothing to lift.
-  root.style.setProperty('--status-bar-min', standalone ? '24px' : '0px');
+  // Zero now, in both cases. This reserve existed because
+  // black-translucent had iOS painting its status bar over the page, so
+  // the top of the app had to be held clear of it. The meta above is
+  // "default" now: iOS reserves that space itself and the web view starts
+  // below the bar, so reserving it again here would just be a band of dead
+  // space. env() stays the source of truth for a device that does report
+  // an inset.
+  root.style.setProperty('--status-bar-min', '0px');
   root.style.setProperty('--status-bar',
     'max(env(safe-area-inset-top), var(--status-bar-min, 0px))');
 })();
@@ -4477,7 +4493,13 @@ FOS_TEMPLATE = """<!DOCTYPE html>
 <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<!-- NOT black-translucent. That asks iOS to draw its status bar OVER the
+     page, which is what put a frosted band across the top of every
+     screen. "default" makes iOS reserve the space instead, so the app
+     starts below the bar and nothing is drawn on top of it. Paired with
+     --status-bar-min below, which drops to 0 because there is no longer
+     an overlay to sit clear of. -->
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="MobileCCI">
 <script>
 // How much of the top of the window iOS is covering, which is NOT the same
@@ -4498,12 +4520,14 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   var standalone = window.navigator.standalone === true ||
     (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
   var root = document.documentElement;
-  // Back to a real status bar's height. The 44px this briefly carried was
-  // to lift the acknowledgement banner's text clear of the translucent
-  // wash, which reaches further down than the bar itself; that banner is
-  // now a blocking overlay in the content area, so nothing sits in the
-  // washed band and there is nothing to lift.
-  root.style.setProperty('--status-bar-min', standalone ? '24px' : '0px');
+  // Zero now, in both cases. This reserve existed because
+  // black-translucent had iOS painting its status bar over the page, so
+  // the top of the app had to be held clear of it. The meta above is
+  // "default" now: iOS reserves that space itself and the web view starts
+  // below the bar, so reserving it again here would just be a band of dead
+  // space. env() stays the source of truth for a device that does report
+  // an inset.
+  root.style.setProperty('--status-bar-min', '0px');
   root.style.setProperty('--status-bar',
     'max(env(safe-area-inset-top), var(--status-bar-min, 0px))');
 })();
