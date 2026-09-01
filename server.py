@@ -490,10 +490,23 @@ def _require_login():
 
 AUTH_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
 <script>(function(){var t=localStorage.getItem('fos_theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);})();</script>
-<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<!-- No viewport-fit=cover. That is what makes the layout viewport span
+     the WHOLE screen, status bar included, and it is the actual reason
+     content sat under the frosted bar — the status-bar style only
+     decides how iOS paints over whatever is up there. Without it the
+     web view is laid out inside the safe area, so nothing is beneath
+     the bar to blur. It also means env(safe-area-inset-*) reports 0,
+     which every use here already handles by adding it to something. -->
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<!-- NOT black-translucent. That asks iOS to draw its status bar OVER the
+     page, which is what put a frosted band across the top of every
+     screen. "default" makes iOS reserve the space instead, so the app
+     starts below the bar and nothing is drawn on top of it. Paired with
+     --status-bar-min below, which drops to 0 because there is no longer
+     an overlay to sit clear of. -->
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="MobileCCI">
 <script>
 // How much of the top of the window iOS is covering, which is NOT the same
@@ -514,12 +527,14 @@ AUTH_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
   var standalone = window.navigator.standalone === true ||
     (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
   var root = document.documentElement;
-  // Back to a real status bar's height. The 44px this briefly carried was
-  // to lift the acknowledgement banner's text clear of the translucent
-  // wash, which reaches further down than the bar itself; that banner is
-  // now a blocking overlay in the content area, so nothing sits in the
-  // washed band and there is nothing to lift.
-  root.style.setProperty('--status-bar-min', standalone ? '24px' : '0px');
+  // Zero now, in both cases. This reserve existed because
+  // black-translucent had iOS painting its status bar over the page, so
+  // the top of the app had to be held clear of it. The meta above is
+  // "default" now: iOS reserves that space itself and the web view starts
+  // below the bar, so reserving it again here would just be a band of dead
+  // space. env() stays the source of truth for a device that does report
+  // an inset.
+  root.style.setProperty('--status-bar-min', '0px');
   root.style.setProperty('--status-bar',
     'max(env(safe-area-inset-top), var(--status-bar-min, 0px))');
 })();
@@ -3891,12 +3906,25 @@ def render_fos_html(leg, default_view=""):
 
 LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
 <script>(function(){var t=localStorage.getItem('fos_theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);})();</script>
-<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<!-- No viewport-fit=cover. That is what makes the layout viewport span
+     the WHOLE screen, status bar included, and it is the actual reason
+     content sat under the frosted bar — the status-bar style only
+     decides how iOS paints over whatever is up there. Without it the
+     web view is laid out inside the safe area, so nothing is beneath
+     the bar to blur. It also means env(safe-area-inset-*) reports 0,
+     which every use here already handles by adding it to something. -->
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="theme-color" content="#f5f5f7" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<!-- NOT black-translucent. That asks iOS to draw its status bar OVER the
+     page, which is what put a frosted band across the top of every
+     screen. "default" makes iOS reserve the space instead, so the app
+     starts below the bar and nothing is drawn on top of it. Paired with
+     --status-bar-min below, which drops to 0 because there is no longer
+     an overlay to sit clear of. -->
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="MobileCCI">
 <script>
 // How much of the top of the window iOS is covering, which is NOT the same
@@ -3917,12 +3945,14 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
   var standalone = window.navigator.standalone === true ||
     (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
   var root = document.documentElement;
-  // Back to a real status bar's height. The 44px this briefly carried was
-  // to lift the acknowledgement banner's text clear of the translucent
-  // wash, which reaches further down than the bar itself; that banner is
-  // now a blocking overlay in the content area, so nothing sits in the
-  // washed band and there is nothing to lift.
-  root.style.setProperty('--status-bar-min', standalone ? '24px' : '0px');
+  // Zero now, in both cases. This reserve existed because
+  // black-translucent had iOS painting its status bar over the page, so
+  // the top of the app had to be held clear of it. The meta above is
+  // "default" now: iOS reserves that space itself and the web view starts
+  // below the bar, so reserving it again here would just be a band of dead
+  // space. env() stays the source of truth for a device that does report
+  // an inset.
+  root.style.setProperty('--status-bar-min', '0px');
   root.style.setProperty('--status-bar',
     'max(env(safe-area-inset-top), var(--status-bar-min, 0px))');
 })();
@@ -4472,12 +4502,25 @@ FOS_TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <script>(function(){var t=localStorage.getItem('fos_theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);})();</script>
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
+<!-- No viewport-fit=cover. That is what makes the layout viewport span
+     the WHOLE screen, status bar included, and it is the actual reason
+     content sat under the frosted bar — the status-bar style only
+     decides how iOS paints over whatever is up there. Without it the
+     web view is laid out inside the safe area, so nothing is beneath
+     the bar to blur. It also means env(safe-area-inset-*) reports 0,
+     which every use here already handles by adding it to something. -->
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="theme-color" content="#f5f5f7" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<!-- NOT black-translucent. That asks iOS to draw its status bar OVER the
+     page, which is what put a frosted band across the top of every
+     screen. "default" makes iOS reserve the space instead, so the app
+     starts below the bar and nothing is drawn on top of it. Paired with
+     --status-bar-min below, which drops to 0 because there is no longer
+     an overlay to sit clear of. -->
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="MobileCCI">
 <script>
 // How much of the top of the window iOS is covering, which is NOT the same
@@ -4498,12 +4541,14 @@ FOS_TEMPLATE = """<!DOCTYPE html>
   var standalone = window.navigator.standalone === true ||
     (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
   var root = document.documentElement;
-  // Back to a real status bar's height. The 44px this briefly carried was
-  // to lift the acknowledgement banner's text clear of the translucent
-  // wash, which reaches further down than the bar itself; that banner is
-  // now a blocking overlay in the content area, so nothing sits in the
-  // washed band and there is nothing to lift.
-  root.style.setProperty('--status-bar-min', standalone ? '24px' : '0px');
+  // Zero now, in both cases. This reserve existed because
+  // black-translucent had iOS painting its status bar over the page, so
+  // the top of the app had to be held clear of it. The meta above is
+  // "default" now: iOS reserves that space itself and the web view starts
+  // below the bar, so reserving it again here would just be a band of dead
+  // space. env() stays the source of truth for a device that does report
+  // an inset.
+  root.style.setProperty('--status-bar-min', '0px');
   root.style.setProperty('--status-bar',
     'max(env(safe-area-inset-top), var(--status-bar-min, 0px))');
 })();
@@ -4618,7 +4663,10 @@ FOS_TEMPLATE = """<!DOCTYPE html>
      room now, and 18px is enough of it. */
   @media (min-width: 768px){ :root{ --topbar-lead:18px; } }
   .back-link{order:1;display:flex;align-items:center;color:var(--value);background:none;border:none;cursor:pointer;padding:6px 4px;text-decoration:none;}
+  .topbar{position:sticky;}
   .topbar-actions{order:3;display:flex;align-items:center;gap:14px;padding-right:38px;}
+  #pdf-view .topbar{position:sticky;}
+  #pdf-view .topbar-actions{gap:2px;}
   /* The title used to be flex:1 1 100%, which forced it onto a SECOND row
      under the back arrow and the actions and made the header about 30px
      taller than it needed to be. It now shares the row, taking the space
@@ -4865,17 +4913,44 @@ FOS_TEMPLATE = """<!DOCTYPE html>
      title bar already names a lone document, and a strip holding a single
      chip is pure vertical cost. Scrolls sideways rather than wrapping, so
      the pages below never shift down as tabs are opened. */
-  .pdf-tabs{display:none;gap:6px;overflow-x:auto;padding:8px 14px;background:var(--card);
+  /* Browser-style tabs rather than pills: seated ON the divider with the
+     active one carrying the page colour up out of it, so the tab reads as
+     the top edge of the document rather than as a filter chip floating
+     above it. */
+  .pdf-tabs{display:none;gap:1px;overflow-x:auto;padding:6px 10px 0;background:var(--card);
     border-bottom:1px solid var(--border);-webkit-overflow-scrolling:touch;scrollbar-width:none;}
   .pdf-tabs::-webkit-scrollbar{display:none;}
-  .pdf-tab{flex:0 0 auto;display:flex;align-items:center;gap:7px;margin:0;padding:6px 10px;
-    background:var(--bg);color:var(--label);border:1px solid var(--border);border-radius:7px;
-    font-size:12.5px;font-weight:600;max-width:190px;cursor:pointer;}
-  .pdf-tab.active{background:var(--blue);color:#fff;border-color:var(--blue);}
+  .pdf-tab{position:relative;flex:0 0 auto;display:flex;align-items:center;gap:8px;margin:0;
+    padding:8px 12px 9px;background:transparent;color:var(--label);border:none;
+    border-radius:9px 9px 0 0;font-size:12.5px;font-weight:600;max-width:200px;cursor:pointer;}
+  /* Hairline separators BETWEEN inactive tabs only, the way a browser does
+     it — and never beside the active one, which owns both its edges. */
+  .pdf-tab:not(.active) + .pdf-tab:not(.active)::before{content:'';position:absolute;left:-1px;
+    top:8px;bottom:8px;width:1px;background:var(--border);}
+  .pdf-tab.active{background:var(--bg);color:var(--value);}
+  /* Squares off the join to the page below, so the tab and the document
+     read as one surface. */
+  .pdf-tab.active::after{content:'';position:absolute;left:0;right:0;bottom:-1px;height:2px;
+    background:var(--bg);}
   .pdf-tab > span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-  /* A real hit target on a touch screen without making the chip taller. */
-  .pdf-tab-x{flex:0 0 auto;font-size:15px;line-height:1;opacity:.65;padding:2px 3px;margin:-2px -3px;}
-  .pdf-tab-x:hover{opacity:1;}
+  /* A real hit target on a touch screen without making the tab taller. */
+  .pdf-tab-x{flex:0 0 auto;display:flex;align-items:center;justify-content:center;
+    width:17px;height:17px;border-radius:50%;font-size:14px;line-height:1;opacity:.55;}
+  .pdf-tab.active .pdf-tab-x{opacity:.8;}
+  .pdf-tab-x:hover{opacity:1;background:var(--border);}
+  .pdf-act{display:flex;align-items:center;justify-content:center;width:30px;height:30px;
+    padding:0;margin:0;background:none;border:none;border-radius:7px;color:var(--blue-dark);
+    cursor:pointer;text-decoration:none;}
+  .pdf-act svg{width:19px;height:19px;}
+  .pdf-act:hover{background:var(--border);}
+  .pdf-act[hidden]{display:none;}
+  #pdf-more-menu{position:absolute;top:100%;right:16px;z-index:30;background:var(--card);
+    border:1px solid var(--border);border-radius:9px;box-shadow:0 6px 20px rgba(0,0,0,.28);
+    padding:5px;display:flex;flex-direction:column;min-width:180px;}
+  #pdf-more-menu[hidden]{display:none;}
+  #pdf-more-menu button{margin:0;padding:10px 12px;background:none;border:none;text-align:left;
+    font-size:13.5px;font-weight:600;color:var(--value);border-radius:6px;cursor:pointer;}
+  #pdf-more-menu button:hover{background:var(--bg);}
   /* Messages read like ACARS lines: monospace, one flight per card, with
      the acknowledgement kept as a record rather than dismissing the card. */
   .pf-hdr{display:flex;align-items:center;justify-content:space-between;gap:10px;}
@@ -5186,8 +5261,18 @@ FOS_TEMPLATE = """<!DOCTYPE html>
     <section id="pdf-view" class="view">
       <div class="topbar">
         <button class="back-link" onclick="closePdfView()" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
-        <div class="topbar-actions">
-          <a id="pdf-export-link" style="font-size:14px;color:var(--blue-dark);text-decoration:none;font-weight:600;">Export</a>
+        <div class="topbar-actions" id="pdf-actions">
+          <!-- The anchor still carries the download: it is the only one of
+               these that has to BE a link, since a data:/blob: href is what
+               actually saves the file. -->
+          <a id="pdf-export-link" class="pdf-act" title="Download" aria-label="Download"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg></a>
+          <button type="button" id="pdf-print-btn" class="pdf-act" title="Print" aria-label="Print" onclick="printCurrentPdf()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9V2h12v7"/><path d="M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2"/><path d="M6 14h12v8H6z"/></svg></button>
+          <button type="button" id="pdf-share-btn" class="pdf-act" title="Share" aria-label="Share" onclick="shareCurrentPdf()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V3"/><path d="M8 7l4-4 4 4"/><path d="M4 14v5a2 2 0 002 2h12a2 2 0 002-2v-5"/></svg></button>
+          <button type="button" id="pdf-more-btn" class="pdf-act" title="More" aria-label="More" aria-expanded="false" onclick="togglePdfMore()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg></button>
+        </div>
+        <div id="pdf-more-menu" hidden>
+          <button type="button" onclick="closeAllPdfTabs()">Close All Tabs</button>
+          <button type="button" onclick="reloadCurrentPdf()">Reload Document</button>
         </div>
         <div class="topbar-title">
           <h1 id="pdf-view-title"></h1>
@@ -6083,22 +6168,36 @@ async function refreshOfp(){
     // a fresh flight — there is no comparison to make, so just build it.
     const mine = mineR.ok ? String((await mineR.json()).ofp_time_generated || '') : null;
 
-    if(mine === null){
-      if(el) el.textContent = 'Generating\u2026';
-      showView('release');
-      generateRelease();
-      return;
-    }
-    if(live && mine && live === mine){
+    if(live && mine !== null && mine && live === mine){
       if(el) el.textContent = was;
       showToast('OFP is already current');
       return;
     }
-    // Either SimBrief has moved on, or one side has no timestamp to compare
-    // — rebuild rather than guess, since a stale release is the worse error.
-    if(el) el.textContent = 'Refreshing\u2026';
-    showView('release');
-    generateRelease(true);
+    // Either nothing is on file yet, SimBrief has moved on, or one side has
+    // no timestamp to compare — rebuild rather than guess, since a stale
+    // release is the worse error.
+    //
+    // Done in place, deliberately. This used to showView('release') first,
+    // which dumps you on Confirm & Generate Release — the send-to-SimBrief
+    // page — when all you asked for was a refresh. Refreshing from Overview
+    // should leave you on Overview.
+    if(el) el.textContent = mine === null ? 'Generating\u2026' : 'Refreshing\u2026';
+    const gen = await fetch('/fos/' + LEG_ID + '/release', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({user_id: user, force: mine !== null}),
+    });
+    const data = await gen.json().catch(() => ({}));
+    if(!gen.ok){
+      if(el) el.textContent = was;
+      showToast(data.error || 'Could not refresh the OFP');
+      return;
+    }
+    // Anything already holding the old release has to let go of it.
+    _setReleaseCache(null);
+    _pdfTabs = _pdfTabs.filter(t => t.kind !== 'release');
+    _activePdfTab = _pdfTabs.length ? _pdfTabs[0].key : null;
+    await paintReleaseState();
+    showToast(mine === null ? 'Release generated' : 'OFP refreshed');
   } catch(e) {
     if(el) el.textContent = was;
     showToast('Could not check SimBrief: ' + e);
@@ -6557,6 +6656,98 @@ async function openPdfTab(tab){
   await activatePdfTab(tab.key);
 }
 
+// Download, Print and Share are release-document controls. A company manual
+// is read in the app and never leaves it, so they are hidden rather than
+// disabled there — a greyed control invites a question about why it does
+// not work.
+function _setPdfActions(on){
+  ['pdf-export-link', 'pdf-print-btn', 'pdf-share-btn', 'pdf-more-btn'].forEach(id => {
+    const el = document.getElementById(id);
+    if(el) el.hidden = !on;
+  });
+  if(!on){
+    closePdfMore();
+    const a = document.getElementById('pdf-export-link');
+    if(a){ a.removeAttribute('href'); a.removeAttribute('download'); }
+  }
+}
+
+function togglePdfMore(){
+  const m = document.getElementById('pdf-more-menu');
+  const b = document.getElementById('pdf-more-btn');
+  if(!m) return;
+  const open = m.hidden;
+  m.hidden = !open;
+  if(b) b.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+function closePdfMore(){
+  const m = document.getElementById('pdf-more-menu');
+  if(m && !m.hidden){ m.hidden = true;
+    const b = document.getElementById('pdf-more-btn');
+    if(b) b.setAttribute('aria-expanded', 'false'); }
+}
+document.addEventListener('click', (e) => {
+  if(!e.target.closest('#pdf-more-menu') && !e.target.closest('#pdf-more-btn')) closePdfMore();
+});
+
+function _activePdfBytes(){
+  const t = _pdfTabs[_pdfTabIndex(_activePdfTab)];
+  if(t) return {bytes: t.bytes, name: (t.meta && t.meta.exportName) || (t.label + '.pdf')};
+  // A company document is untabbed and read-in-app only — no bytes handed
+  // out, which is what keeps Download/Print/Share off it.
+  return null;
+}
+
+function printCurrentPdf(){
+  closePdfMore();
+  const cur = _activePdfBytes();
+  if(!cur){ showToast('Nothing to print'); return; }
+  // A hidden iframe rather than window.open: iOS Safari blocks the popup
+  // when it is not the direct result of the tap, and an iframe prints the
+  // PDF itself rather than a screenshot of the canvas.
+  const url = URL.createObjectURL(new Blob([cur.bytes.slice()], {type: 'application/pdf'}));
+  const frame = document.createElement('iframe');
+  frame.style.cssText = 'position:fixed;right:0;bottom:0;width:1px;height:1px;border:0;opacity:0;';
+  frame.src = url;
+  frame.onload = () => {
+    try { frame.contentWindow.focus(); frame.contentWindow.print(); }
+    catch(e) { showToast('Printing is not available here'); }
+    // Left in the DOM until the print dialog is done with it; revoking or
+    // removing immediately cancels the job on some browsers.
+    setTimeout(() => { URL.revokeObjectURL(url); frame.remove(); }, 60000);
+  };
+  document.body.appendChild(frame);
+}
+
+async function shareCurrentPdf(){
+  closePdfMore();
+  const cur = _activePdfBytes();
+  if(!cur){ showToast('Nothing to share'); return; }
+  const file = new File([cur.bytes.slice()], cur.name, {type: 'application/pdf'});
+  // canShare with the actual file, not just a feature check: iOS reports
+  // navigator.share on desktop Safari too, where sharing a FILE fails.
+  if(navigator.canShare && navigator.canShare({files: [file]})){
+    try { await navigator.share({files: [file], title: cur.name}); }
+    catch(e) { if(e && e.name !== 'AbortError') showToast('Share failed: ' + e.message); }
+    return;
+  }
+  showToast('Sharing is not available on this device — use Download');
+}
+
+function reloadCurrentPdf(){
+  closePdfMore();
+  if(_activePdfTab) activatePdfTab(_activePdfTab);
+  else showToast('Nothing open');
+}
+
+function closeAllPdfTabs(){
+  closePdfMore();
+  _pdfTabs = [];
+  _activePdfTab = null;
+  renderPdfTabs();
+  closePdfView();
+}
+
 async function activatePdfTab(key){
   const tab = _pdfTabs[_pdfTabIndex(key)];
   if(!tab) return;
@@ -6571,11 +6762,9 @@ async function activatePdfTab(key){
     // The same object the tab holds, so acknowledging updates both at once.
     _currentCompanyDoc = tab.meta;
     banner.style.display = 'none';
-    // Company documents are read-in-app only: no Export control, and no
-    // blob URL minted for them either.
-    exportLink.style.display = 'none';
-    exportLink.removeAttribute('href');
-    exportLink.removeAttribute('download');
+    // Company documents are read-in-app only: no Download/Print/Share, and
+    // no blob URL minted for them either.
+    _setPdfActions(false);
     paintCompanyDocAckBar();
   } else {
     _currentCompanyDoc = null;
@@ -6584,8 +6773,10 @@ async function activatePdfTab(key){
     // PDF.js on canvas, since iOS Safari routinely refuses to render a PDF
     // inside an iframe at all and kicks out to the system viewer instead.
     _pdfObjectUrl = URL.createObjectURL(new Blob([tab.bytes], {type:'application/pdf'}));
-    exportLink.style.display = '';
-    // Soft gate — viewing always works; Export locks until FFD is signed.
+    _setPdfActions(true);
+    // Soft gate — viewing always works; Download locks until FFD is signed.
+    // Print and Share stay available: both are ways of READING the document,
+    // which the gate has never blocked.
     if(tab.meta.fitForDuty){
       exportLink.href = _pdfObjectUrl;
       exportLink.download = tab.meta.exportName;
@@ -8870,13 +9061,10 @@ async function viewCompanyDoc(docId){
   // No FFD gate on a company doc — that one is about a specific flight's
   // release, not a manual.
   document.getElementById('pdf-ffd-banner').style.display = 'none';
-  // Read-in-app only: no Export control, and deliberately no blob URL
-  // minted either, since that would leave a downloadable handle to it.
+  // Read-in-app only: no Download, Print or Share, and deliberately no blob
+  // URL minted either, since that would leave a downloadable handle to it.
   if(_pdfObjectUrl){ URL.revokeObjectURL(_pdfObjectUrl); _pdfObjectUrl = null; }
-  const exportLink = document.getElementById('pdf-export-link');
-  exportLink.style.display = 'none';
-  exportLink.removeAttribute('href');
-  exportLink.removeAttribute('download');
+  _setPdfActions(false);
   paintCompanyDocAckBar();
   try {
     await renderPdfInline(b64ToBytes(data.pdf_b64));
