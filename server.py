@@ -575,6 +575,14 @@ if (window.matchMedia) {
   :root{
     --bg:#f5f5f7; --card:#fff; --border:#d2d2d7; --label:#6e6e73; --value:#1d1d1f;
     --blue:#0071e3; --blue-dark:#0058a8; --red:#ff3b30; --inactive:#9aa1ab;
+    /* iOS was falling all the way through to the generic monospace,
+       which is Courier: ui-monospace is not honoured everywhere and a
+       bare "Menlo" does not match on iOS. SFMono-Regular is the name
+       Safari actually resolves, so it goes first among the real
+       families and Courier stays what it should be — the last
+       resort. */
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+            "Liberation Mono", "Courier New", monospace;
   }
   @media (prefers-color-scheme: dark){
     :root{ --bg:#000; --card:#1c1c1e; --border:#38383a; --label:#98989d; --value:#f5f5f7; --inactive:#636366; }
@@ -4156,6 +4164,14 @@ if (window.matchMedia) {
   :root{
     --bg:#f5f5f7; --card:#fff; --border:#d2d2d7; --label:#6e6e73; --value:#1d1d1f;
     --blue:#0071e3; --blue-dark:#0058a8; --red:#ff3b30; --green:#34c759; --inactive:#9aa1ab;
+    /* iOS was falling all the way through to the generic monospace,
+       which is Courier: ui-monospace is not honoured everywhere and a
+       bare "Menlo" does not match on iOS. SFMono-Regular is the name
+       Safari actually resolves, so it goes first among the real
+       families and Courier stays what it should be — the last
+       resort. */
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+            "Liberation Mono", "Courier New", monospace;
   }
   @media (prefers-color-scheme: dark){
     :root{ --bg:#000; --card:#1c1c1e; --border:#38383a; --label:#98989d; --value:#f5f5f7; --inactive:#636366; }
@@ -4197,7 +4213,7 @@ if (window.matchMedia) {
   h1{font-size:18px;color:var(--blue-dark);margin:0 0 16px;}
   label{display:block;font-size:13px;font-weight:600;margin:10px 0 4px;color:var(--value);}
   textarea, select, input[type=text]{width:100%;max-width:640px;font-family:inherit;font-size:13.5px;padding:9px 10px;border:1px solid var(--border);border-radius:5px;box-sizing:border-box;background:var(--card);color:var(--value);}
-  textarea{height:160px;font-family:ui-monospace,Menlo,monospace;font-size:12.5px;}
+  textarea{height:160px;font-family:var(--mono);font-size:12.5px;}
   button{margin-top:10px;background:var(--blue);color:#fff;border:none;padding:10px 18px;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;}
   button.secondary{background:var(--green);}
   .arow{display:flex;align-items:center;justify-content:space-between;gap:10px;background:var(--card);border:1px solid var(--border);border-radius:6px;padding:10px 14px;margin-bottom:8px;max-width:640px;}
@@ -4791,6 +4807,14 @@ if (window.matchMedia) {
     --navy:#1d1d1f; --blue:#0071e3; --blue-dark:#0058a8;
     --bg:#f5f5f7; --card:#fff; --border:#d2d2d7; --label:#6e6e73; --value:#1d1d1f;
     --red:#ff3b30; --green:#34c759; --inactive:#9aa1ab; --radius:10px;
+    /* iOS was falling all the way through to the generic monospace,
+       which is Courier: ui-monospace is not honoured everywhere and a
+       bare "Menlo" does not match on iOS. SFMono-Regular is the name
+       Safari actually resolves, so it goes first among the real
+       families and Courier stays what it should be — the last
+       resort. */
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+            "Liberation Mono", "Courier New", monospace;
     /* NAC's brand maroon, sampled from static/nac-bear.png. Distinct from
        --red, which is the UI ALERT red and has nothing to do with the
        livery -- keep the two apart. */
@@ -5220,7 +5244,7 @@ if (window.matchMedia) {
      block — proportional type would break its alignment. */
   .msg-detail{padding:16px;}
   .msg-detail-hdr{font-size:12px;color:var(--label);margin-bottom:12px;}
-  .msg-body{font-family:ui-monospace,Menlo,monospace;font-size:12.5px;line-height:1.5;
+  .msg-body{font-family:var(--mono);font-size:12.5px;line-height:1.5;
     color:var(--value);white-space:pre-wrap;word-break:break-word;}
   .msg-ackbar{margin-top:18px;}
   .msg-ackbar button{margin:0;padding:11px 18px;font-size:14px;font-weight:600;
@@ -9825,13 +9849,13 @@ function renderWeather(stations){
     }
     if(s.metar){
       const m = document.createElement('div');
-      m.style.cssText = 'font-family:ui-monospace,Menlo,monospace;font-size:11.5px;white-space:pre-wrap;color:var(--value);margin-bottom:6px;';
+      m.style.cssText = 'font-family:var(--mono);font-size:11.5px;white-space:pre-wrap;color:var(--value);margin-bottom:6px;';
       m.textContent = s.metar;
       card.appendChild(m);
     }
     if(s.taf){
       const t = document.createElement('div');
-      t.style.cssText = 'font-family:ui-monospace,Menlo,monospace;font-size:11.5px;white-space:pre-wrap;color:var(--label);';
+      t.style.cssText = 'font-family:var(--mono);font-size:11.5px;white-space:pre-wrap;color:var(--label);';
       t.textContent = s.taf;
       card.appendChild(t);
     }
