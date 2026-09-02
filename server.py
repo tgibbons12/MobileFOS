@@ -542,8 +542,13 @@ AUTH_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
 <link rel="manifest" href="/static/manifest.json">
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <link rel="icon" href="/static/icon-192.png">
-<meta name="theme-color" content="#f5f5f7" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+<!-- ONE tag, no media attribute, and it is never removed or replaced —
+     only its content is rewritten. iOS samples theme-color when a
+     home-screen app launches; a tag that script deletes and recreates
+     can leave it with no colour at all, at which point it falls back to
+     its own material and the status bar reads as frosted rather than a
+     flat colour matching the app. -->
+<meta name="theme-color" id="theme-color-tag" content="#f5f5f7">
 <script>
 // theme-color has to follow the theme the app is ACTUALLY showing. The two
 // media-keyed tags above only track the OS, and this app has its own
@@ -554,13 +559,8 @@ function _syncThemeColor(){
   var t = localStorage.getItem('fos_theme');
   var dark = (t === 'dark') || (t !== 'light' &&
     window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
-  var c = dark ? '#000000' : '#f5f5f7';
-  var tags = document.querySelectorAll('meta[name="theme-color"]');
-  for (var i = 0; i < tags.length; i++) tags[i].parentNode.removeChild(tags[i]);
-  var m = document.createElement('meta');
-  m.setAttribute('name', 'theme-color');
-  m.setAttribute('content', c);
-  document.head.appendChild(m);
+  var m = document.getElementById('theme-color-tag');
+  if (m) m.setAttribute('content', dark ? '#000000' : '#f5f5f7');
 }
 _syncThemeColor();
 if (window.matchMedia) {
@@ -3939,8 +3939,13 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
      the bar to blur. It also means env(safe-area-inset-*) reports 0,
      which every use here already handles by adding it to something. -->
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="theme-color" content="#f5f5f7" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+<!-- ONE tag, no media attribute, and it is never removed or replaced —
+     only its content is rewritten. iOS samples theme-color when a
+     home-screen app launches; a tag that script deletes and recreates
+     can leave it with no colour at all, at which point it falls back to
+     its own material and the status bar reads as frosted rather than a
+     flat colour matching the app. -->
+<meta name="theme-color" id="theme-color-tag" content="#f5f5f7">
 <script>
 // theme-color has to follow the theme the app is ACTUALLY showing. The two
 // media-keyed tags above only track the OS, and this app has its own
@@ -3951,13 +3956,8 @@ function _syncThemeColor(){
   var t = localStorage.getItem('fos_theme');
   var dark = (t === 'dark') || (t !== 'light' &&
     window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
-  var c = dark ? '#000000' : '#f5f5f7';
-  var tags = document.querySelectorAll('meta[name="theme-color"]');
-  for (var i = 0; i < tags.length; i++) tags[i].parentNode.removeChild(tags[i]);
-  var m = document.createElement('meta');
-  m.setAttribute('name', 'theme-color');
-  m.setAttribute('content', c);
-  document.head.appendChild(m);
+  var m = document.getElementById('theme-color-tag');
+  if (m) m.setAttribute('content', dark ? '#000000' : '#f5f5f7');
 }
 _syncThemeColor();
 if (window.matchMedia) {
@@ -4560,8 +4560,13 @@ FOS_TEMPLATE = """<!DOCTYPE html>
      the bar to blur. It also means env(safe-area-inset-*) reports 0,
      which every use here already handles by adding it to something. -->
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<meta name="theme-color" content="#f5f5f7" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+<!-- ONE tag, no media attribute, and it is never removed or replaced —
+     only its content is rewritten. iOS samples theme-color when a
+     home-screen app launches; a tag that script deletes and recreates
+     can leave it with no colour at all, at which point it falls back to
+     its own material and the status bar reads as frosted rather than a
+     flat colour matching the app. -->
+<meta name="theme-color" id="theme-color-tag" content="#f5f5f7">
 <script>
 // theme-color has to follow the theme the app is ACTUALLY showing. The two
 // media-keyed tags above only track the OS, and this app has its own
@@ -4572,13 +4577,8 @@ function _syncThemeColor(){
   var t = localStorage.getItem('fos_theme');
   var dark = (t === 'dark') || (t !== 'light' &&
     window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
-  var c = dark ? '#000000' : '#f5f5f7';
-  var tags = document.querySelectorAll('meta[name="theme-color"]');
-  for (var i = 0; i < tags.length; i++) tags[i].parentNode.removeChild(tags[i]);
-  var m = document.createElement('meta');
-  m.setAttribute('name', 'theme-color');
-  m.setAttribute('content', c);
-  document.head.appendChild(m);
+  var m = document.getElementById('theme-color-tag');
+  if (m) m.setAttribute('content', dark ? '#000000' : '#f5f5f7');
 }
 _syncThemeColor();
 if (window.matchMedia) {
