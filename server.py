@@ -527,14 +527,15 @@ AUTH_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
   var standalone = window.navigator.standalone === true ||
     (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
   var root = document.documentElement;
-  // Zero now, in both cases. This reserve existed because
-  // black-translucent had iOS painting its status bar over the page, so
-  // the top of the app had to be held clear of it. The meta above is
-  // "default" now: iOS reserves that space itself and the web view starts
-  // below the bar, so reserving it again here would just be a band of dead
-  // space. env() stays the source of truth for a device that does report
-  // an inset.
-  root.style.setProperty('--status-bar-min', '0px');
+  // Reserved again, and this time not on a theory about which meta tag
+  // controls the overlay. Observed behaviour on iOS 26 is that a
+  // home-screen web app's content sits under the status bar regardless of
+  // apple-mobile-web-app-status-bar-style or viewport-fit, so the only
+  // reliable fix is for the page to keep its own content out of that band.
+  // .topbar's padding absorbs it, which leaves the strip painted in
+  // .topbar's own flat background — the solid colour-matched bar other PWAs
+  // show, rather than the system blurring our content through it.
+  root.style.setProperty('--status-bar-min', standalone ? '24px' : '0px');
   root.style.setProperty('--status-bar',
     'max(env(safe-area-inset-top), var(--status-bar-min, 0px))');
 })();
@@ -3995,14 +3996,15 @@ if (window.matchMedia) {
   var standalone = window.navigator.standalone === true ||
     (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
   var root = document.documentElement;
-  // Zero now, in both cases. This reserve existed because
-  // black-translucent had iOS painting its status bar over the page, so
-  // the top of the app had to be held clear of it. The meta above is
-  // "default" now: iOS reserves that space itself and the web view starts
-  // below the bar, so reserving it again here would just be a band of dead
-  // space. env() stays the source of truth for a device that does report
-  // an inset.
-  root.style.setProperty('--status-bar-min', '0px');
+  // Reserved again, and this time not on a theory about which meta tag
+  // controls the overlay. Observed behaviour on iOS 26 is that a
+  // home-screen web app's content sits under the status bar regardless of
+  // apple-mobile-web-app-status-bar-style or viewport-fit, so the only
+  // reliable fix is for the page to keep its own content out of that band.
+  // .topbar's padding absorbs it, which leaves the strip painted in
+  // .topbar's own flat background — the solid colour-matched bar other PWAs
+  // show, rather than the system blurring our content through it.
+  root.style.setProperty('--status-bar-min', standalone ? '24px' : '0px');
   root.style.setProperty('--status-bar',
     'max(env(safe-area-inset-top), var(--status-bar-min, 0px))');
 })();
@@ -4616,14 +4618,15 @@ if (window.matchMedia) {
   var standalone = window.navigator.standalone === true ||
     (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
   var root = document.documentElement;
-  // Zero now, in both cases. This reserve existed because
-  // black-translucent had iOS painting its status bar over the page, so
-  // the top of the app had to be held clear of it. The meta above is
-  // "default" now: iOS reserves that space itself and the web view starts
-  // below the bar, so reserving it again here would just be a band of dead
-  // space. env() stays the source of truth for a device that does report
-  // an inset.
-  root.style.setProperty('--status-bar-min', '0px');
+  // Reserved again, and this time not on a theory about which meta tag
+  // controls the overlay. Observed behaviour on iOS 26 is that a
+  // home-screen web app's content sits under the status bar regardless of
+  // apple-mobile-web-app-status-bar-style or viewport-fit, so the only
+  // reliable fix is for the page to keep its own content out of that band.
+  // .topbar's padding absorbs it, which leaves the strip painted in
+  // .topbar's own flat background — the solid colour-matched bar other PWAs
+  // show, rather than the system blurring our content through it.
+  root.style.setProperty('--status-bar-min', standalone ? '24px' : '0px');
   root.style.setProperty('--status-bar',
     'max(env(safe-area-inset-top), var(--status-bar-min, 0px))');
 })();
@@ -4992,7 +4995,14 @@ if (window.matchMedia) {
      active one carrying the page colour up out of it, so the tab reads as
      the top edge of the document rather than as a filter chip floating
      above it. */
+  /* Sticky directly beneath .topbar, which is itself sticky at
+     var(--ack-h). Tabs that scroll away with the document are only
+     usable at the top of page one, which for a 60-page release means
+     scrolling back up just to switch documents.
+     z-index 9 keeps it under .topbar (10) so it slides beneath the
+     header rather than over it. */
   .pdf-tabs{display:none;gap:1px;overflow-x:auto;padding:6px 10px 0;background:var(--card);
+    position:sticky;top:calc(var(--ack-h,0px) + var(--topbar-h,0px));z-index:9;
     border-bottom:1px solid var(--border);-webkit-overflow-scrolling:touch;scrollbar-width:none;}
   .pdf-tabs::-webkit-scrollbar{display:none;}
   .pdf-tab{position:relative;flex:0 0 auto;display:flex;align-items:center;gap:8px;margin:0;
@@ -6516,17 +6526,20 @@ function _getReleaseCache(){
 // leaked another leg's OFP onto a leg nothing had been generated for, because
 // the generator renders whatever OFP is on the SimBrief account, not this leg.
 // Generating stays where the pilot asks for it explicitly: Release > Generate.
-async function ensureRelease(){
+// quiet suppresses the toasts — restorePdfTabs() runs on every page load and
+// must say nothing on a leg that simply has no release yet.
+async function ensureRelease(quiet){
   const held = _getReleaseCache();
   if(held) return held;
-  if(!LEG_ID){ showToast('Open a flight first'); return null; }
+  const say = (m) => { if(!quiet) showToast(m); };
+  if(!LEG_ID){ say('Open a flight first'); return null; }
   let r, data;
   try {
     r = await fetch('/fos/' + LEG_ID + '/release', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({cached_only: true})});
     data = await r.json();
-  } catch(e) { showToast('Request failed: ' + e); return null; }
-  if(r.status === 404){ showToast('No release generated for this flight yet — generate one under Release'); return null; }
-  if(!r.ok){ showToast('Failed: ' + (data.error || 'unknown error')); return null; }
+  } catch(e) { say('Request failed: ' + e); return null; }
+  if(r.status === 404){ say('No release generated for this flight yet — generate one under Release'); return null; }
+  if(!r.ok){ say('Failed: ' + (data.error || 'unknown error')); return null; }
   _setReleaseCache(data);
   return data;
 }
@@ -6686,9 +6699,95 @@ async function renderPdfInline(bytes){
 let _pdfTabs = [];
 let _activePdfTab = null;
 
+// Which documents are open, and which one was showing, kept across reloads.
+// Only the KEYS are stored — never the PDF bytes. Those are megabytes, they
+// go stale the moment the release is regenerated, and localStorage is the
+// wrong place for a document. The bytes are re-fetched from the release the
+// tab is reopened against, so a restored tab always shows current paperwork
+// rather than a snapshot from before the last refresh.
+const _PDF_TABS_KEY = 'fos_pdf_tabs_' + (typeof LEG_ID !== 'undefined' ? LEG_ID : '');
+
+function _savePdfTabs(){
+  try {
+    localStorage.setItem(_PDF_TABS_KEY, JSON.stringify({
+      keys: _pdfTabs.filter(t => t.kind === 'release').map(t => t.key),
+      active: _activePdfTab,
+    }));
+  } catch(e) { /* private mode, quota — losing tab state is not worth an error */ }
+}
+
+function _readSavedPdfTabs(){
+  try {
+    const raw = localStorage.getItem(_PDF_TABS_KEY);
+    if(!raw) return null;
+    const v = JSON.parse(raw);
+    return (v && Array.isArray(v.keys)) ? v : null;
+  } catch(e) { return null; }
+}
+
+// Reopens whatever was open last time, and failing that seeds from Saved
+// Docs — the documents the pilot bookmarked are exactly the ones they want
+// waiting for them. Silent: it must never steal the view or toast on a
+// leg whose release has since been regenerated away.
+async function restorePdfTabs(){
+  if(typeof LEG_ID === 'undefined' || !LEG_ID) return;
+  if(_pdfTabs.length) return;
+  const saved = _readSavedPdfTabs();
+  let keys = saved ? saved.keys : [];
+  if(!keys.length){
+    keys = (LEG_BOOKMARKED_DOCS || [])
+      .map(code => DOC_CODE_TO_KIND[code])
+      .filter(Boolean)
+      .map(m => 'rel:' + m[0]);
+  }
+  if(!keys.length) return;
+  const data = await ensureRelease(true);
+  if(!data) return;                        // nothing on file — nothing to reopen
+  const byKind = {rls:'rls_pdf_b64', fi:'fi_pdf_b64', fil:'fil_pdf_b64', wb:'wb_pdf_b64',
+                  weather:'weather_pdf_b64', notams:'notams_pdf_b64',
+                  field_report:'field_report_pdf_b64'};
+  const labelFor = {};
+  Object.keys(DOC_CODE_TO_KIND).forEach(code => {
+    const m = DOC_CODE_TO_KIND[code];
+    labelFor['rel:' + m[0]] = m[1];
+  });
+  keys.forEach(key => {
+    const kind = key.replace(/^rel:/, '');
+    const b64 = data[byKind[kind]];
+    if(!b64) return;                       // not in this release any more
+    _pdfTabs.push({
+      key: key, label: labelFor[key] || kind.toUpperCase(), kind: 'release',
+      bytes: b64ToBytes(b64),
+      meta: {
+        fitForDuty: !!data.fit_for_duty,
+        exportName: kind === 'rls' ? data.filename
+                  : (data.filename || 'release.pdf').replace('-RLS.pdf', '-' + kind.toUpperCase() + '.pdf'),
+      },
+    });
+  });
+  if(!_pdfTabs.length) return;
+  const want = saved && saved.active && _pdfTabIndex(saved.active) >= 0
+    ? saved.active : _pdfTabs[0].key;
+  _activePdfTab = want;
+  // Persist the seeded set too, so closing one of the Saved-Docs tabs
+  // sticks instead of being re-seeded on the next load.
+  _savePdfTabs();
+  renderPdfTabs();
+}
+
 function _pdfTabIndex(key){ return _pdfTabs.findIndex(t => t.key === key); }
 
+// The tab strip pins under the header, so it needs the header's real height
+// — which moves with the safe-area inset and with the title wrapping.
+function _syncTopbarHeight(){
+  const tb = document.querySelector('#pdf-view .topbar');
+  if(!tb) return;
+  document.documentElement.style.setProperty(
+    '--topbar-h', Math.round(tb.getBoundingClientRect().height) + 'px');
+}
+
 function renderPdfTabs(){
+  _syncTopbarHeight();
   const strip = document.getElementById('pdf-tabs');
   strip.innerHTML = '';
   // Shown from the FIRST tab. It used to wait for a second one, on the
@@ -6729,6 +6828,7 @@ async function openPdfTab(tab){
   // Coming back from an untabbed company document.
   _currentCompanyDoc = null;
   showView('pdf');
+  _savePdfTabs();
   await activatePdfTab(tab.key);
 }
 
@@ -6820,6 +6920,7 @@ function closeAllPdfTabs(){
   closePdfMore();
   _pdfTabs = [];
   _activePdfTab = null;
+  _savePdfTabs();
   renderPdfTabs();
   closePdfView();
 }
@@ -6828,6 +6929,7 @@ async function activatePdfTab(key){
   const tab = _pdfTabs[_pdfTabIndex(key)];
   if(!tab) return;
   _activePdfTab = key;
+  _savePdfTabs();
   renderPdfTabs();
   document.getElementById('pdf-view-title').textContent = tab.label;
   const exportLink = document.getElementById('pdf-export-link');
@@ -6880,6 +6982,7 @@ function closePdfTab(key){
   const i = _pdfTabIndex(key);
   if(i < 0) return;
   _pdfTabs.splice(i, 1);
+  _savePdfTabs();
   if(key !== _activePdfTab){ renderPdfTabs(); return; }
   _pdfRenderToken++; // whatever is rendering belongs to a tab that is gone
   if(!_pdfTabs.length){
@@ -9487,6 +9590,10 @@ function renderWeather(stations){
   if(view && view !== 'overview' && document.getElementById(view + '-view')) showView(view);
   else initOverviewPills();
   paintReleaseState();
+  // Reopen whatever documents were open last time, or seed from Saved Docs.
+  // Deliberately not awaited: it does a fetch, and nothing else on this page
+  // should wait on it.
+  restorePdfTabs();
   // Repaint the AeroAPI panel from what is already on the leg. This is the
   // half of "no second API call" the server cannot do on its own: the
   // gates survive a regenerate via carry_gates_from, but without this the
