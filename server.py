@@ -2841,6 +2841,129 @@ def recover_leg_accept(leg_id):
 # later); falls back to a day-scoped search that still tries to reach the
 # original day's own planned destination, preserving every day after it.
 # ---------------------------------------------------------------------------
+@app.route("/pbs/sequences/<seq_number>/recover-options", methods=["POST"])
+def recover_options(seq_number):
+    """Recovery options for one leg of one duty day, worked in priority
+    order and labelled with which priority answered.
+
+    Body: {duty_day, leg_index, kind, at, station?}. `kind` is the
+    disruption — late_departure / late_arrival / diverted / cancelled — and
+    `at` is the one time that kind implies (new departure, actual arrival,
+    or when you are available again). `station` only matters for a
+    diversion, where you are somewhere the pairing never planned for.
+
+    Priorities, first one that yields anything wins:
+
+      day_intact  reach this day's own planned destination, so every later
+                  day reattaches exactly as printed
+      same_length rebuild through to domicile without adding a day
+      get_home    domicile, extra days allowed
+
+    Whether the duty clock has started is NOT asked — it is read from FFD.
+    Unsigned means the day has not begun and the crew can be fully
+    reassigned off a fresh report; signed means duty is running from
+    ffd_signed_at and only what fits the remaining period is offered.
+    """
+    seq = next((x for x in _pbs_sequences() if x["seq"] == seq_number), None)
+    if not seq:
+        return jsonify({"error": "sequence not found"}), 404
+
+    body = request.get_json(silent=True) or {}
+    try:
+        duty_day = int(body.get("duty_day"))
+        leg_index = int(body.get("leg_index"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "duty_day and leg_index are required"}), 400
+    kind = (body.get("kind") or "").strip() or "late_departure"
+    if kind not in _DISRUPTION_LABELS:
+        return jsonify({"error": f"unknown disruption type {kind!r}"}), 400
+    at_hhmm = re.sub(r"[^0-9]", "", str(body.get("at") or ""))[:4]
+    if len(at_hhmm) != 4:
+        return jsonify({"error": "a time in HHMM is required"}), 400
+
+    days = seq.get("duty_days") or []
+    day = next((d for d in days if d.get("duty_day") == duty_day), None)
+    if not day:
+        return jsonify({"error": f"sequence has no duty day {duty_day}"}), 404
+    day_legs = day.get("legs") or []
+    if leg_index < 0 or leg_index >= len(day_legs):
+        return jsonify({"error": "no such leg on that day"}), 404
+    leg = day_legs[leg_index]
+
+    first_day = days[0] if days else None
+    dom = first_day["legs"][0]["origin"] if first_day and first_day.get("legs") else ""
+    if not dom:
+        return jsonify({"error": "sequence has no origin to recover back to"}), 400
+
+    # FFD state decides the constraint. Read off whichever Leg row belongs to
+    # this sequence and this flight — a day the pilot never generated a leg
+    # for simply has no signature, which is itself the answer.
+    signed, report_hhmm = False, (day.get("report") or "")
+    for row in Leg.query.filter_by(user_id=current_user.id).all():
+        if (row.data or {}).get("seq") != seq_number:
+            continue
+        if (row.data.get("flight_number") or "").strip() == (leg.get("flight_number") or "").strip():
+            signed = bool(row.data.get("fit_for_duty"))
+            break
+    originated = leg_index > 0 or duty_day > (days[0].get("duty_day") if days else 1)
+
+    legs_net, ap = pairing_engine.get_route_data()
+
+    # Where the crew is and from when, which is all the engine needs. A late
+    # departure or a cancellation leaves them at the leg's ORIGIN; a late
+    # arrival puts them at the planned destination; a diversion somewhere
+    # else entirely.
+    if kind in ("late_departure", "cancelled"):
+        at_station = leg.get("origin")
+    elif kind == "late_arrival":
+        at_station = leg.get("destination")
+    else:
+        at_station = (body.get("station") or "").strip().upper() or leg.get("destination")
+
+    tiers = []
+    try:
+        # 1. Day intact — everything after this day survives untouched.
+        # FFD unsigned: the day has not begun, so `at` IS the report time.
+        # Signed: duty is already running, so `at` is when it ended and the
+        # engine adds minimum rest as it always has.
+        cands, target, reached = pairing_edit.day_scoped_recovery(
+            seq, dom, ap, legs_net, duty_day, leg_index,
+            at_hhmm if signed else None,
+            report_local=None if signed else at_hhmm,
+        )
+        if cands:
+            tiers.append({"tier": "day_intact", "target": target,
+                          "reached_target": reached, "candidates": cands})
+    except Exception as e:
+        LOG.warning(f"day_scoped_recovery failed for {seq_number} d{duty_day}: {e}")
+
+    if not tiers:
+        for tier_name, extra in (("same_length", 0), ("get_home", 2)):
+            try:
+                cands, violations = pairing_edit.recover_from_disruption(
+                    seq, dom, ap, legs_net, duty_day, leg_index,
+                    at_station, at_hhmm, max_extra_days=extra,
+                )
+            except Exception as e:
+                LOG.warning(f"recover_from_disruption({extra}) failed: {e}")
+                cands, violations = [], [str(e)]
+            if cands:
+                tiers.append({"tier": tier_name, "target": dom,
+                              "reached_target": True, "candidates": cands})
+                break
+
+    return jsonify({
+        "seq": seq_number, "duty_day": duty_day, "leg_index": leg_index,
+        "kind": kind, "at": at_hhmm, "station": at_station,
+        "ffd_signed": signed, "originated": originated,
+        "report": report_hhmm,
+        "repair_window_end": _repair_window_end(at_hhmm, report_hhmm, originated),
+        "leg": {"flight_number": leg.get("flight_number"), "origin": leg.get("origin"),
+                "destination": leg.get("destination"), "dep_local": leg.get("dep_local")},
+        "options": tiers,
+    })
+
+
 @app.route("/fos/<int:leg_id>/shift-day", methods=["POST"])
 def shift_day(leg_id):
     row = _get_leg_row(leg_id)
@@ -5629,39 +5752,14 @@ if (window.matchMedia) {
     </section>
     <section id="recovery-view" class="view">
       <div class="topbar">
-        <button class="back-link" onclick="showView('overview')" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
+        <button class="back-link" onclick="closeRecovery()" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
         <div class="topbar-title">
           <h1>Report a Disruption</h1>
-          <p>Find a legal way back on track</p>
         </div>
       </div>
-      <div class="tabs">
-        <button class="tab-btn active" id="tab-shift-btn" onclick="showRecoveryTab('shift')">Delayed / Timed Out</button>
-        <button class="tab-btn" id="tab-divert-btn" onclick="showRecoveryTab('divert')">Diverted</button>
-      </div>
-      <div id="tab-shift" class="tab-panel active">
-        <div class="panel">
-          <div style="font-size:13px;color:var(--label);margin-bottom:4px;">Same destination, just later — a delay pushed you into rest instead of continuing as planned. Enter when duty actually ended; this first tries the exact original plan shifted to the next legal day, then falls back to an alternate routing if that doesn't fit.</div>
-          <label for="shift-rest-start">Rest Started (local time, HHMM)</label>
-          <input id="shift-rest-start" type="text" placeholder="e.g. 0100">
-          <br><button onclick="submitShiftDay()">Find a Way Forward</button>
-          <div id="shift-msg" class="msg"></div>
-        </div>
-        <div id="shift-candidates" style="margin-top:4px;"></div>
-      </div>
-      <div id="tab-divert" class="tab-panel">
-        <div class="panel">
-          <div style="font-size:13px;color:var(--label);margin-bottom:4px;">Enter where this flight actually ended up. Everything after it in the pairing will be replaced with a legal way back to base.</div>
-          <label for="rec-dest">Actual Destination</label>
-          <input id="rec-dest" type="text" placeholder="Station code">
-          <label for="rec-arrival">Actual Arrival (local time, HHMM)</label>
-          <input id="rec-arrival" type="text" placeholder="e.g. 0300">
-          <br><button onclick="submitRecovery()">Find Recovery Options</button>
-          <div id="recovery-msg" class="msg"></div>
-        </div>
-        <div id="recovery-candidates" style="margin-top:4px;"></div>
-      </div>
+      <div id="recovery-body"></div>
     </section>
+
     <section id="release-view" class="view">
       <div class="topbar">
         <button class="back-link" onclick="showView('overview')" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
@@ -7716,6 +7814,37 @@ function renderDutyDayCards(container, seqData, opts){
         const leg = (day.legs || [])[i];
         row.style.cursor = 'pointer';
         row.onclick = () => opts.onRowClick(day, i, leg);
+        if(opts.onLongPress){
+          // Long-press the leg that went wrong. A plain tap already means
+          // "generate this leg", so recovery needs its own gesture rather
+          // than a second tap target squeezed into the row.
+          //
+          // Tracked by hand instead of using contextmenu: iOS fires that
+          // inconsistently in a standalone web app, and a moved finger has
+          // to cancel or every scroll that starts on a row opens recovery.
+          let timer = null, moved = false;
+          const start = () => {
+            moved = false;
+            timer = setTimeout(() => {
+              if(moved) return;
+              // Cancel the click that would otherwise follow the release.
+              row.dataset.longpressed = '1';
+              if(navigator.vibrate) navigator.vibrate(12);
+              opts.onLongPress(day, i, leg);
+            }, 500);
+          };
+          const cancel = () => { moved = true; clearTimeout(timer); };
+          row.addEventListener('touchstart', start, {passive: true});
+          row.addEventListener('touchmove', cancel, {passive: true});
+          row.addEventListener('touchend', cancel);
+          row.addEventListener('mousedown', start);
+          row.addEventListener('mousemove', cancel);
+          row.addEventListener('mouseup', cancel);
+          row.addEventListener('mouseleave', cancel);
+          row.addEventListener('click', (e) => {
+            if(row.dataset.longpressed){ delete row.dataset.longpressed; e.stopPropagation(); }
+          }, true);
+        }
         const editIcon = row.querySelector('.edit-icon');
         if(editIcon) editIcon.onclick = (e) => { e.stopPropagation(); opts.onEditClick(row, day, i, leg); };
       });
@@ -7816,8 +7945,22 @@ function renderPairing(seqData){
     interactive: true,
     onRowClick: (day, i, leg) => generatePairingLeg(seqData.seq, day.duty_day, i, position),
     onEditClick: (row, day, i, leg) => toggleLegEditForm(row, seqData.seq, day.duty_day, i, leg),
+    onLongPress: (day, i, leg) => openRecovery(seqData, day, i, leg),
   });
   body.appendChild(cardsWrap);
+
+  const recWrap = document.createElement('div');
+  recWrap.style.cssText = 'padding:0 14px 14px;';
+  const recBtn = document.createElement('button');
+  recBtn.type = 'button';
+  recBtn.className = 'docs-btn';
+  recBtn.style.cssText = 'border-radius:7px;background:var(--card);color:var(--blue-dark);border:1px solid var(--blue-dark);';
+  recBtn.textContent = 'Report a Disruption';
+  // The long-press is the fast path; this is the discoverable one. It asks
+  // which leg, because nothing about the button says which one you meant.
+  recBtn.onclick = () => openRecovery(seqData, null, null, null);
+  recWrap.appendChild(recBtn);
+  body.appendChild(recWrap);
 
   const dropWrap = document.createElement('div');
   dropWrap.style.cssText = 'padding:0 14px 18px;';
@@ -8965,175 +9108,241 @@ async function resolveLegEdit(seq, action){
   initPairingView();
 }
 
-function showRecoveryTab(tab){
-  document.getElementById('tab-shift').classList.toggle('active', tab==='shift');
-  document.getElementById('tab-divert').classList.toggle('active', tab==='divert');
-  document.getElementById('tab-shift-btn').classList.toggle('active', tab==='shift');
-  document.getElementById('tab-divert-btn').classList.toggle('active', tab==='divert');
+// ---------------------------------------------------------------------
+// Trip recovery. Reached by long-pressing the leg that went wrong in My
+// Trip, or from Report a Disruption on the same screen.
+//
+// The pilot is asked two things only: what happened, and when. Everything
+// else is derived — where they are follows from the disruption type, and
+// whether the duty clock is running is read from FFD rather than asked,
+// because the pilot should not have to know that it changes the answer.
+// ---------------------------------------------------------------------
+let _recSeq = null, _recDay = null, _recLegIndex = null, _recKind = 'late_departure';
+
+const _REC_KINDS = [
+  ['late_departure', 'Late Departure', 'Still at the gate, going later'],
+  ['late_arrival',   'Late Arrival',   'Landed where planned, but late'],
+  ['diverted',       'Diverted',       'Landed somewhere else'],
+  ['cancelled',      'Cancelled',      'This leg is not operating'],
+];
+
+function openRecovery(seqData, day, legIndex, leg){
+  _recSeq = seqData;
+  _recDay = day ? day.duty_day : null;
+  _recLegIndex = (legIndex === null || legIndex === undefined) ? null : legIndex;
+  _recKind = 'late_departure';
+  showView('recovery');
+  renderRecovery();
 }
 
-// "Timed out into rest" — same destination, just later. Tries the exact
-// original plan shifted first (mode:"shifted", a single deterministic
-// preview to confirm); falls back to a day-scoped alternate-routing search
-// (mode:"day_patch", pick one of several legal options) if the shifted
-// plan doesn't fit.
-let _shiftRestStart = null;
-async function submitShiftDay(){
-  const el = document.getElementById('shift-msg');
-  const list = document.getElementById('shift-candidates');
-  list.innerHTML = '';
-  const restStart = document.getElementById('shift-rest-start').value.trim();
-  if(!restStart){ el.textContent = 'Rest start time is required.'; el.style.color = 'var(--red)'; return; }
-  el.textContent = 'Checking the original plan, shifted…';
-  el.style.color = '';
-  try {
-    const r = await fetch('/fos/' + LEG_ID + '/shift-day', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({rest_start_local: restStart}),
+function closeRecovery(){
+  if(_recSeq) myTripShowDetail(_recSeq.seq, true);
+  else showView('pairing');
+}
+
+function _recLeg(){
+  if(!_recSeq || _recDay === null || _recLegIndex === null) return null;
+  const day = (_recSeq.duty_days || []).find(d => d.duty_day === _recDay);
+  return day ? (day.legs || [])[_recLegIndex] : null;
+}
+
+function renderRecovery(){
+  const body = document.getElementById('recovery-body');
+  body.innerHTML = '';
+
+  // Step 1 — which leg. Skipped when a long-press already said.
+  const legPanel = document.createElement('div');
+  legPanel.className = 'panel';
+  const legHdr = document.createElement('div');
+  legHdr.className = 'panel-card-hdr';
+  legHdr.textContent = 'Disrupted Leg';
+  legPanel.appendChild(legHdr);
+  (_recSeq.duty_days || []).forEach(day => {
+    (day.legs || []).forEach((leg, i) => {
+      const row = document.createElement('div');
+      row.className = 'doc-row';
+      row.style.cursor = 'pointer';
+      const chosen = day.duty_day === _recDay && i === _recLegIndex;
+      if(chosen) row.style.background = 'var(--bg)';
+      const left = document.createElement('div');
+      const code = document.createElement('div');
+      code.className = 'code';
+      code.textContent = 'DAY ' + day.duty_day + '   ' + (leg.flight_number || '----')
+        + '  ' + leg.origin + '-' + leg.destination;
+      const desc = document.createElement('div');
+      desc.className = 'desc';
+      desc.textContent = (leg.dep_local || '') + ' - ' + (leg.arr_local || '');
+      left.appendChild(code); left.appendChild(desc);
+      row.appendChild(left);
+      if(chosen){
+        const tick = document.createElement('div');
+        tick.className = 'actions';
+        tick.style.color = 'var(--blue)';
+        tick.textContent = 'selected';
+        tick.style.fontSize = '12px';
+        row.appendChild(tick);
+      }
+      row.onclick = () => { _recDay = day.duty_day; _recLegIndex = i; renderRecovery(); };
+      legPanel.appendChild(row);
     });
-    const data = await r.json();
-    if(!r.ok){ el.textContent = data.error || 'No way forward found'; el.style.color = 'var(--red)'; return; }
-    _shiftRestStart = restStart;
-    if(data.mode === 'shifted'){
-      el.textContent = 'The original plan still works, just a day later.';
-      el.style.color = 'var(--green)';
-      const days = data.preview.duty_days.map(d => `Day ${d.duty_day}: ` +
-        d.legs.map(l => `${l.flight_number} ${l.origin}→${l.destination} ${l.dep_local}/${l.arr_local}`).join(', ')
-      ).join('<br>');
-      list.innerHTML = `<div class="arow" style="flex-direction:column;align-items:stretch;">
-        <div style="font-size:12.5px;color:var(--value);line-height:1.6;">${days}</div>
-        <button onclick="acceptShiftedPlan()" style="margin-top:8px;">Accept Shifted Plan</button>
-      </div>`;
-    } else if(data.mode === 'day_patch'){
-      window._shiftPatch = {target_station: data.target_station, reached_target: data.reached_target};
-      el.textContent = data.reached_target
-        ? `Original plan didn't fit — found ${data.candidates.length} way(s) to still reach ${data.target_station} on time.`
-        : `Couldn't reach ${data.target_station} — found ${data.candidates.length} legal way(s) back to base instead.`;
-      el.style.color = data.reached_target ? 'var(--green)' : '#c98a1f';
-      list.innerHTML = data.candidates.map((c, i) => `<div class="arow" style="flex-direction:column;align-items:stretch;">
-        <div style="display:flex;justify-content:space-between;font-size:13.5px;color:var(--value);">
-          <span>${c.routing.join('-')}</span><span>${c.block.toFixed(2)}h block</span>
-        </div>
-        <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--label);margin-top:2px;">
-          <span>${c.legs_per_day.join('-')} legs/day</span><span>${c.total_days} total duty period(s)</span>
-        </div>
-        <button onclick="acceptDayPatch(${i})" style="margin-top:8px;">Accept</button>
-      </div>`).join('');
-      window._shiftCandidates = data.candidates;
-    }
-  } catch(e) {
-    el.textContent = 'Request failed: ' + e;
-    el.style.color = 'var(--red)';
+  });
+  body.appendChild(legPanel);
+
+  if(_recDay === null || _recLegIndex === null) return;
+
+  // Step 2 — what happened, and when.
+  const what = document.createElement('div');
+  what.className = 'panel';
+  const whatHdr = document.createElement('div');
+  whatHdr.className = 'panel-card-hdr';
+  whatHdr.textContent = 'What Happened';
+  what.appendChild(whatHdr);
+  _REC_KINDS.forEach(([v, label, hint]) => {
+    const row = document.createElement('div');
+    row.className = 'doc-row';
+    row.style.cursor = 'pointer';
+    if(v === _recKind) row.style.background = 'var(--bg)';
+    const left = document.createElement('div');
+    const c = document.createElement('div'); c.className = 'code'; c.textContent = label;
+    const d = document.createElement('div'); d.className = 'desc'; d.textContent = hint;
+    left.appendChild(c); left.appendChild(d);
+    row.appendChild(left);
+    row.onclick = () => { _recKind = v; renderRecovery(); };
+    what.appendChild(row);
+  });
+
+  const timeWrap = document.createElement('div');
+  timeWrap.style.cssText = 'padding:12px 14px;';
+  const lbl = document.createElement('div');
+  lbl.style.cssText = 'font-size:12.5px;color:var(--label);margin-bottom:6px;';
+  lbl.textContent = {
+    late_departure: 'New departure time (HHMM local)',
+    late_arrival:   'Actual arrival time (HHMM local)',
+    diverted:       'Actual arrival time (HHMM local)',
+    cancelled:      'Available from (HHMM local)',
+  }[_recKind];
+  const input = document.createElement('input');
+  input.type = 'text'; input.id = 'rec-at'; input.inputMode = 'numeric';
+  input.maxLength = 4; input.placeholder = '1445';
+  input.style.cssText = 'width:100%;box-sizing:border-box;padding:10px 12px;font-size:15px;'
+    + 'font-family:var(--mono);border:1px solid var(--border);border-radius:7px;'
+    + 'background:var(--bg);color:var(--value);';
+  timeWrap.appendChild(lbl); timeWrap.appendChild(input);
+
+  if(_recKind === 'diverted'){
+    const sl = document.createElement('div');
+    sl.style.cssText = 'font-size:12.5px;color:var(--label);margin:12px 0 6px;';
+    sl.textContent = 'Where you actually landed';
+    const si = document.createElement('input');
+    si.type = 'text'; si.id = 'rec-station'; si.maxLength = 4; si.placeholder = 'DFW';
+    si.style.cssText = input.style.cssText + 'text-transform:uppercase;';
+    timeWrap.appendChild(sl); timeWrap.appendChild(si);
   }
-}
-async function acceptShiftedPlan(){
-  const el = document.getElementById('shift-msg');
-  el.textContent = 'Applying…';
-  el.style.color = '';
-  try {
-    const r = await fetch('/fos/' + LEG_ID + '/shift-day/accept-shift', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({rest_start_local: _shiftRestStart}),
-    });
-    const data = await r.json();
-    if(!r.ok){ el.textContent = data.error || 'Failed to apply'; el.style.color = 'var(--red)'; return; }
-    document.getElementById('shift-candidates').innerHTML = '';
-    showToast('Pairing shifted to the next day');
-    showView('pairing');
-  } catch(e) { el.textContent = 'Request failed: ' + e; el.style.color = 'var(--red)'; }
-}
-async function acceptDayPatch(i){
-  const el = document.getElementById('shift-msg');
-  const c = (window._shiftCandidates || [])[i];
-  const ctx = window._shiftPatch;
-  if(!c || !ctx || !_shiftRestStart){ el.textContent = 'That option is no longer available — search again.'; el.style.color = 'var(--red)'; return; }
-  el.textContent = 'Applying…';
-  el.style.color = '';
-  try {
-    const r = await fetch('/fos/' + LEG_ID + '/shift-day/accept-patch', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        rest_start_local: _shiftRestStart, target_station: ctx.target_station, reached_target: ctx.reached_target,
-        chain: c.chain, day_number: c.day_number, dlegs_today: c.dlegs_today,
-        dblk_today: c.dblk_today, duty_report_utc: c.duty_report_utc, total_days: c.total_days,
-      }),
-    });
-    const data = await r.json();
-    if(!r.ok){ el.textContent = data.error || 'Failed to apply'; el.style.color = 'var(--red)'; return; }
-    document.getElementById('shift-candidates').innerHTML = '';
-    showToast('Pairing patched');
-    showView('pairing');
-  } catch(e) { el.textContent = 'Request failed: ' + e; el.style.color = 'var(--red)'; }
+
+  const go = document.createElement('button');
+  go.type = 'button';
+  go.className = 'docs-btn';
+  go.style.cssText = 'margin-top:12px;border-radius:7px;';
+  go.textContent = 'Find Options';
+  go.onclick = submitRecovery;
+  timeWrap.appendChild(go);
+  what.appendChild(timeWrap);
+  body.appendChild(what);
+
+  const results = document.createElement('div');
+  results.id = 'rec-results';
+  body.appendChild(results);
 }
 
-// Mid-trip recovery — the currently-viewed leg diverted/overran. Every
-// candidate /fos/<id>/recover returns is already legal by construction
-// (pairing_edit.recover_from_disruption only returns verify_from()-clean
-// continuations), so — unlike leg editing — there's no illegal-but-
-// confirmable state and no confirm/reject modal needed here, just pick one.
-let _recoveryContext = null;
+const _REC_TIER_LABEL = {
+  day_intact:  ['Trip Preserved', 'Reaches this day\u2019s planned destination \u2014 every later day is unchanged'],
+  same_length: ['Same Length', 'Rebuilt to domicile without adding a day'],
+  get_home:    ['Get Home', 'Back to domicile, and it costs extra days'],
+};
+
 async function submitRecovery(){
-  const el = document.getElementById('recovery-msg');
-  const list = document.getElementById('recovery-candidates');
-  list.innerHTML = '';
-  const dest = document.getElementById('rec-dest').value.trim().toUpperCase();
-  const arrival = document.getElementById('rec-arrival').value.trim();
-  if(!dest || !arrival){ el.textContent = 'Actual destination and arrival time are both required.'; el.style.color = 'var(--red)'; return; }
-  el.textContent = 'Searching for a legal way back…';
-  el.style.color = '';
+  const at = (document.getElementById('rec-at').value || '').replace(/[^0-9]/g, '');
+  const results = document.getElementById('rec-results');
+  if(at.length !== 4){ showToast('Enter a time as HHMM'); return; }
+  const station = (document.getElementById('rec-station') || {}).value;
+  results.innerHTML = '';
+  showLoading(results);
+  let data;
   try {
-    const r = await fetch('/fos/' + LEG_ID + '/recover', {
+    const r = await fetch('/pbs/sequences/' + encodeURIComponent(_recSeq.seq) + '/recover-options', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({actual_destination: dest, actual_arrival_local: arrival}),
+      body: JSON.stringify({duty_day: _recDay, leg_index: _recLegIndex,
+                            kind: _recKind, at: at, station: station || ''}),
     });
-    const data = await r.json();
-    if(!r.ok){ el.textContent = data.error || 'No recovery found'; el.style.color = 'var(--red)'; return; }
-    _recoveryContext = {actual_destination: dest, actual_arrival_local: arrival};
-    el.textContent = `Found ${data.candidates.length} legal option(s).`;
-    el.style.color = 'var(--green)';
-    list.innerHTML = data.candidates.map((c, i) => `<div class="arow" style="flex-direction:column;align-items:stretch;">
-      <div style="display:flex;justify-content:space-between;font-size:13.5px;color:var(--value);">
-        <span>${c.routing.join('-')}</span><span>${c.block.toFixed(2)}h block</span>
-      </div>
-      <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--label);margin-top:2px;">
-        <span>${c.legs_per_day.join('-')} legs/day</span><span>${c.total_days} total duty period(s)</span>
-      </div>
-      <button onclick="acceptRecovery(${i})" style="margin-top:8px;">Accept &amp; Recover</button>
-    </div>`).join('');
-    window._recoveryCandidates = data.candidates;
-  } catch(e) {
-    el.textContent = 'Request failed: ' + e;
-    el.style.color = 'var(--red)';
-  }
-}
-async function acceptRecovery(i){
-  const el = document.getElementById('recovery-msg');
-  const c = (window._recoveryCandidates || [])[i];
-  if(!c || !_recoveryContext){ el.textContent = 'That option is no longer available — search again.'; el.style.color = 'var(--red)'; return; }
-  el.textContent = 'Applying recovery…';
-  el.style.color = '';
-  try {
-    const r = await fetch('/fos/' + LEG_ID + '/recover/accept', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        actual_destination: _recoveryContext.actual_destination,
-        actual_arrival_local: _recoveryContext.actual_arrival_local,
-        chain: c.chain, day_number: c.day_number, dlegs_today: c.dlegs_today,
-        dblk_today: c.dblk_today, duty_report_utc: c.duty_report_utc, total_days: c.total_days,
-      }),
-    });
-    const data = await r.json();
-    if(!r.ok){ el.textContent = data.error || 'Recovery failed'; el.style.color = 'var(--red)'; return; }
-    document.getElementById('recovery-candidates').innerHTML = '';
-    showToast('Recovered — pairing updated');
-    showView('pairing');
-  } catch(e) {
-    el.textContent = 'Request failed: ' + e;
-    el.style.color = 'var(--red)';
-  }
+    data = await r.json();
+    if(!r.ok){ results.innerHTML = '<p class="placeholder-note">' + (data.error || 'Search failed') + '</p>'; return; }
+  } catch(e) { results.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>'; return; }
+  renderRecoveryOptions(data);
 }
 
-const _DDMMMYY_MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+function renderRecoveryOptions(data){
+  const results = document.getElementById('rec-results');
+  results.innerHTML = '';
+
+  // What the app worked out for itself, stated plainly — the duty state
+  // changes which options are legal, so it should not be invisible.
+  const state = document.createElement('div');
+  state.style.cssText = 'padding:12px 14px;font-size:12.5px;color:var(--label);line-height:1.6;';
+  state.textContent = data.ffd_signed
+    ? ('Fit for Duty signed \u2014 duty is running, so only what fits the current duty period is offered.'
+       + (data.repair_window_end ? ' Remain contactable until ' + data.repair_window_end + '.' : ''))
+    : ('Fit for Duty not signed \u2014 the duty day has not started, so you can be fully reassigned.'
+       + (data.repair_window_end ? ' Remain contactable until ' + data.repair_window_end + '.' : ''));
+  results.appendChild(state);
+
+  const opts = data.options || [];
+  if(!opts.length){
+    const none = document.createElement('p');
+    none.className = 'placeholder-note';
+    none.style.padding = '14px';
+    none.textContent = 'No legal recovery found from ' + data.station + ' at ' + data.at + '.';
+    results.appendChild(none);
+    return;
+  }
+  opts.forEach(tier => {
+    const [name, hint] = _REC_TIER_LABEL[tier.tier] || [tier.tier, ''];
+    const panel = document.createElement('div');
+    panel.className = 'panel';
+    const hdr = document.createElement('div');
+    hdr.className = 'panel-card-hdr';
+    hdr.textContent = name + '  (' + tier.candidates.length + ')';
+    panel.appendChild(hdr);
+    const sub = document.createElement('div');
+    sub.style.cssText = 'padding:8px 14px 4px;font-size:12px;color:var(--label);';
+    sub.textContent = hint;
+    panel.appendChild(sub);
+    tier.candidates.forEach((cand, i) => {
+      const row = document.createElement('div');
+      row.className = 'doc-row';
+      const left = document.createElement('div');
+      const code = document.createElement('div');
+      code.className = 'code';
+      // The engine hands back network leg INDICES in `chain` plus a
+      // station-by-station `routing`; the routing is what a pilot reads.
+      const routing = cand.routing || [];
+      code.textContent = routing.length ? routing.join(' \u2192 ')
+                                        : ('Option ' + (i + 1));
+      const desc = document.createElement('div');
+      desc.className = 'desc';
+      const lpd = cand.legs_per_day || [];
+      const bits = [];
+      if(cand.total_days) bits.push(cand.total_days + (cand.total_days === 1 ? ' day' : ' days'));
+      if(lpd.length) bits.push(lpd.join('/') + (lpd.length > 1 || lpd[0] !== 1 ? ' legs' : ' leg'));
+      if(cand.block) bits.push(cand.block.toFixed(1) + 'h block');
+      desc.textContent = bits.join('  \u00b7  ');
+      left.appendChild(code); left.appendChild(desc);
+      row.appendChild(left);
+      panel.appendChild(row);
+    });
+    results.appendChild(panel);
+  });
+}
+
 function todayZuluISO(){
   return new Date().toISOString().slice(0, 10);
 }

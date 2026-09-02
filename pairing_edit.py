@@ -508,7 +508,8 @@ def _step_matched_leg(ap, legs, pl, t, prev_origin, dlegs, dblk, rep, hbt):
     return net_leg, dep, arr, 1, net_leg["blk"], nrep, True
 
 
-def retry_shifted_plan(seq, dom, ap, legs, duty_day, leg_index, rest_start_local):
+def retry_shifted_plan(seq, dom, ap, legs, duty_day, leg_index, rest_start_local,
+                       report_local=None):
     """The pilot's disruption is: everything from (duty_day, leg_index)
     onward didn't fly as planned — duty ended instead, at rest_start_local.
     Tries to replay the ENTIRE remainder of the original sequence — every
@@ -539,6 +540,7 @@ def retry_shifted_plan(seq, dom, ap, legs, duty_day, leg_index, rest_start_local
     try:
         kept_legs, _rest_station, earliest_report_utc = _prefix_rest_state(
             days, day_idx, duty_day, leg_index, ap, rest_start_local,
+            report_local=report_local,
         )
     except (ValueError, KeyError):
         return None, {"duty_day": duty_day, "leg_index": leg_index, "target_station": None}
@@ -625,7 +627,7 @@ def retry_shifted_plan(seq, dom, ap, legs, duty_day, leg_index, rest_start_local
 
 
 def day_scoped_recovery(seq, dom, ap, legs, duty_day, leg_index, rest_start_local,
-                         budget=8.0, max_extra_days=1):
+                         budget=8.0, max_extra_days=1, report_local=None):
     """When retry_shifted_plan() fails on the SAME day the disruption itself
     happened on (the common case — the very next leg after the disruption
     can't be flown as planned), this searches for a legal way to reach that
@@ -659,6 +661,7 @@ def day_scoped_recovery(seq, dom, ap, legs, duty_day, leg_index, rest_start_loca
     try:
         _kept_legs, _rest_station, earliest_report_utc = _prefix_rest_state(
             days, day_idx, duty_day, leg_index, ap, rest_start_local,
+            report_local=report_local,
         )
     except (ValueError, KeyError):
         return [], target_station, False
@@ -715,7 +718,7 @@ def day_scoped_recovery(seq, dom, ap, legs, duty_day, leg_index, rest_start_loca
 
 def apply_day_patch(seq, dom, ap, legs, duty_day, leg_index, rest_start_local,
                      chain, day_number, dlegs_today, dblk_today, duty_report_utc, total_days,
-                     reattach=True):
+                     reattach=True, report_local=None):
     """Splices an accepted day_scoped_recovery() candidate onto the
     sequence for just the disrupted day. When `reattach` is True (pass
     day_scoped_recovery's own `reached_target` here — only reattach when
@@ -747,6 +750,7 @@ def apply_day_patch(seq, dom, ap, legs, duty_day, leg_index, rest_start_local,
     try:
         kept_legs, _rest_station, earliest_report_utc = _prefix_rest_state(
             days, day_idx, duty_day, leg_index, ap, rest_start_local,
+            report_local=report_local,
         )
     except (ValueError, KeyError) as e:
         return None, [f"invalid disruption data: {e}"]
