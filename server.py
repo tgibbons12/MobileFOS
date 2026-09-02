@@ -4053,7 +4053,7 @@ if (window.matchMedia) {
   .dl-card p{margin:0;font-size:14px;line-height:1.45;color:var(--label);}
   .dl-card button{margin:4px 0 0;padding:12px 22px;font-size:15px;font-weight:600;
     background:var(--blue);color:#fff;border:none;border-radius:7px;cursor:pointer;}
-  .settings-fab{position:fixed;top:calc(var(--ack-h,0px) + var(--safe-top, var(--status-bar, 0px)) + var(--topbar-lead, 14px));right:calc(env(safe-area-inset-right) + 16px);z-index:25;background:var(--card);border:1px solid var(--border);border-radius:50%;width:34px;height:34px;display:flex;align-items:center;justify-content:center;color:var(--label);cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.12);}
+  .settings-fab{position:fixed;top:calc(var(--ack-h,0px) + var(--safe-top, var(--status-bar, 0px)) + var(--topbar-lead, 14px));right:calc(env(safe-area-inset-right) + 16px);z-index:25;background:var(--card);border:1px solid var(--border);border-radius:50%;width:34px;height:34px;display:flex;align-items:center;justify-content:center;color:var(--blue-dark);cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.12);}
   .settings-fab svg{width:18px;height:18px;flex-shrink:0;}
   h1{font-size:18px;color:var(--blue-dark);margin:0 0 16px;}
   label{display:block;font-size:13px;font-weight:600;margin:10px 0 4px;color:var(--value);}
@@ -4316,6 +4316,17 @@ function importPbs(text){
     .catch(e=>{ el.textContent = 'Request failed: ' + e; el.style.color = 'var(--red)'; });
 }
 
+// Inline SVG rather than literal star/cross/triangle characters. A glyph
+// renders in the system font — it ignores currentColor, so it cannot
+// follow the theme, and it sits on a different baseline from the text
+// beside it.
+const ACTIVE_DOT_SVG = '<svg viewBox="0 0 24 24" fill="currentColor" style="width:9px;height:9px;vertical-align:1px;color:var(--green);"><circle cx="12" cy="12" r="7"/></svg>';
+function _escHtml(v){ return String(v == null ? '' : v).replace(/[&<>"']/g, function(c){
+  return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+const STAR_ICON_SVG = '<svg viewBox="0 0 24 24" fill="currentColor" style="width:14px;height:14px;vertical-align:-2px;"><path d="M12 2.6l2.9 5.9 6.5.9-4.7 4.6 1.1 6.5-5.8-3.1-5.8 3.1 1.1-6.5L2.6 9.4l6.5-.9z"/></svg>';
+const X_ICON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" style="width:11px;height:11px;"><path d="M6 6l12 12M18 6L6 18"/></svg>';
+const CHEVRON_UP_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="width:11px;height:11px;"><path d="M6 15l6-6 6 6"/></svg>';
+const CHEVRON_DOWN_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="width:11px;height:11px;"><path d="M6 9l6 6 6-6"/></svg>';
 const TRASH_ICON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg>';
 function loadSequences(){
   fetch('/pbs/sequences').then(r=>r.json()).then(seqs=>{
@@ -4755,7 +4766,9 @@ if (window.matchMedia) {
   .topbar-title h1{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .topbar-title h1{font-size:19px;margin:0;font-weight:600;color:var(--blue-dark);}
   .topbar-title p{font-size:12px;margin:2px 0 0;color:var(--label);}
-  .icon-btn{background:none;border:none;color:var(--label);cursor:pointer;padding:2px;display:flex;}
+  /* Same blue as the PDF viewer's Download/Print/Share, so every icon
+     action in a header reads as the same kind of control. */
+  .icon-btn{background:none;border:none;color:var(--blue-dark);cursor:pointer;padding:2px;display:flex;}
   .icon-btn svg{width:19px;height:19px;}
   .icon-btn.syncing svg{animation:spin .8s linear infinite;}
   @keyframes spin{to{transform:rotate(360deg);}}
@@ -4763,7 +4776,7 @@ if (window.matchMedia) {
      way to guarantee it's on every single page without duplicating it
      into all 14 view sections. Sits clear of the topbar's own
      actions/title since it's positioned independently. */
-  .settings-fab{position:fixed;top:calc(var(--ack-h,0px) + var(--safe-top, var(--status-bar, 0px)) + var(--topbar-lead, 14px));right:calc(env(safe-area-inset-right) + 16px);z-index:25;background:var(--card);border:1px solid var(--border);border-radius:50%;width:34px;height:34px;display:flex;align-items:center;justify-content:center;color:var(--label);cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.12);}
+  .settings-fab{position:fixed;top:calc(var(--ack-h,0px) + var(--safe-top, var(--status-bar, 0px)) + var(--topbar-lead, 14px));right:calc(env(safe-area-inset-right) + 16px);z-index:25;background:var(--card);border:1px solid var(--border);border-radius:50%;width:34px;height:34px;display:flex;align-items:center;justify-content:center;color:var(--blue-dark);cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.12);}
   .settings-fab svg{width:18px;height:18px;flex-shrink:0;}
   .status-bar{background:var(--navy);color:#fff;display:flex;align-items:center;justify-content:space-between;padding:8px 14px;border-radius:var(--radius) var(--radius) 0 0;font-size:13px;font-weight:600;}
   .flight-summary{background:var(--card);display:flex;align-items:center;padding:12px 14px;border-bottom:1px solid var(--border);font-size:13px;gap:18px;flex-wrap:wrap;}
@@ -4875,7 +4888,7 @@ if (window.matchMedia) {
   /* .panel button (0,1,1) outranks a bare .layer-move-btn (0,1,0), so the
      in-panel copy needs the extra qualifier or these render as full-size
      blue primary buttons inside the layer stack. */
-  .layer-move-btn,.panel .layer-move-btn{margin:0;padding:3px 7px;font-size:10px;line-height:1;background:var(--bg);color:var(--label);border:1px solid var(--border);border-radius:4px;cursor:pointer;font-weight:600;}
+  .layer-move-btn,.panel .layer-move-btn{margin:0;padding:4px 6px;line-height:0;display:inline-flex;align-items:center;justify-content:center;background:var(--bg);color:var(--blue-dark);border:1px solid var(--border);border-radius:4px;cursor:pointer;}
   .layer-move-btn:disabled,.panel .layer-move-btn:disabled{opacity:.3;cursor:default;}
   /* One criterion layer inside a bid — numbered header with its running
      match count, then that layer's own field/op/value controls. */
@@ -7206,6 +7219,17 @@ if(!LEG_SEQ){
   const btn = document.getElementById('pairing-btn');
   if(btn) btn.style.display = 'none';
 }
+// Inline SVG rather than literal star/cross/triangle characters. A glyph
+// renders in the system font — it ignores currentColor, so it cannot
+// follow the theme, and it sits on a different baseline from the text
+// beside it.
+const ACTIVE_DOT_SVG = '<svg viewBox="0 0 24 24" fill="currentColor" style="width:9px;height:9px;vertical-align:1px;color:var(--green);"><circle cx="12" cy="12" r="7"/></svg>';
+function _escHtml(v){ return String(v == null ? '' : v).replace(/[&<>"']/g, function(c){
+  return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+const STAR_ICON_SVG = '<svg viewBox="0 0 24 24" fill="currentColor" style="width:14px;height:14px;vertical-align:-2px;"><path d="M12 2.6l2.9 5.9 6.5.9-4.7 4.6 1.1 6.5-5.8-3.1-5.8 3.1 1.1-6.5L2.6 9.4l6.5-.9z"/></svg>';
+const X_ICON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" style="width:11px;height:11px;"><path d="M6 6l12 12M18 6L6 18"/></svg>';
+const CHEVRON_UP_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="width:11px;height:11px;"><path d="M6 15l6-6 6 6"/></svg>';
+const CHEVRON_DOWN_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="width:11px;height:11px;"><path d="M6 9l6 6 6-6"/></svg>';
 const TRASH_ICON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg>';
 let _libraryLoaded = false;
 function showScheduleTab(tab){
@@ -7463,7 +7487,7 @@ function renderPairing(seqData){
     totalLegs + ' leg' + (totalLegs === 1 ? '' : 's'),
     (seqData.positions || []).join('/'),
   ];
-  if(seqData.active) summaryBits.unshift('● ACTIVE');
+  if(seqData.active) summaryBits.unshift(ACTIVE_DOT_SVG + ' ACTIVE');
   if(firstLeg && lastLeg) summaryBits.unshift(firstLeg.origin + ' → ' + lastLeg.destination);
   if(flightPrefix) summaryBits.unshift(flightPrefix);
   summary.textContent = summaryBits.filter(Boolean).join('  ·  ');
@@ -7605,7 +7629,7 @@ function renderLibraryShortcutBar(){
   if(_libraryShortcut){
     const row = document.createElement('div');
     row.className = 'arow';
-    row.innerHTML = '<a class="arow-link" href="#">⭐ ' + _libraryShortcut.label + '</a>' +
+    row.innerHTML = '<a class="arow-link" href="#">' + STAR_ICON_SVG + ' ' + _libraryShortcut.label + '</a>' +
       '<button class="arow-del" title="Clear saved bid">' + TRASH_ICON_SVG + '</button>';
     row.querySelector('.arow-link').onclick = (e) => { e.preventDefault(); libraryJumpToShortcut(); };
     row.querySelector('.arow-del').onclick = (e) => { e.stopPropagation(); clearBidShortcut(); };
@@ -7847,7 +7871,10 @@ function sequenceListRow(s, onClick){
   row.className = 'doc-row lib-row';
   const left = document.createElement('div');
   const code = document.createElement('div'); code.className = 'code seq-code';
-  code.textContent = (s.active ? '● ' : '') + 'SEQ ' + s.seq + (s.active ? ' (ACTIVE — picked up)' : '');
+  // innerHTML, not textContent, so the dot can be an icon. s.seq comes
+  // from a parsed bid pack, so it is escaped rather than trusted.
+  code.innerHTML = (s.active ? ACTIVE_DOT_SVG + ' ' : '') + 'SEQ ' + _escHtml(s.seq)
+    + (s.active ? ' (ACTIVE \u2014 picked up)' : '');
   const desc = document.createElement('div'); desc.className = 'desc lib-routing';
   desc.innerHTML = libraryRoutingHtml(s.routing, s.layover_indices);
   left.appendChild(code); left.appendChild(desc);
@@ -8243,21 +8270,22 @@ async function layerShowForm(existing){
     cnt.className = 'lf-layer-count';
     const tools = document.createElement('span');
     tools.className = 'lf-layer-tools';
-    const toolBtn = (txt, disabled, fn) => {
+    const toolBtn = (svg, label, disabled, fn) => {
       const b = document.createElement('button');
-      b.type = 'button'; b.className = 'layer-move-btn'; b.textContent = txt;
+      b.type = 'button'; b.className = 'layer-move-btn'; b.innerHTML = svg;
+      b.setAttribute('aria-label', label); b.title = label;
       b.disabled = disabled; b.onclick = fn;
       return b;
     };
-    tools.appendChild(toolBtn('▲', i === 0, () => {
+    tools.appendChild(toolBtn(CHEVRON_UP_SVG, 'Move up', i === 0, () => {
       [criteria[i - 1], criteria[i]] = [criteria[i], criteria[i - 1]];
       renderStack(); queuePreview();
     }));
-    tools.appendChild(toolBtn('▼', i === criteria.length - 1, () => {
+    tools.appendChild(toolBtn(CHEVRON_DOWN_SVG, 'Move down', i === criteria.length - 1, () => {
       [criteria[i + 1], criteria[i]] = [criteria[i], criteria[i + 1]];
       renderStack(); queuePreview();
     }));
-    tools.appendChild(toolBtn('✕', false, () => {
+    tools.appendChild(toolBtn(X_ICON_SVG, 'Remove layer', false, () => {
       criteria.splice(i, 1);
       renderStack(); queuePreview();
     }));
