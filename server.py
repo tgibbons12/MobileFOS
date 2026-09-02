@@ -3263,14 +3263,23 @@ def _reassignment_message(record, seq_number, kind, days, position):
     departure, city pair, position, and 'dhd' on a deadhead — with duty
     days separated by a blank line, which is how a crew member scans it.
     """
-    who = (position or "").strip().upper()
-    who = {"CA": "CAPTAIN", "FO": "FIRST OFFICER"}.get(who, who or "CREW")
+    # No name. The real notification does not carry one -- it is delivered
+    # to one crew member's own device, so addressing them by name says
+    # nothing the header does not, and it would need a crew-name field the
+    # account does not have.
+    #
+    # Position IS in the spec. Our packs carry one position for the whole
+    # sequence rather than per leg, so it is stated once here instead of
+    # repeated on every line.
     lines = [
         f"{_msg_prefix(record)} [REASSIGNED] SEQ {seq_number}",
-        f"ATTN {who} {(current_user.username or '').upper()} - YOU HAVE BEEN REASSIGNED",
+        "YOU HAVE BEEN REASSIGNED",
         f"TYPE   {_DISRUPTION_LABELS.get(kind, str(kind).upper())}",
-        "NEW PAIRING IS AS FOLLOWS:",
     ]
+    pos = (position or "").strip().upper()
+    if pos:
+        lines.append(f"POS    {pos}")
+    lines.append("NEW PAIRING IS AS FOLLOWS:")
     for day in days or []:
         lines.append("")
         lines.append(f"DAY {day.get('duty_day', '?')}")
