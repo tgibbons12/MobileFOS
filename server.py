@@ -544,6 +544,31 @@ AUTH_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
 <link rel="icon" href="/static/icon-192.png">
 <meta name="theme-color" content="#f5f5f7" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+<script>
+// theme-color has to follow the theme the app is ACTUALLY showing. The two
+// media-keyed tags above only track the OS, and this app has its own
+// Light/Auto/Dark override — so with the OS light and the app set to dark,
+// iOS painted the status strip #f5f5f7 over a black page, and vice versa.
+// Resolving it here to a single tag removes that whole class of mismatch.
+function _syncThemeColor(){
+  var t = localStorage.getItem('fos_theme');
+  var dark = (t === 'dark') || (t !== 'light' &&
+    window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  var c = dark ? '#000000' : '#f5f5f7';
+  var tags = document.querySelectorAll('meta[name="theme-color"]');
+  for (var i = 0; i < tags.length; i++) tags[i].parentNode.removeChild(tags[i]);
+  var m = document.createElement('meta');
+  m.setAttribute('name', 'theme-color');
+  m.setAttribute('content', c);
+  document.head.appendChild(m);
+}
+_syncThemeColor();
+if (window.matchMedia) {
+  try { window.matchMedia('(prefers-color-scheme: dark)')
+          .addEventListener('change', _syncThemeColor); } catch (e) {}
+}
+</script>
+
 <title>$title – MobileCCI</title>
 <style>
   :root{
@@ -3916,6 +3941,31 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="theme-color" content="#f5f5f7" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+<script>
+// theme-color has to follow the theme the app is ACTUALLY showing. The two
+// media-keyed tags above only track the OS, and this app has its own
+// Light/Auto/Dark override — so with the OS light and the app set to dark,
+// iOS painted the status strip #f5f5f7 over a black page, and vice versa.
+// Resolving it here to a single tag removes that whole class of mismatch.
+function _syncThemeColor(){
+  var t = localStorage.getItem('fos_theme');
+  var dark = (t === 'dark') || (t !== 'light' &&
+    window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  var c = dark ? '#000000' : '#f5f5f7';
+  var tags = document.querySelectorAll('meta[name="theme-color"]');
+  for (var i = 0; i < tags.length; i++) tags[i].parentNode.removeChild(tags[i]);
+  var m = document.createElement('meta');
+  m.setAttribute('name', 'theme-color');
+  m.setAttribute('content', c);
+  document.head.appendChild(m);
+}
+_syncThemeColor();
+if (window.matchMedia) {
+  try { window.matchMedia('(prefers-color-scheme: dark)')
+          .addEventListener('change', _syncThemeColor); } catch (e) {}
+}
+</script>
+
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <!-- NOT black-translucent. That asks iOS to draw its status bar OVER the
@@ -4512,6 +4562,31 @@ FOS_TEMPLATE = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="theme-color" content="#f5f5f7" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+<script>
+// theme-color has to follow the theme the app is ACTUALLY showing. The two
+// media-keyed tags above only track the OS, and this app has its own
+// Light/Auto/Dark override — so with the OS light and the app set to dark,
+// iOS painted the status strip #f5f5f7 over a black page, and vice versa.
+// Resolving it here to a single tag removes that whole class of mismatch.
+function _syncThemeColor(){
+  var t = localStorage.getItem('fos_theme');
+  var dark = (t === 'dark') || (t !== 'light' &&
+    window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  var c = dark ? '#000000' : '#f5f5f7';
+  var tags = document.querySelectorAll('meta[name="theme-color"]');
+  for (var i = 0; i < tags.length; i++) tags[i].parentNode.removeChild(tags[i]);
+  var m = document.createElement('meta');
+  m.setAttribute('name', 'theme-color');
+  m.setAttribute('content', c);
+  document.head.appendChild(m);
+}
+_syncThemeColor();
+if (window.matchMedia) {
+  try { window.matchMedia('(prefers-color-scheme: dark)')
+          .addEventListener('change', _syncThemeColor); } catch (e) {}
+}
+</script>
+
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <!-- NOT black-translucent. That asks iOS to draw its status bar OVER the
@@ -5745,6 +5820,7 @@ function setThemePref(pref){
     localStorage.setItem('fos_theme', pref);
     document.documentElement.setAttribute('data-theme', pref);
   }
+  if (typeof _syncThemeColor === 'function') _syncThemeColor();
   updateThemeButtons();
 }
 function updateThemeButtons(){
