@@ -3160,6 +3160,136 @@ def _ofp_is_this_leg(simbrief_user, record):
 # Flight-deck messages
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Rescheduling messages
+#
+# Modelled on how a real ECS reschedule notification is structured (APFA
+# Contract Implementation Update #58, 25 APR 2026): a disruption produces
+# TWO messages, not one. The first acknowledges the disruption and states
+# how long the crew must stay contactable; the second carries the repaired
+# sequence once it exists.
+#
+# Times are Sequence Base Time — the timezone of the base the sequence
+# originated from — which is what the real notification uses and what a
+# crew member reads their own bid pack in.
+# ---------------------------------------------------------------------------
+
+# CBA 10.J.3.d — disrupted after report, before the sequence originates.
+_REPAIR_AFTER_REPORT_H = 4.0
+_REPAIR_AFTER_DISRUPTION_H = 3.0
+
+
+def _hhmm_add(hhmm, hours):
+    """"1445" + 4.0 -> "1845", wrapping past midnight. Returns "" on junk
+    rather than raising: a message is worth sending even if one of its
+    times cannot be computed."""
+    try:
+        raw = str(hhmm).strip()
+        total = (int(raw[:2]) * 60 + int(raw[2:4])) + int(round(hours * 60))
+    except (ValueError, IndexError, TypeError):
+        return ""
+    total %= 24 * 60
+    return f"{total // 60:02d}{total % 60:02d}"
+
+
+def _hhmm_to_min(hhmm):
+    try:
+        raw = str(hhmm).strip()
+        return int(raw[:2]) * 60 + int(raw[2:4])
+    except (ValueError, IndexError, TypeError):
+        return None
+
+
+def _repair_window_end(disruption_hhmm, report_hhmm, originated):
+    """When Crew Scheduling's window to repair the sequence closes.
+
+    Before origination it is the LATER of report+4h and disruption+3h —
+    "whichever is later" in the CBA, so a disruption early in a duty day
+    does not shorten the window. After origination it is disruption+3h.
+
+    Both candidates are measured as minutes AFTER REPORT, not as clock
+    faces and not relative to the disruption. Report is the one fixed point
+    the duty day hangs off, and everything after it runs forward from
+    there. Comparing any other way mis-ranks the pair as soon as one of
+    them crosses midnight, or whenever report+4h lands before the
+    disruption itself — a 0500 report disrupted at 1445 has a window to
+    1745, not to 0900.
+    """
+    d = _hhmm_to_min(disruption_hhmm)
+    if d is None:
+        return ""
+    if originated or not report_hhmm:
+        return f"{((d + 180) % 1440) // 60:02d}{((d + 180) % 1440) % 60:02d}"
+    r = _hhmm_to_min(report_hhmm)
+    if r is None:
+        return f"{((d + 180) % 1440) // 60:02d}{((d + 180) % 1440) % 60:02d}"
+    # Minutes from report to the disruption, wrapped forward: a duty day
+    # can start before midnight and be disrupted after it.
+    d_off = (d - r) % 1440
+    end_off = max(int(_REPAIR_AFTER_REPORT_H * 60), d_off + int(_REPAIR_AFTER_DISRUPTION_H * 60))
+    end = (r + end_off) % 1440
+    return f"{end // 60:02d}{end % 60:02d}"
+
+
+_DISRUPTION_LABELS = {
+    "late_departure": "LATE DEPARTURE",
+    "late_arrival": "LATE ARRIVAL",
+    "diverted": "DIVERTED",
+    "cancelled": "CANCELLED",
+}
+
+
+def _disruption_message(record, seq_number, duty_day, leg, kind, at_hhmm,
+                        report_hhmm, originated):
+    """The first message: what happened, and how long to stay contactable."""
+    window = _repair_window_end(at_hhmm, report_hhmm, originated)
+    leg_txt = f"{(leg or {}).get('origin','?')}-{(leg or {}).get('destination','?')}"
+    lines = [
+        f"{_msg_prefix(record)} [DISRUPTION] SEQ {seq_number}",
+        f"TYPE   {_DISRUPTION_LABELS.get(kind, str(kind).upper())}",
+        f"LEG    {leg_txt}  DAY {duty_day}",
+        f"START  {at_hhmm} SBT",
+    ]
+    if window:
+        lines.append(f"REMAIN CONTACTABLE UNTIL {window} SBT")
+    lines.append("STATUS RELEASED PENDING REPAIR")
+    return "\n".join(lines)
+
+
+def _reassignment_message(record, seq_number, kind, days, position):
+    """The second message: the repaired sequence itself.
+
+    Field order follows the real notification — flight number, date,
+    departure, city pair, position, and 'dhd' on a deadhead — with duty
+    days separated by a blank line, which is how a crew member scans it.
+    """
+    who = (position or "").strip().upper()
+    who = {"CA": "CAPTAIN", "FO": "FIRST OFFICER"}.get(who, who or "CREW")
+    lines = [
+        f"{_msg_prefix(record)} [REASSIGNED] SEQ {seq_number}",
+        f"ATTN {who} {(current_user.username or '').upper()} - YOU HAVE BEEN REASSIGNED",
+        f"TYPE   {_DISRUPTION_LABELS.get(kind, str(kind).upper())}",
+        "NEW PAIRING IS AS FOLLOWS:",
+    ]
+    for day in days or []:
+        lines.append("")
+        lines.append(f"DAY {day.get('duty_day', '?')}")
+        for leg in day.get("legs") or []:
+            dhd = "  dhd" if leg.get("deadhead") else ""
+            lines.append(
+                "  {:<6} {:<5} {}-{}{}".format(
+                    leg.get("flight_number") or "----",
+                    leg.get("dep_local") or "----",
+                    leg.get("origin") or "???",
+                    leg.get("destination") or "???",
+                    dhd,
+                )
+            )
+    lines.append("")
+    lines.append("STATUS REPAIRED")
+    return "\n".join(lines)
+
+
 def _ofp_time_generated(user_id):
     """SimBrief's own timestamp for the OFP currently on an account, or "".
     Never raises: this is recorded alongside a release that has already been
