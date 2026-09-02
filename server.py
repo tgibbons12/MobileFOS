@@ -2931,9 +2931,31 @@ def recover_options(seq_number):
             at_hhmm if signed else None,
             report_local=None if signed else at_hhmm,
         )
-        if cands:
+        # Only offer what can actually be accepted. day_scoped_recovery
+        # searches the disrupted day in isolation; apply_day_patch then
+        # re-checks that the patch's later release still leaves legal rest
+        # before the first reattached day, and can legitimately refuse.
+        # Filtering here rather than at accept time means the pilot never
+        # taps an option that turns out to be illegal.
+        applicable = []
+        for c in cands:
+            try:
+                patched, _errs = pairing_edit.apply_day_patch(
+                    seq, dom, ap, legs_net, duty_day, leg_index,
+                    at_hhmm if signed else None,
+                    c["chain"], c["day_number"], c["dlegs_today"],
+                    c["dblk_today"], c["duty_report_utc"], c["total_days"],
+                    reattach=reached,
+                    report_local=None if signed else at_hhmm,
+                )
+            except Exception as e:
+                LOG.warning(f"day patch trial failed for {seq_number}: {e}")
+                continue
+            if patched is not None:
+                applicable.append(c)
+        if applicable:
             tiers.append({"tier": "day_intact", "target": target,
-                          "reached_target": reached, "candidates": cands})
+                          "reached_target": reached, "candidates": applicable})
     except Exception as e:
         LOG.warning(f"day_scoped_recovery failed for {seq_number} d{duty_day}: {e}")
 
@@ -2962,6 +2984,114 @@ def recover_options(seq_number):
                 "destination": leg.get("destination"), "dep_local": leg.get("dep_local")},
         "options": tiers,
     })
+
+
+@app.route("/pbs/sequences/<seq_number>/recover-accept", methods=["POST"])
+def recover_accept(seq_number):
+    """Takes one option from /recover-options and makes it the trip.
+
+    The client sends back the disruption it reported plus the candidate it
+    picked. Which engine applies it depends on the tier: `day_intact` came
+    from day_scoped_recovery, so it splices onto just the disrupted day and
+    every later day reattaches unchanged; the other two came from
+    recover_from_disruption, which rebuilds from the disruption point all
+    the way to domicile and discards what the original trip had planned
+    after it.
+
+    Two messages get written, in the order they'd really arrive: what
+    happened, then the reassignment itself.
+    """
+    pbs_row = _pbs_row()
+    seq = next((s for s in (pbs_row.sequences if pbs_row else []) if s["seq"] == seq_number), None)
+    if not seq:
+        return jsonify({"error": "sequence not found"}), 404
+
+    body = request.get_json(silent=True) or {}
+    cand = body.get("candidate") or {}
+    tier = (body.get("tier") or "").strip()
+    if tier not in ("day_intact", "same_length", "get_home"):
+        return jsonify({"error": f"unknown tier {tier!r}"}), 400
+    try:
+        duty_day = int(body.get("duty_day"))
+        leg_index = int(body.get("leg_index"))
+        chain = [int(i) for i in cand["chain"]]
+        day_number = int(cand["day_number"])
+        dlegs_today = int(cand["dlegs_today"])
+        dblk_today = float(cand["dblk_today"])
+        duty_report_utc = float(cand["duty_report_utc"])
+        total_days = int(cand["total_days"])
+    except (TypeError, ValueError, KeyError) as e:
+        return jsonify({"error": f"incomplete candidate: {e}"}), 400
+    kind = (body.get("kind") or "").strip() or "late_departure"
+    if kind not in _DISRUPTION_LABELS:
+        return jsonify({"error": f"unknown disruption type {kind!r}"}), 400
+    at_hhmm = re.sub(r"[^0-9]", "", str(body.get("at") or ""))[:4]
+    if len(at_hhmm) != 4:
+        return jsonify({"error": "a time in HHMM is required"}), 400
+
+    days = seq.get("duty_days") or []
+    day = next((d for d in days if d.get("duty_day") == duty_day), None)
+    if not day:
+        return jsonify({"error": f"sequence has no duty day {duty_day}"}), 404
+    day_legs = day.get("legs") or []
+    if leg_index < 0 or leg_index >= len(day_legs):
+        return jsonify({"error": "no such leg on that day"}), 404
+    leg = day_legs[leg_index]
+
+    first_day = days[0] if days else None
+    dom = first_day["legs"][0]["origin"] if first_day and first_day.get("legs") else ""
+    if not dom:
+        return jsonify({"error": "sequence has no origin to recover back to"}), 400
+
+    # Same FFD read as /recover-options — the options were generated under
+    # this constraint, so applying one has to honor the same reading of it.
+    signed = False
+    for row in Leg.query.filter_by(user_id=current_user.id).all():
+        if (row.data or {}).get("seq") != seq_number:
+            continue
+        if (row.data.get("flight_number") or "").strip() == (leg.get("flight_number") or "").strip():
+            signed = bool(row.data.get("fit_for_duty"))
+            break
+    at_station = (body.get("station") or "").strip().upper() or leg.get("destination")
+
+    legs_net, ap = pairing_engine.get_route_data()
+    if tier == "day_intact":
+        new_seq, errs = pairing_edit.apply_day_patch(
+            seq, dom, ap, legs_net, duty_day, leg_index,
+            at_hhmm if signed else None,
+            chain, day_number, dlegs_today, dblk_today, duty_report_utc, total_days,
+            reattach=bool(body.get("reached_target", True)),
+            report_local=None if signed else at_hhmm,
+        )
+    else:
+        new_seq, errs = pairing_edit.apply_recovery(
+            seq, dom, ap, legs_net, duty_day, leg_index,
+            at_station, at_hhmm,
+            chain, day_number, dlegs_today, dblk_today, duty_report_utc, total_days,
+        )
+    if new_seq is None:
+        return jsonify({"error": "; ".join(errs) or "could not apply this option"}), 400
+
+    pbs_row.sequences = [new_seq if x["seq"] == seq_number else x for x in pbs_row.sequences]
+    db.session.commit()
+
+    # Messages, in the order they would really land. The dedupe key carries
+    # the disruption itself so reporting a *different* disruption on the
+    # same leg still speaks up, while a double-tap on Accept does not.
+    record = {"flight_number": leg.get("flight_number"), "dep_date": day.get("date") or ""}
+    key = f"recover:{seq_number}:{duty_day}:{leg_index}:{kind}:{at_hhmm}"
+    originated = leg_index > 0 or duty_day > (days[0].get("duty_day") if days else 1)
+    position = (seq["positions"][0] if seq.get("positions") else "")
+    _add_message(current_user.id, "disruption",
+                 _disruption_message(record, seq_number, duty_day, leg, kind, at_hhmm,
+                                     day.get("report") or "", originated),
+                 key + ":reported", record=record)
+    _add_message(current_user.id, "reassignment",
+                 _reassignment_message(record, seq_number, kind,
+                                       new_seq.get("duty_days") or [], position),
+                 key + ":assigned", record=record)
+
+    return jsonify({"sequence": new_seq, "unacknowledged": _unacked_message_count()})
 
 
 @app.route("/fos/<int:leg_id>/shift-day", methods=["POST"])
@@ -9281,6 +9411,8 @@ async function submitRecovery(){
 }
 
 function renderRecoveryOptions(data){
+  _RECDATA = data;
+  _RECPICK = null;
   const results = document.getElementById('rec-results');
   results.innerHTML = '';
 
@@ -9337,10 +9469,87 @@ function renderRecoveryOptions(data){
       desc.textContent = bits.join('  \u00b7  ');
       left.appendChild(code); left.appendChild(desc);
       row.appendChild(left);
+      row.style.cursor = 'pointer';
+      const mark = document.createElement('div');
+      mark.className = 'actions rec-pick';
+      mark.style.cssText = 'color:var(--blue);font-size:12px;';
+      row.appendChild(mark);
+      row.onclick = () => pickRecoveryOption(tier.tier, cand, tier.reached_target, row);
       panel.appendChild(row);
     });
     results.appendChild(panel);
   });
+
+  // Accept lives at the bottom of the whole list, not inside one tier —
+  // the choice is between every option shown, not within a group.
+  const foot = document.createElement('div');
+  foot.style.cssText = 'padding:14px;';
+  const btn = document.createElement('button');
+  btn.className = 'docs-btn';
+  btn.id = 'rec-accept-btn';
+  btn.disabled = true;
+  btn.textContent = 'Select an option above';
+  btn.onclick = acceptRecoveryOption;
+  foot.appendChild(btn);
+  const note = document.createElement('div');
+  note.id = 'rec-accept-note';
+  note.style.cssText = 'padding:8px 2px 0;font-size:12px;color:var(--label);';
+  foot.appendChild(note);
+  results.appendChild(foot);
+}
+
+// The option the pilot has tapped, held until they accept it.
+let _RECPICK = null;
+let _RECDATA = null;
+
+function pickRecoveryOption(tier, cand, reachedTarget, row){
+  _RECPICK = { tier: tier, candidate: cand, reached_target: reachedTarget };
+  document.querySelectorAll('#rec-results .doc-row').forEach(r => {
+    r.style.background = '';
+    const m = r.querySelector('.rec-pick');
+    if(m) m.textContent = '';
+  });
+  row.style.background = 'var(--bg)';
+  const m = row.querySelector('.rec-pick');
+  if(m) m.textContent = 'selected';
+  const btn = document.getElementById('rec-accept-btn');
+  if(btn){ btn.disabled = false; btn.textContent = 'Accept Reassignment'; }
+}
+
+async function acceptRecoveryOption(){
+  if(!_RECPICK || !_RECDATA) return;
+  const btn = document.getElementById('rec-accept-btn');
+  const note = document.getElementById('rec-accept-note');
+  btn.disabled = true;
+  btn.textContent = 'Reassigning\u2026';
+  note.textContent = '';
+  try {
+    const r = await fetch('/pbs/sequences/' + encodeURIComponent(_RECDATA.seq) + '/recover-accept', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        duty_day: _RECDATA.duty_day, leg_index: _RECDATA.leg_index,
+        kind: _RECDATA.kind, at: _RECDATA.at, station: _RECDATA.station,
+        tier: _RECPICK.tier, candidate: _RECPICK.candidate,
+        reached_target: _RECPICK.reached_target,
+      }),
+    });
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error || 'could not apply this option');
+    note.textContent = 'Reassigned. Your new pairing is in Messages.';
+    btn.textContent = 'Reassigned';
+    _RECPICK = null;
+    paintMessageBadge(d.unacknowledged || 0);
+    // The trip has changed underneath us — hand the detail view the
+    // repaired sequence, not the one we opened with.
+    _recSeq = d.sequence || _recSeq;
+    setTimeout(closeRecovery, 1200);
+  } catch(e){
+    btn.disabled = false;
+    btn.textContent = 'Accept Reassignment';
+    note.style.color = 'var(--red)';
+    note.textContent = e.message;
+  }
 }
 
 function todayZuluISO(){
