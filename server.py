@@ -5197,14 +5197,35 @@ if (window.matchMedia) {
   .pairing-search input{width:100%;box-sizing:border-box;padding:9px 12px;font-size:14px;
     border:1px solid var(--border);border-radius:7px;background:var(--bg);color:var(--value);
     -webkit-appearance:none;}
-  .msg-card{padding:13px 16px;border-bottom:1px solid var(--border);background:var(--card);}
-  .msg-card.acked{opacity:.62;}
-  .msg-line{font-family:ui-monospace,Menlo,monospace;font-size:13px;font-weight:600;
-    color:var(--value);letter-spacing:.02em;word-break:break-word;}
-  .msg-meta{margin-top:5px;font-size:11.5px;color:var(--label);}
-  .msg-ackbar{margin-top:10px;}
-  .msg-ackbar button{margin:0;padding:8px 15px;font-size:13px;font-weight:600;
-    background:var(--blue);color:#fff;border:none;border-radius:5px;cursor:pointer;}
+  /* Mail-style list: unread dot, subject, two-line preview, time on the
+     right. A reassignment message carries a whole rebuilt pairing, far too
+     much to sit in a list — the list says what arrived, the reading pane
+     holds the body. */
+  .msg-row{display:flex;gap:10px;padding:11px 14px 12px;border-bottom:1px solid var(--border);
+    background:var(--card);cursor:pointer;align-items:flex-start;}
+  .msg-row:active{background:var(--bg);}
+  .msg-dot{flex:0 0 9px;width:9px;height:9px;border-radius:50%;background:var(--blue);margin-top:6px;}
+  .msg-dot.read{background:transparent;}
+  .msg-main{flex:1;min-width:0;}
+  .msg-top{display:flex;align-items:baseline;gap:8px;}
+  .msg-subject{flex:1;min-width:0;font-size:14.5px;font-weight:700;color:var(--value);
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .msg-when{flex:0 0 auto;font-size:12px;color:var(--label);}
+  /* Two lines then ellipsis, the Mail convention — it stops a 40-line
+     pairing taking over the list. */
+  .msg-preview{margin-top:3px;font-size:12.5px;line-height:1.35;color:var(--label);
+    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
+  .msg-empty{padding:40px 20px;text-align:center;color:var(--label);font-size:14px;}
+  /* Reading pane. Monospace because the body is a fixed-column teletype
+     block — proportional type would break its alignment. */
+  .msg-detail{padding:16px;}
+  .msg-detail-hdr{font-size:12px;color:var(--label);margin-bottom:12px;}
+  .msg-body{font-family:ui-monospace,Menlo,monospace;font-size:12.5px;line-height:1.5;
+    color:var(--value);white-space:pre-wrap;word-break:break-word;}
+  .msg-ackbar{margin-top:18px;}
+  .msg-ackbar button{margin:0;padding:11px 18px;font-size:14px;font-weight:600;
+    background:var(--blue);color:#fff;border:none;border-radius:7px;cursor:pointer;}
+  .msg-acked{margin-top:18px;font-size:12.5px;color:var(--label);}
   .msg-badge{position:absolute;top:3px;right:calc(50% - 22px);min-width:16px;height:16px;
     padding:0 4px;border-radius:8px;background:var(--red);color:#fff;font-size:10px;
     font-weight:700;line-height:16px;text-align:center;}
@@ -5493,6 +5514,14 @@ if (window.matchMedia) {
         <div class="topbar-title"><h1>Messages</h1></div>
       </div>
       <div id="messages-body"></div>
+    </section>
+
+    <section id="msgdetail-view" class="view">
+      <div class="topbar">
+        <button class="back-link" onclick="showView('messages')" aria-label="Back to Messages"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:20px;"><path d="M15 18l-6-6 6-6"/></svg></button>
+        <div class="topbar-title"><h1>Message</h1></div>
+      </div>
+      <div id="msgdetail-body"></div>
     </section>
 
     <section id="pdf-view" class="view">
@@ -5871,6 +5900,7 @@ function showView(view){
   document.getElementById('confirm-view').classList.toggle('active', view==='confirm');
   document.getElementById('pdf-view').classList.toggle('active', view==='pdf');
   document.getElementById('motlog-view').classList.toggle('active', view==='motlog');
+  document.getElementById('msgdetail-view').classList.toggle('active', view==='msgdetail');
   document.getElementById('sign-view').classList.toggle('active', view==='sign');
   document.getElementById('pairing-view').classList.toggle('active', view==='pairing');
   document.getElementById('recovery-view').classList.toggle('active', view==='recovery');
@@ -6087,6 +6117,30 @@ function paintMessageBadge(n){
 }
 let _unackedMessages = 0;
 
+// A message's first line is its subject and the rest is its body — the
+// format writes them that way, so the list needs no separate field.
+function _msgSubject(body){ return String(body || '').split('\\n')[0]; }
+function _msgPreview(body){
+  return String(body || '').split('\\n').slice(1).join(' ').replace(/\\s+/g, ' ').trim();
+}
+
+// Today shows a time, anything older shows a date — the Mail convention,
+// and on a flight deck "1445" is more use than "9/1/2026" for something
+// that arrived an hour ago.
+function _msgWhen(iso){
+  if(!iso) return '';
+  const d = new Date(iso);
+  if(isNaN(d)) return '';
+  const now = new Date();
+  const sameDay = d.toDateString() === now.toDateString();
+  if(sameDay) return d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+  const days = (now - d) / 86400000;
+  if(days < 7) return d.toLocaleDateString([], {weekday: 'short'});
+  return d.toLocaleDateString([], {month: 'numeric', day: 'numeric'});
+}
+
+let _messagesCache = [];
+
 async function initMessages(){
   const body = document.getElementById('messages-body');
   showLoading(body);
@@ -6096,40 +6150,87 @@ async function initMessages(){
     data = await r.json();
     if(!r.ok){ body.innerHTML = '<p class="placeholder-note">' + (data.error || 'Failed to load') + '</p>'; return; }
   } catch(e) { body.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>'; return; }
+  _messagesCache = data.messages || [];
   paintMessageBadge(data.unacknowledged || 0);
-  if(!data.messages.length){
-    body.innerHTML = '<p class="placeholder-note">No messages.</p>';
+  body.innerHTML = '';
+  if(!_messagesCache.length){
+    const none = document.createElement('p');
+    none.className = 'msg-empty';
+    none.textContent = 'No Messages';
+    body.appendChild(none);
     return;
   }
-  body.innerHTML = '';
-  data.messages.forEach(m => {
-    const card = document.createElement('div');
-    card.className = 'msg-card' + (m.acknowledged_at ? ' acked' : '');
-    const line = document.createElement('div');
-    line.className = 'msg-line';
-    line.textContent = m.body;
-    card.appendChild(line);
-    const meta = document.createElement('div');
-    meta.className = 'msg-meta';
-    meta.textContent = m.created_at ? new Date(m.created_at).toLocaleString() : '';
-    card.appendChild(meta);
-    if(m.acknowledged_at){
-      const done = document.createElement('div');
-      done.className = 'msg-meta';
-      done.textContent = 'Acknowledged ' + new Date(m.acknowledged_at).toLocaleString();
-      card.appendChild(done);
-    } else {
-      const bar = document.createElement('div');
-      bar.className = 'msg-ackbar';
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.textContent = 'Acknowledge';
-      btn.onclick = () => acknowledgeMessage(m.id, btn);
-      bar.appendChild(btn);
-      card.appendChild(bar);
+  _messagesCache.forEach(m => {
+    const row = document.createElement('div');
+    row.className = 'msg-row';
+    row.onclick = () => openMessage(m.id);
+
+    const dot = document.createElement('div');
+    // Acknowledged is this app's "read": the blue dot marks what still
+    // wants attention rather than merely what has not been opened.
+    dot.className = 'msg-dot' + (m.acknowledged_at ? ' read' : '');
+    row.appendChild(dot);
+
+    const main = document.createElement('div');
+    main.className = 'msg-main';
+    const top = document.createElement('div');
+    top.className = 'msg-top';
+    const subj = document.createElement('div');
+    subj.className = 'msg-subject';
+    subj.textContent = _msgSubject(m.body);
+    const when = document.createElement('div');
+    when.className = 'msg-when';
+    when.textContent = _msgWhen(m.created_at);
+    top.appendChild(subj); top.appendChild(when);
+    main.appendChild(top);
+
+    const prev = _msgPreview(m.body);
+    if(prev){
+      const p = document.createElement('div');
+      p.className = 'msg-preview';
+      p.textContent = prev;
+      main.appendChild(p);
     }
-    body.appendChild(card);
+    row.appendChild(main);
+    body.appendChild(row);
   });
+}
+
+function openMessage(id){
+  const m = _messagesCache.find(x => String(x.id) === String(id));
+  if(!m) return;
+  const body = document.getElementById('msgdetail-body');
+  body.innerHTML = '';
+  const wrap = document.createElement('div');
+  wrap.className = 'msg-detail';
+
+  const hdr = document.createElement('div');
+  hdr.className = 'msg-detail-hdr';
+  hdr.textContent = m.created_at ? new Date(m.created_at).toLocaleString() : '';
+  wrap.appendChild(hdr);
+
+  const pre = document.createElement('div');
+  pre.className = 'msg-body';
+  pre.textContent = m.body;          // textContent: the body is teletype text, not markup
+  wrap.appendChild(pre);
+
+  if(m.acknowledged_at){
+    const done = document.createElement('div');
+    done.className = 'msg-acked';
+    done.textContent = 'Acknowledged ' + new Date(m.acknowledged_at).toLocaleString();
+    wrap.appendChild(done);
+  } else {
+    const bar = document.createElement('div');
+    bar.className = 'msg-ackbar';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = 'Acknowledge';
+    btn.onclick = () => acknowledgeMessage(m.id, btn);
+    bar.appendChild(btn);
+    wrap.appendChild(bar);
+  }
+  body.appendChild(wrap);
+  showView('msgdetail');
 }
 
 async function acknowledgeMessage(id, btn){
@@ -6139,7 +6240,9 @@ async function acknowledgeMessage(id, btn){
     const data = await r.json();
     if(!r.ok){ btn.disabled = false; showToast(data.error || 'Could not acknowledge'); return; }
     paintMessageBadge(data.unacknowledged || 0);
-    initMessages();
+    await initMessages();
+    // Back to the list, the way Mail leaves you after acting on a message.
+    showView('messages');
   } catch(e) { btn.disabled = false; showToast('Request failed: ' + e); }
 }
 function startAutoSync(){
