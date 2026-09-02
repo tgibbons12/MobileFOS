@@ -3208,7 +3208,7 @@ def _add_message(user_id, kind, body, dedupe, record=None, leg_id=None):
         user_id=user_id, leg_id=leg_id, kind=kind,
         flight_number=(record.get("flight_number") or "")[:16],
         dep_date=(record.get("dep_date") or "")[:16],
-        body=body[:200], dedupe=dedupe[:200],
+        body=body, dedupe=dedupe[:200],
     )
     db.session.add(msg)
     db.session.commit()

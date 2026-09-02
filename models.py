@@ -209,7 +209,11 @@ class Message(db.Model):
     flight_number = db.Column(db.String(16))
     dep_date = db.Column(db.String(16))
     kind = db.Column(db.String(32), nullable=False)
-    body = db.Column(db.String(200), nullable=False)
+    # Text, not String(200): a reassignment message lists a whole rebuilt
+    # pairing, several days of legs, which will not fit in 200 chars.
+    # Widening is a no-op on SQLite and a cheap metadata-only change on
+    # Postgres, so it needs no data migration.
+    body = db.Column(db.Text, nullable=False)
     dedupe = db.Column(db.String(200), index=True)
     created_at = db.Column(db.DateTime(timezone=True), default=_now, index=True)
     acknowledged_at = db.Column(db.String(64))

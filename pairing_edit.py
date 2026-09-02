@@ -420,12 +420,25 @@ def find_network_leg_after(legs, origin, destination, earliest_utc, flight_numbe
     return best_leg, best_dep
 
 
-def _prefix_rest_state(days, day_idx, duty_day, leg_index, ap, rest_start_local):
+def _prefix_rest_state(days, day_idx, duty_day, leg_index, ap, rest_start_local,
+                       report_local=None):
     """Shared setup for retry_shifted_plan/day_scoped_recovery/
     apply_day_patch: this day's still-valid legs before leg_index, and the
     earliest legal report time for whatever comes next, anchored off
     rest_start_local (when duty actually ended) wrapped forward to be no
-    earlier than the last thing that actually flew before it."""
+    earlier than the last thing that actually flew before it.
+
+    report_local is the other way in, and it exists for the most ordinary
+    disruption there is: the pilot has not signed in yet and is simply
+    reporting late. There is no completed duty to rest off, so
+    rest_start + MIN_REST is the wrong question — it would answer a 14:45
+    report with "earliest report 00:45 tomorrow" and scrub a day that is
+    perfectly legal to fly. When given, it IS the earliest report, used
+    directly.
+
+    The two are mutually exclusive: rest_start_local says duty ended and
+    rest is being served, report_local says duty has not begun.
+    """
     day = days[day_idx]
     legs_this_day = day.get("legs") or []
     kept_legs = legs_this_day[:leg_index]
@@ -441,6 +454,16 @@ def _prefix_rest_state(days, day_idx, duty_day, leg_index, ap, rest_start_local)
         pending0 = legs_this_day[leg_index]
         rest_station = pending0["origin"]
         last_arr_utc = _hhmm_to_dec(pending0["dep_local"]) - ap.off(pending0["origin"])
+
+    if report_local is not None:
+        # Reporting late off a rest that is already complete. Still wrapped
+        # forward past whatever last flew, so a report time that reads
+        # earlier in the clock than the previous arrival lands on the right
+        # day rather than in the past.
+        earliest_report_utc = _hhmm_to_dec(report_local) - ap.off(rest_station)
+        while earliest_report_utc < last_arr_utc:
+            earliest_report_utc += 24
+        return kept_legs, rest_station, earliest_report_utc
 
     raw_rest_start_utc = _hhmm_to_dec(rest_start_local) - ap.off(rest_station)
     rest_start_utc = raw_rest_start_utc
