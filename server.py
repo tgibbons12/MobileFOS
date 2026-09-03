@@ -14,6 +14,7 @@ call to /generate. See build_leg_from_sources() below for the seam.
 """
 
 import base64
+import copy
 import csv
 import html
 import io
@@ -3137,7 +3138,20 @@ def recover_accept(seq_number):
     if new_seq is None:
         return jsonify({"error": "; ".join(errs) or "could not apply this option"}), 400
 
-    pbs_row.sequences = [new_seq if x["seq"] == seq_number else x for x in pbs_row.sequences]
+    # The repaired trip is a NEW sequence, marked with a trailing asterisk,
+    # and the pairing as published stays exactly as it was. Overwriting it
+    # in place left no way back once accepted — and a trip that has been
+    # rebuilt around a disruption is not the trip that was bid, so it
+    # should not go on wearing its number unqualified. Recovering an
+    # already-repaired trip replaces that repair rather than starring the
+    # star.
+    base_seq = seq_number[:-1] if seq_number.endswith("*") else seq_number
+    starred = base_seq + "*"
+    new_seq = dict(new_seq, seq=starred)
+    pbs_row.sequences = ([x for x in pbs_row.sequences if x["seq"] != starred]
+                         + [new_seq])
+    if (current_user.active_seq or "") in (seq_number, base_seq):
+        current_user.active_seq = starred
     db.session.commit()
 
     # Messages, in the order they would really land. The dedupe key carries
@@ -3152,11 +3166,67 @@ def recover_accept(seq_number):
                                      day.get("report") or "", originated),
                  key + ":reported", record=record)
     _add_message(current_user.id, "reassignment",
-                 _reassignment_message(record, seq_number, kind,
+                 _reassignment_message(record, starred, kind,
                                        new_seq.get("duty_days") or [], position),
                  key + ":assigned", record=record)
 
-    return jsonify({"sequence": new_seq, "unacknowledged": _unacked_message_count()})
+    return jsonify({"sequence": new_seq, "seq": starred,
+                    "unacknowledged": _unacked_message_count()})
+
+
+@app.route("/pbs/sequences/<seq_number>/revert", methods=["POST"])
+def revert_sequence(seq_number):
+    """Undo a recovery: drop the starred repair and leave the pairing as
+    published.
+
+    Also repairs the older damage. Before repairs were starred, accepting
+    one overwrote the sequence in place, so the original is simply gone
+    from the trip list — but a promoted sequence keeps a pristine copy in
+    the pack library it came from, and that copy is what gets restored.
+    """
+    pbs_row = _pbs_row()
+    if not pbs_row:
+        return jsonify({"error": "no imported pairings"}), 404
+    base_seq = seq_number[:-1] if seq_number.endswith("*") else seq_number
+    starred = base_seq + "*"
+
+    kept = [x for x in (pbs_row.sequences or []) if x["seq"] != starred]
+    dropped = len(pbs_row.sequences or []) - len(kept)
+
+    # A repair overwritten in place still carries the original's number, so
+    # its presence in the list proves nothing about whether it is the
+    # pairing as published. Reverting one therefore REPLACES it with the
+    # library's copy rather than checking whether something by that name is
+    # already there.
+    original = None
+    for pack in PairingPack.query.filter_by(user_id=current_user.id).all():
+        for cand in (pack.sequences or []):
+            if cand.get("seq") == base_seq:
+                original = cand
+                break
+        if original:
+            break
+
+    restored = False
+    have_base = any(x["seq"] == base_seq for x in kept)
+    if original is not None and (not dropped or not have_base):
+        kept = [x for x in kept if x["seq"] != base_seq]
+        kept.append(copy.deepcopy(original))
+        restored = True
+    elif not have_base and not dropped:
+        return jsonify({"error": f"nothing to restore SEQ {base_seq} from — "
+                                 "it is not in any imported pack"}), 404
+
+    if not dropped and not restored:
+        return jsonify({"error": f"SEQ {base_seq} has no recovery to revert, and no "
+                                 "library copy to restore it from"}), 400
+
+    pbs_row.sequences = kept
+    if (current_user.active_seq or "") in (starred, base_seq):
+        current_user.active_seq = base_seq
+    db.session.commit()
+    return jsonify({"seq": base_seq, "dropped_repair": bool(dropped),
+                    "restored_from_pack": restored})
 
 
 @app.route("/fos/<int:leg_id>/shift-day", methods=["POST"])
@@ -8189,6 +8259,22 @@ function renderPairing(seqData){
   recWrap.appendChild(recBtn);
   body.appendChild(recWrap);
 
+  // A repaired trip wears a trailing asterisk, and the pairing as
+  // published is still in the list beside it — so reverting is offered on
+  // the repair rather than buried as an undo.
+  if(String(seqData.seq || '').endsWith('*')){
+    const revWrap = document.createElement('div');
+    revWrap.style.cssText = 'padding:0 14px 14px;';
+    const revBtn = document.createElement('button');
+    revBtn.type = 'button';
+    revBtn.className = 'docs-btn';
+    revBtn.style.cssText = 'border-radius:7px;background:var(--card);color:var(--label);border:1px solid var(--border);';
+    revBtn.textContent = 'Revert to the Published Pairing';
+    revBtn.onclick = () => revertTrip(seqData.seq);
+    revWrap.appendChild(revBtn);
+    body.appendChild(revWrap);
+  }
+
   const dropWrap = document.createElement('div');
   dropWrap.style.cssText = 'padding:0 14px 18px;';
   const dropBtn = document.createElement('button');
@@ -8208,6 +8294,19 @@ async function dropTrip(seq){
     initPairingView();
   } catch(e) { showToast('Request failed: ' + e); }
 }
+async function revertTrip(seq){
+  const base = seq.endsWith('*') ? seq.slice(0, -1) : seq;
+  if(!confirm('Revert to SEQ ' + base + ' as published? The repaired version is discarded.')) return;
+  try {
+    const r = await fetch('/pbs/sequences/' + encodeURIComponent(seq) + '/revert', {method: 'POST'});
+    const data = await readJson(r);
+    if(!r.ok){ showToast(data.error || 'Could not revert'); return; }
+    showToast(data.restored_from_pack ? ('SEQ ' + base + ' restored from the pack')
+                                      : ('Reverted to SEQ ' + base));
+    myTripShowDetail(base, true);
+  } catch(e) { showToast(e.message); }
+}
+
 async function pickUpTrip(seq){
   // A plain one-tap check-in — no signature. Independent of Generate &
   // Cache, which stays its own separate button: either can be done first.
