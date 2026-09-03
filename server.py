@@ -7056,6 +7056,14 @@ function initConfirmView(){
   }).catch(()=>{});
 }
 async function prefillSimbriefGen(){
+  // Always hand back a live button. It gets disabled while waiting for a
+  // flight plan to appear on SimBrief, and only the poller re-enables it —
+  // which can be fifteen minutes away. Anyone who opened SimBrief, changed
+  // their mind, and came back found a button that did nothing and said
+  // nothing about why.
+  const _b = document.getElementById('sbgen-btn');
+  if(_b) setSbgenBusy(false);
+  _sbgenPoll += 1;   // any poll still running belongs to a previous attempt
   // aero-key and release-user are pre-filled server-side (Settings, under
   // current_user) via the input's value attribute — nothing to do here.
   // Leg-specific aircraft data wins over the last-remembered one: a
@@ -10721,6 +10729,18 @@ function submitPrefileForm(action, fields){
   form.remove();
 }
 
+// A disabled button that still looks enabled reads as broken. This owns
+// both halves so they cannot drift apart.
+let _sbgenPoll = 0;
+function setSbgenBusy(busy){
+  const btn = document.getElementById('sbgen-btn');
+  if(!btn) return;
+  btn.disabled = !!busy;
+  btn.style.opacity = busy ? '0.5' : '';
+  btn.style.cursor = busy ? 'not-allowed' : 'pointer';
+  btn.textContent = busy ? 'Waiting for SimBrief\u2026' : 'Open in SimBrief Dispatch';
+}
+
 async function submitSimbriefGen(){
   const el = document.getElementById('sbgen-msg');
   const btn = document.getElementById('sbgen-btn');
@@ -10790,7 +10810,8 @@ async function submitSimbriefGen(){
   link.click();
   document.body.removeChild(link);
 
-  btn.disabled = true;
+  setSbgenBusy(true);
+  const myPoll = ++_sbgenPoll;
   el.textContent = 'Complete the flight plan on SimBrief’s dispatch page — this tab will pick it up automatically once you’re done.';
   el.style.color = '';
 
@@ -10805,10 +10826,13 @@ async function submitSimbriefGen(){
     beforeTs = (await r.json()).time_generated || '';
   } catch(e) { /* best-effort */ }
 
-  pollSimbriefReady(user, beforeTs, el, btn, 0);
+  pollSimbriefReady(user, beforeTs, el, btn, 0, myPoll);
 }
 
-async function pollSimbriefReady(user, beforeTs, el, btn, attempt){
+async function pollSimbriefReady(user, beforeTs, el, btn, attempt, poll){
+  // A poll from an earlier attempt must not re-disable, re-enable, or
+  // write over the message for the current one.
+  if(poll !== _sbgenPoll) return;
   // Polling starts the moment the SimBrief tab opens now (no "tab closed"
   // signal to wait on — see submitSimbriefGen), so this has to cover
   // however long someone takes filling out fuel/alternates/etc. on
@@ -10816,7 +10840,7 @@ async function pollSimbriefReady(user, beforeTs, el, btn, attempt){
   if(attempt > 180){
     el.textContent = 'No new flight plan detected — if you generated one, try Load from SimBrief manually.';
     el.style.color = '#c0392b';
-    btn.disabled = false;
+    setSbgenBusy(false);
     return;
   }
   let ts = '';
@@ -10831,16 +10855,16 @@ async function pollSimbriefReady(user, beforeTs, el, btn, attempt){
     try {
       const r2 = await fetch('/generate', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({simbrief_user: user, carry_gates_from: LEG_ID})});
       const data2 = await r2.json();
-      if(!r2.ok){ el.textContent = data2.error || 'Generated, but could not load it into FOS'; el.style.color = '#c0392b'; btn.disabled = false; return; }
+      if(!r2.ok){ el.textContent = data2.error || 'Generated, but could not load it into FOS'; el.style.color = '#c0392b'; setSbgenBusy(false); return; }
       window.location.href = data2.fos_url + '?view=confirm';
     } catch(e) {
       el.textContent = 'Generated, but loading it failed: ' + e;
       el.style.color = '#c0392b';
-      btn.disabled = false;
+      setSbgenBusy(false);
     }
     return;
   }
-  setTimeout(() => pollSimbriefReady(user, beforeTs, el, btn, attempt + 1), 5000);
+  setTimeout(() => pollSimbriefReady(user, beforeTs, el, btn, attempt + 1, poll), 5000);
 }
 
 let _weatherLoaded = false;
