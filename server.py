@@ -5226,6 +5226,21 @@ function clearAllFlights(){
   fetch('/archive', {method:'DELETE'}).then(() => window.location.reload());
 }
 
+// Day cards label themselves by CALENDAR day, off each leg's own "da"
+// ("duty/calendar"), because a long layover can swallow a calendar day
+// that never gets a duty number. FOS_TEMPLATE has its own copy: the two
+// templates are separate documents and share no scope, so a function
+// defined in one is simply absent in the other.
+function _dayCalendarNumber(day){
+  const leg = (day.legs || [])[0];
+  const da = leg && leg.da;
+  if(da && da.indexOf('/') !== -1){
+    const n = parseInt(da.split('/')[1], 10);
+    if(!isNaN(n)) return n;
+  }
+  return day.duty_day;
+}
+
 async function openSequence(seq){
   const el = document.getElementById('seq-open-msg');
   el.textContent = 'Opening…';
