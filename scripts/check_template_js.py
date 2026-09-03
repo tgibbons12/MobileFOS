@@ -119,6 +119,11 @@ HANDLER_RE = re.compile(r'on(?:click|change|input|submit)="([A-Za-z_$][\w$]*)\('
 PARAMS_RE = re.compile(r'(?:function\s*[A-Za-z_$\w]*\s*\(|\(\s*)([^()]*?)\)\s*(?:=>|\{)')
 CATCH_RE = re.compile(r'catch\s*\(\s*([A-Za-z_$][\w$]*)')
 ARROW_RE = re.compile(r'([A-Za-z_$][\w$]*)\s*=>')
+# Leading underscore required: this codebase names its module-level
+# constants _DDMMMYY_MONTHS, _REC_KINDS, _MSG_FIELD. Without it the
+# scan reads bare words inside string literals — 'POST', 'LIFR',
+# 'TAFB' — as undefined constants.
+CONST_REF_RE = re.compile(r'(?<![.\w$])(_[A-Z][A-Z0-9_]{2,})(?![\w$])')
 SCRIPT_RE = re.compile(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", re.S)
 
 
@@ -126,7 +131,7 @@ def main():
     import server  # noqa: E402  (imported late so sys.path is set)
 
     ok = True
-    calls, defs = {}, {}
+    calls, defs, consts = {}, {}, {}
     tmp = tempfile.mkdtemp(prefix="tplcheck-")
     for name in ("LAUNCHER_TEMPLATE", "FOS_TEMPLATE"):
         tpl = getattr(server, name)
@@ -168,7 +173,14 @@ def main():
         # silently blinded the cross-template check below. The
         # "defined in the other template" filter removes prose on its own:
         # a word from a comment is not a function name over there.
-        calls[name] = set(CALL_RE.findall(strip_comments(raw)))
+        body = strip_comments(raw)
+        calls[name] = set(CALL_RE.findall(body))
+        # Constants are referenced, not called, so the call scan never sees
+        # them: deleting _DDMMMYY_MONTHS left isoDateToDDMMMYY throwing a
+        # ReferenceError that nothing reported, because an async handler
+        # turns a throw into a silent rejected promise. SCREAMING_SNAKE
+        # names are unambiguous enough to check on their own.
+        consts[name] = {m for m in CONST_REF_RE.findall(body) if m not in KNOWN}
         defs[name] = defined
 
     # The bug this exists for: a name called in one template and defined
@@ -176,6 +188,12 @@ def main():
     # false positives — prose inside comments, regex literals, DOM and
     # library globals — and a name that is genuinely defined in neither is
     # almost always one of those, not a real call.
+    for name in ("LAUNCHER_TEMPLATE", "FOS_TEMPLATE"):
+        for const in sorted(consts[name] - defs[name]):
+            ok = False
+            print(f"UNDEF   {name}: {const} is referenced but defined nowhere "
+                  f"in this template")
+
     for name, other in (("LAUNCHER_TEMPLATE", "FOS_TEMPLATE"),
                         ("FOS_TEMPLATE", "LAUNCHER_TEMPLATE")):
         for called in sorted(calls[name] - defs[name] - KNOWN):
