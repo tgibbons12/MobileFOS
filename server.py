@@ -2165,6 +2165,27 @@ def get_pbs_sequence(seq_number):
     return jsonify(out)
 
 
+def _day_report_override(day, row_for_leg):
+    """The report time this day is really working to, given what its first
+    leg is currently planned for.
+
+    `row_for_leg(leg)` hands back the generated Leg row for a pairing leg,
+    or None. The first leg's own sched_out (SimBrief's current plan) is
+    compared against the pairing's published departure; FFD anywhere in
+    the day means the crew has already reported and the clock is fixed.
+    Returns an HHMM string, or None when the published report stands."""
+    legs = day.get("legs") or []
+    if not legs:
+        return None
+    rows = [row_for_leg(l) for l in legs]
+    duty_started = any(bool(r and (r.data or {}).get("fit_for_duty")) for r in rows)
+    first = rows[0]
+    actual = re.sub(r"[^0-9]", "", ((first.data or {}).get("sched_out") or "")) if first else ""
+    if len(actual) < 4:
+        return None
+    return pbs_parser.shifted_report_for_day(day, actual[:4], duty_started)
+
+
 @app.route("/pbs/sequences/<seq_number>/mot-log")
 def sequence_mot_log(seq_number):
     """Every leg in this sequence with its own MOT, whether it's been
@@ -2188,14 +2209,23 @@ def sequence_mot_log(seq_number):
         )
         rows_by_key[key] = row
 
+    def _row_for(leg):
+        return rows_by_key.get((
+            leg.get("flight_number", ""),
+            _airport_icao(leg.get("origin", "")),
+            _airport_icao(leg.get("destination", "")),
+        ))
+
     legs_out = []
     for day in seq.get("duty_days") or []:
-        fdp_end = pbs_parser.fdp_end_for_day(day)
+        # A first leg planned later than published moves report, and the
+        # whole day's MOT with it — but only while the day has not started.
+        shifted = _day_report_override(day, _row_for)
+        fdp_end = pbs_parser.fdp_end_for_day(day, report_override=shifted)
         fdp_remaining = _fdp_remaining_display(fdp_end, (day.get("legs") or [{}])[0].get("origin", ""))
         for i, leg in enumerate(day.get("legs") or []):
-            key = (leg.get("flight_number", ""), _airport_icao(leg.get("origin", "")), _airport_icao(leg.get("destination", "")))
-            row = rows_by_key.get(key)
-            mot = pbs_parser.mot_for_leg(day, i)
+            row = _row_for(leg)
+            mot = pbs_parser.mot_for_leg(day, i, report_override=shifted)
             legs_out.append({
                 "duty_day": day["duty_day"], "da": leg.get("da"), "flight_number": leg.get("flight_number"),
                 "origin": leg.get("origin"), "destination": leg.get("destination"),
@@ -2205,6 +2235,7 @@ def sequence_mot_log(seq_number):
                 "signed_at": (row.data.get("ffd_signed_at") if row else "") or "",
                 "signed_by": (row.data.get("ffd_signed_by") if row else "") or "",
                 "fit_for_duty": bool(row.data.get("fit_for_duty")) if row else False,
+                "report_shifted_to": shifted or "",
             })
     return jsonify({"seq": seq_number, "legs": legs_out})
 
@@ -4752,7 +4783,28 @@ def render_fos_html(leg, default_view=""):
     # care of U+2028/U+2029, the other two characters that can break out.
     ctx["aero_suggestion_json"] = json.dumps(
         ctx.get("aero_suggestion") or None).replace("</", "<\\/")
-    ctx["mot_display"] = _mot_display(ctx.get("mot") or "", ctx.get("origin") or "", current_user.timezone)
+    # MOT is stored on the leg at generation time, so on its own it never
+    # moves. Recompute it here against the day as it now stands: a first
+    # leg planned later pushes report, and every MOT in that day, later
+    # with it — which is the whole point of the number.
+    _mot = ctx.get("mot") or ""
+    try:
+        _seq = next((x for x in _pbs_sequences() if x["seq"] == ctx.get("seq")), None)
+        _row = _get_leg_row(ctx.get("id")) if ctx.get("id") else None
+        if _seq and _row:
+            _dd, _li = _duty_day_for_leg(_seq, _row)
+            if _dd is not None:
+                _day = next((d for d in _seq["duty_days"] if d["duty_day"] == _dd), None)
+                if _day:
+                    _rows = {(r.data.get("flight_number") or "").strip(): r
+                             for r in Leg.query.filter_by(user_id=current_user.id).all()
+                             if (r.data or {}).get("seq") == ctx.get("seq")}
+                    _shift = _day_report_override(
+                        _day, lambda l: _rows.get((l.get("flight_number") or "").strip()))
+                    _mot = pbs_parser.mot_for_leg(_day, _li, report_override=_shift) or _mot
+    except Exception as e:
+        LOG.warning(f"Could not recompute MOT for leg {ctx.get('id')}: {e}")
+    ctx["mot_display"] = _mot_display(_mot, ctx.get("origin") or "", current_user.timezone)
     ctx["timezone_options"] = _timezone_options_html(current_user.timezone)
     ctx["default_view"] = default_view
     ctx["is_admin"] = "1" if bool(getattr(current_user, "is_admin", False)) else ""

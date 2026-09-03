@@ -251,7 +251,7 @@ def _dec_to_hhmm(dec):
     return f"{h % 24:02d}{m:02d}"
 
 
-def mot_for_leg(day, leg_index):
+def mot_for_leg(day, leg_index, report_override=None):
     """Mandatory Off Time for one leg — the latest the CURRENT duty day
     could still release and stay inside the legal FAR 117 duty period,
     computed backward from the day's own report time:
@@ -274,6 +274,12 @@ def mot_for_leg(day, leg_index):
     left is what makes this update leg by leg through the day, while
     every leg still anchors to the same authoritative day-total.
 
+    `report_override` re-anchors the whole calculation to a report time
+    other than the published one. The FDP clock starts at report, so a
+    first leg planned later moves report later and every MOT in the day
+    with it. See shifted_report_for_day() for when that is legitimate and
+    when it very much is not.
+
     Falls back to the older block+ground-only estimate when day["duty"]
     is missing (stale data parsed before that field was captured) rather
     than returning nothing. table_b is pairing_engine's own FAR 117
@@ -281,11 +287,11 @@ def mot_for_leg(day, leg_index):
     an HHMM string, or None if this day has no report/report_hbt or
     leg_index is out of range.
     """
-    report = day.get("report")
+    report = report_override or day.get("report")
     legs = day.get("legs") or []
     if not report or leg_index >= len(legs):
         return None
-    fdp_end = fdp_end_for_day(day)
+    fdp_end = fdp_end_for_day(day, report_override=report_override)
     if fdp_end is None:
         return None
     try:
@@ -306,16 +312,67 @@ def mot_for_leg(day, leg_index):
     return _dec_to_hhmm(fdp_end - time_remaining)
 
 
-def fdp_end_for_day(day):
+def shifted_report_for_day(day, actual_first_dep, duty_started):
+    """The day's report time re-anchored to a first leg that is now planned
+    later than the pairing published it.
+
+    The FDP clock starts at report, so if the day has not begun and the
+    first departure moves an hour later, report moves with it and every
+    MOT in that day moves an hour later too.
+
+    It only works in that direction, and only before the day starts:
+
+      * duty_started (FFD signed) -> None. The crew has already reported;
+        the clock is running from the real report time and a later
+        departure buys nothing. Shifting MOT later here would show more
+        legal duty than actually exists, which is the one error worth
+        being careful about.
+      * an EARLIER departure -> None. Going early does not shorten the
+        FDP a crew is entitled to.
+
+    Returns an HHMM string, or None when the published report still
+    stands."""
+    if duty_started:
+        return None
+    legs = day.get("legs") or []
+    report = day.get("report")
+    if not legs or not report or not actual_first_dep:
+        return None
+    published = legs[0].get("dep_local")
+    if not published:
+        return None
+    try:
+        delay = _hhmm_to_dec(actual_first_dep) - _hhmm_to_dec(published)
+    except (ValueError, TypeError):
+        return None
+    if delay <= 0:
+        # A departure that reads earlier is far more likely to have crossed
+        # midnight than to have genuinely moved up, and either way there is
+        # nothing to extend.
+        return None
+    return _dec_to_hhmm(_hhmm_to_dec(report) + delay)
+
+
+def fdp_end_for_day(day, report_override=None):
     """The day's own legal duty-period deadline (report + table_b's max
     FDP for this report hour/leg count) as decimal hours — the shared
     anchor mot_for_leg() counts backward from, also useful on its own for
     "how much FDP is left right now" style displays."""
-    report = day.get("report")
-    report_hbt = day.get("report_hbt") or report
+    published = day.get("report")
+    report = report_override or published
+    report_hbt = day.get("report_hbt") or published
     legs = day.get("legs") or []
     if not report or not report_hbt:
         return None
+    # The HBT half shifts by the same amount, so the table is read for the
+    # hour the crew actually reports at — a report pushed from 0500 to 0800
+    # can land in a different FDP band.
+    if report_override and published:
+        try:
+            report_hbt = _dec_to_hhmm(
+                _hhmm_to_dec(report_hbt) + (_hhmm_to_dec(report) - _hhmm_to_dec(published)))
+        except (ValueError, TypeError):
+            pass
     from pairing_engine import table_b
     return _hhmm_to_dec(report) + table_b(_hhmm_to_dec(report_hbt), len(legs))
 
