@@ -2913,7 +2913,15 @@ def recover_options(seq_number):
     # departure or a cancellation leaves them at the leg's ORIGIN; a late
     # arrival puts them at the planned destination; a diversion somewhere
     # else entirely.
-    if kind in ("late_departure", "cancelled"):
+    #
+    # Two shapes, not four. A cancellation and a departure going late both
+    # leave the crew standing at the ORIGIN with the planned leg not flown
+    # as planned — what they actually fly next has to be searched for, so
+    # the leg is dropped rather than rewritten. A late arrival or a
+    # diversion did fly: the leg happened, it just ended somewhere or
+    # sometime other than planned.
+    drop_disrupted = kind in ("late_departure", "cancelled")
+    if drop_disrupted:
         at_station = leg.get("origin")
     elif kind == "late_arrival":
         at_station = leg.get("destination")
@@ -2938,7 +2946,9 @@ def recover_options(seq_number):
         # Filtering here rather than at accept time means the pilot never
         # taps an option that turns out to be illegal.
         applicable = []
-        for c in cands:
+        for c in cands[:_REC_TRY_MAX]:
+            if len(applicable) >= _REC_SHOW_MAX:
+                break
             try:
                 patched, _errs = pairing_edit.apply_day_patch(
                     seq, dom, ap, legs_net, duty_day, leg_index,
@@ -2968,18 +2978,22 @@ def recover_options(seq_number):
                 cands, violations = pairing_edit.recover_from_disruption(
                     seq, dom, ap, legs_net, duty_day, leg_index,
                     at_station, at_hhmm, max_extra_days=extra,
+                    drop_disrupted=drop_disrupted,
                 )
             except Exception as e:
                 LOG.warning(f"recover_from_disruption({extra}) failed: {e}")
                 cands, violations = [], [str(e)]
             applicable = []
-            for c in cands:
+            for c in cands[:_REC_TRY_MAX]:
+                if len(applicable) >= _REC_SHOW_MAX:
+                    break
                 try:
                     rebuilt, _errs = pairing_edit.apply_recovery(
                         seq, dom, ap, legs_net, duty_day, leg_index,
                         at_station, at_hhmm,
                         c["chain"], c["day_number"], c["dlegs_today"],
                         c["dblk_today"], c["duty_report_utc"], c["total_days"],
+                        drop_disrupted=drop_disrupted,
                     )
                 except Exception as e:
                     LOG.warning(f"recovery trial failed for {seq_number}: {e}")
@@ -3069,7 +3083,15 @@ def recover_accept(seq_number):
         if (row.data.get("flight_number") or "").strip() == (leg.get("flight_number") or "").strip():
             signed = bool(row.data.get("fit_for_duty"))
             break
-    at_station = (body.get("station") or "").strip().upper() or leg.get("destination")
+    # Same two-shape reading as /recover-options — the option was searched
+    # under it, so applying it has to honor it.
+    drop_disrupted = kind in ("late_departure", "cancelled")
+    if drop_disrupted:
+        at_station = leg.get("origin")
+    elif kind == "late_arrival":
+        at_station = leg.get("destination")
+    else:
+        at_station = (body.get("station") or "").strip().upper() or leg.get("destination")
 
     legs_net, ap = pairing_engine.get_route_data()
     if tier == "day_intact":
@@ -3085,6 +3107,7 @@ def recover_accept(seq_number):
             seq, dom, ap, legs_net, duty_day, leg_index,
             at_station, at_hhmm,
             chain, day_number, dlegs_today, dblk_today, duty_report_utc, total_days,
+            drop_disrupted=drop_disrupted,
         )
     if new_seq is None:
         return jsonify({"error": "; ".join(errs) or "could not apply this option"}), 400
@@ -3453,6 +3476,13 @@ def _ofp_is_this_leg(simbrief_user, record):
 # ---------------------------------------------------------------------------
 
 # CBA 10.J.3.d — disrupted after report, before the sequence originates.
+# Dropping a cancelled or delayed leg frees the duty day enough that the
+# search can return dozens of legal paths — more than anyone scrolls, and
+# each one costs a trial apply to price. Both tiers are already sorted
+# best-first, so the tail is what gets cut.
+_REC_SHOW_MAX = 8
+_REC_TRY_MAX = 24
+
 _REPAIR_AFTER_REPORT_H = 4.0
 _REPAIR_AFTER_DISRUPTION_H = 3.0
 

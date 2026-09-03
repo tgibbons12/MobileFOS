@@ -228,9 +228,33 @@ def anchor_arrival(ap, disrupted_leg, actual_destination, actual_arrival_local):
     return original_dep_utc, original_dep_utc + actual_leg_block, actual_leg_block
 
 
+def anchor_available(ap, disrupted_leg, kept_legs, available_local):
+    """The other shape a disruption takes: the planned leg is NOT flown —
+    it cancelled, or it is going so late that what actually gets flown has
+    to be searched for rather than assumed. The crew is still standing at
+    the leg's ORIGIN, free from `available_local` (HHMM local there), and
+    nothing about that leg is added to the duty day.
+
+    Like anchor_arrival, a bare HHMM has no day component: it is anchored
+    forward off the leg's own scheduled departure (a delay past midnight
+    reads as an earlier clock time), and past whatever the crew last flew.
+    Returns (resume_station, resume_utc)."""
+    origin = disrupted_leg["origin"]
+    scheduled_dep_utc = _hhmm_to_dec(disrupted_leg["dep_local"]) - ap.off(origin)
+    resume_utc = _hhmm_to_dec(available_local) - ap.off(origin)
+    while resume_utc < scheduled_dep_utc:
+        resume_utc += 24
+    if kept_legs:
+        last = kept_legs[-1]
+        last_arr_utc = _hhmm_to_dec(last["arr_local"]) - ap.off(last["destination"])
+        while resume_utc < last_arr_utc:
+            resume_utc += 24
+    return origin, resume_utc
+
+
 def recover_from_disruption(seq, dom, ap, legs, duty_day, leg_index,
                              actual_destination, actual_arrival_local, budget=8.0,
-                             max_extra_days=2):
+                             max_extra_days=2, drop_disrupted=False):
     """The leg at (duty_day, leg_index) is the one that diverted/overran —
     actual_destination/actual_arrival_local (HHMM local at that station) is
     where the pilot really ended up and when. Unlike apply_leg_edit, this
@@ -267,9 +291,17 @@ def recover_from_disruption(seq, dom, ap, legs, duty_day, leg_index,
     disrupted_leg = legs_this_day[leg_index]
     kept_legs = legs_this_day[:leg_index]
     try:
-        original_dep_utc, actual_arrival_utc, actual_leg_block = anchor_arrival(
-            ap, disrupted_leg, actual_destination, actual_arrival_local,
-        )
+        if drop_disrupted:
+            # Never flown, so it costs the duty day nothing and leaves the
+            # crew where they started.
+            actual_destination, actual_arrival_utc = anchor_available(
+                ap, disrupted_leg, kept_legs, actual_arrival_local,
+            )
+            original_dep_utc, actual_leg_block = actual_arrival_utc, 0.0
+        else:
+            original_dep_utc, actual_arrival_utc, actual_leg_block = anchor_arrival(
+                ap, disrupted_leg, actual_destination, actual_arrival_local,
+            )
     except (ValueError, KeyError) as e:
         return [], [f"invalid disruption data: {e}"]
 
@@ -280,7 +312,7 @@ def recover_from_disruption(seq, dom, ap, legs, duty_day, leg_index,
         rpt_utc = original_dep_utc - Rules.BRIEF
 
     dblk_so_far = sum(_bid_or_hhmm_span_to_dec(l) for l in kept_legs) + actual_leg_block
-    dlegs_so_far = len(kept_legs) + 1
+    dlegs_so_far = len(kept_legs) + (0 if drop_disrupted else 1)
     day_number = duty_day
     original_total_days = days[-1]["duty_day"] if days else duty_day
     floor_days = max(original_total_days, duty_day)
@@ -327,7 +359,7 @@ def recover_from_disruption(seq, dom, ap, legs, duty_day, leg_index,
 
 def apply_recovery(seq, dom, ap, legs, duty_day, leg_index, actual_destination,
                     actual_arrival_local, chain, day_number, dlegs_today, dblk_today,
-                    duty_report_utc, total_days):
+                    duty_report_utc, total_days, drop_disrupted=False):
     """Splices an accepted recover_from_disruption() candidate onto the
     sequence: the disrupted leg is rewritten to its real outcome, everything
     after it that same day is dropped (same truncation apply_leg_edit
@@ -347,9 +379,15 @@ def apply_recovery(seq, dom, ap, legs, duty_day, leg_index, actual_destination,
     actual_destination = (actual_destination or "").strip().upper()
 
     try:
-        original_dep_utc, actual_arrival_utc, actual_leg_block = anchor_arrival(
-            ap, disrupted_leg, actual_destination, actual_arrival_local,
-        )
+        if drop_disrupted:
+            actual_destination, actual_arrival_utc = anchor_available(
+                ap, disrupted_leg, kept_legs, actual_arrival_local,
+            )
+            original_dep_utc, actual_leg_block = actual_arrival_utc, 0.0
+        else:
+            original_dep_utc, actual_arrival_utc, actual_leg_block = anchor_arrival(
+                ap, disrupted_leg, actual_destination, actual_arrival_local,
+            )
     except (ValueError, KeyError) as e:
         return None, [f"invalid disruption data: {e}"]
 
@@ -362,13 +400,16 @@ def apply_recovery(seq, dom, ap, legs, duty_day, leg_index, actual_destination,
             dep=_hhmm_to_dec(l["dep_local"]) - ap.off(l["origin"]),
             arr=_hhmm_to_dec(l["arr_local"]) - ap.off(l["destination"]),
         ))
-    prefix_steps.append(dict(
-        day=duty_day,
-        leg=dict(f=disrupted_leg.get("flight_number", ""), o=disrupted_leg["origin"],
-                  d=actual_destination, blk=actual_leg_block,
-                  fleet=disrupted_leg.get("equipment", "")),
-        dep=original_dep_utc, arr=actual_arrival_utc,
-    ))
+    # A leg that never flew leaves no trace on the rebuilt day — writing it
+    # in anyway is what produced the ORIGIN-ORIGIN phantom leg.
+    if not drop_disrupted:
+        prefix_steps.append(dict(
+            day=duty_day,
+            leg=dict(f=disrupted_leg.get("flight_number", ""), o=disrupted_leg["origin"],
+                      d=actual_destination, blk=actual_leg_block,
+                      fleet=disrupted_leg.get("equipment", "")),
+            dep=original_dep_utc, arr=actual_arrival_utc,
+        ))
 
     continuation_steps, continuation_rests = pairing_engine.walk_from(
         legs, ap, chain, actual_destination, actual_arrival_utc,
