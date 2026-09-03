@@ -1181,7 +1181,10 @@ def write_takeoff_performance_string(
             _plan_recip = _reciprocal_rwy(_plan_rwy)
             LOG.info(f"[RWY-PICK] plan={_plan_rwy} reciprocal={_plan_recip}")
 
-            _other_candidates = [r for r in valid_runways if r.get('id', '').upper() != _plan_rwy]
+            _closed_ids = {c.upper() for c in (_fc_closed_rwys or set())} - {_plan_rwy, _plan_recip}
+            _other_candidates = [r for r in valid_runways
+                                 if r.get('id', '').upper() != _plan_rwy
+                                 and r.get('id', '').upper() not in _closed_ids]
 
             # A runway SimBrief could not produce speeds for is unusable —
             # it must never displace a runway that works.
@@ -1245,8 +1248,19 @@ def write_takeoff_performance_string(
                     except Exception:
                         _struct_cap = 0.0
 
+                    # A runway NOTAM'd closed is not an alternative. It used
+                    # to be picked anyway and then stripped further down,
+                    # which spent the table's slots on runways nobody could
+                    # depart from: at KSFO the picker chose 10L/19L/19R,
+                    # both 19s were removed as closed, and the table came
+                    # out with three rows instead of five while 28R — open,
+                    # and the parallel of the departure runway — never got
+                    # a look in. _fc_closed_rwys already has ATIS overrides
+                    # applied upstream, so what is left really is shut.
+                    _closed_now = {c.upper() for c in (_fc_closed_rwys or set())}
                     _missing = [(rid, geo) for rid, geo in _full_idx.items()
-                                if rid not in _have_ids and geo.get('tora_ft', 0) > 0]
+                                if rid not in _have_ids and rid.upper() not in _closed_now
+                                and geo.get('tora_ft', 0) > 0]
                     # Longest runways first — they are the useful alternatives.
                     _missing.sort(key=lambda kv: -kv[1]['tora_ft'])
 
