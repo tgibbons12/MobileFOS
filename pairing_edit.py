@@ -419,7 +419,6 @@ def apply_recovery(seq, dom, ap, legs, duty_day, leg_index, actual_destination,
         return None, ["empty recovery chain"]
 
     all_steps = prefix_steps + continuation_steps
-    true_day_numbers = sorted({s["day"] for s in all_steps})
     rendered_days = pbs_build.days_from_steps(ap, all_steps, continuation_rests, dom)
 
     lines = pbs_format.sequence_lines(9999, rendered_days, 1, [])
@@ -428,8 +427,16 @@ def apply_recovery(seq, dom, ap, legs, duty_day, leg_index, actual_destination,
     if not reparsed or not reparsed[0]["duty_days"]:
         return None, ["internal error: could not reconstruct the recovered days"]
     new_days = reparsed[0]["duty_days"]
-    for true_dn, rday in zip(true_day_numbers, new_days):
-        rday["duty_day"] = true_dn
+    # Number the rendered days by position, counting up from the day the
+    # splice starts on. NOT from the steps' own `day` values: those come
+    # from walk_from's internal counter, which is seeded a day ahead when
+    # the crew rests before resuming. Right for the engine, wrong as a
+    # label — a pairing's day numbers are positions in a list, and a
+    # position is never skipped. Reading them straight through produced
+    # trips numbered DAY 1, DAY 3, DAY 4 whose flying was in fact
+    # continuous: day 1 landing at MCO and "day 3" departing it.
+    for offset, rday in enumerate(new_days):
+        rday["duty_day"] = duty_day + offset
 
     new_seq = copy.deepcopy(seq)
     new_seq["duty_days"] = days[:day_idx] + new_days
@@ -650,7 +657,6 @@ def retry_shifted_plan(seq, dom, ap, legs, duty_day, leg_index, rest_start_local
             arr=_hhmm_to_dec(l["arr_local"]) - ap.off(l["destination"]),
         ))
     all_steps = prefix_steps + steps
-    true_day_numbers = sorted({s["day"] for s in all_steps})
     rendered_days = pbs_build.days_from_steps(ap, all_steps, rests, dom)
 
     lines = pbs_format.sequence_lines(9999, rendered_days, 1, [])
@@ -659,8 +665,16 @@ def retry_shifted_plan(seq, dom, ap, legs, duty_day, leg_index, rest_start_local
     if not reparsed or not reparsed[0]["duty_days"]:
         return None, {"duty_day": duty_day, "leg_index": leg_index, "target_station": None}
     new_days = reparsed[0]["duty_days"]
-    for true_dn, rday in zip(true_day_numbers, new_days):
-        rday["duty_day"] = true_dn
+    # Number the rendered days by position, counting up from the day the
+    # splice starts on. NOT from the steps' own `day` values: those come
+    # from walk_from's internal counter, which is seeded a day ahead when
+    # the crew rests before resuming. Right for the engine, wrong as a
+    # label — a pairing's day numbers are positions in a list, and a
+    # position is never skipped. Reading them straight through produced
+    # trips numbered DAY 1, DAY 3, DAY 4 whose flying was in fact
+    # continuous: day 1 landing at MCO and "day 3" departing it.
+    for offset, rday in enumerate(new_days):
+        rday["duty_day"] = duty_day + offset
 
     new_seq = copy.deepcopy(seq)
     new_seq["duty_days"] = days[:day_idx] + new_days
@@ -818,7 +832,6 @@ def apply_day_patch(seq, dom, ap, legs, duty_day, leg_index, rest_start_local,
         return None, ["empty patch chain"]
 
     all_steps = prefix_steps + patch_steps
-    true_day_numbers = sorted({s["day"] for s in all_steps})
     rendered_days = pbs_build.days_from_steps(ap, all_steps, patch_rests, dom)
 
     lines = pbs_format.sequence_lines(9999, rendered_days, 1, [])
@@ -827,10 +840,18 @@ def apply_day_patch(seq, dom, ap, legs, duty_day, leg_index, rest_start_local,
     if not reparsed or not reparsed[0]["duty_days"]:
         return None, ["internal error: could not reconstruct the patched day(s)"]
     new_days = reparsed[0]["duty_days"]
-    for true_dn, rday in zip(true_day_numbers, new_days):
-        rday["duty_day"] = true_dn
+    # Number the rendered days by position, counting up from the day the
+    # splice starts on. NOT from the steps' own `day` values: those come
+    # from walk_from's internal counter, which is seeded a day ahead when
+    # the crew rests before resuming. Right for the engine, wrong as a
+    # label — a pairing's day numbers are positions in a list, and a
+    # position is never skipped. Reading them straight through produced
+    # trips numbered DAY 1, DAY 3, DAY 4 whose flying was in fact
+    # continuous: day 1 landing at MCO and "day 3" departing it.
+    for offset, rday in enumerate(new_days):
+        rday["duty_day"] = duty_day + offset
 
-    patched_last_day = true_day_numbers[-1]
+    patched_last_day = duty_day + len(new_days) - 1
     day_shift = patched_last_day - duty_day
     reattached = []
     if reattach:
