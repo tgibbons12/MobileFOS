@@ -9390,6 +9390,24 @@ const _REC_TIER_LABEL = {
   get_home:    ['Get Home', 'Back to domicile, and it costs extra days'],
 };
 
+// A response that isn't JSON is the failure mode this app keeps hitting —
+// a proxy error page, a redirect to the login form, a route that isn't
+// deployed yet. response.json() then throws the browser's own opaque
+// message ("The string did not match the expected pattern." on WebKit,
+// "Unexpected token '<'" on Chrome), which says nothing about what
+// actually went wrong. This reads the body as text first and reports the
+// status instead, so the next occurrence is diagnosable from the screen.
+async function readJson(r){
+  const text = await r.text();
+  try {
+    return JSON.parse(text);
+  } catch(e) {
+    const snippet = text.replace(/<[^>]*>/g, ' ').replace(/\\s+/g, ' ').trim().slice(0, 120);
+    throw new Error('Server returned ' + r.status + ' ' + (r.statusText || '')
+                    + (snippet ? (' \\u2014 ' + snippet) : ' with a non-JSON response'));
+  }
+}
+
 async function submitRecovery(){
   const at = (document.getElementById('rec-at').value || '').replace(/[^0-9]/g, '');
   const results = document.getElementById('rec-results');
@@ -9404,7 +9422,7 @@ async function submitRecovery(){
       body: JSON.stringify({duty_day: _recDay, leg_index: _recLegIndex,
                             kind: _recKind, at: at, station: station || ''}),
     });
-    data = await r.json();
+    data = await readJson(r);
     if(!r.ok){ results.innerHTML = '<p class="placeholder-note">' + (data.error || 'Search failed') + '</p>'; return; }
   } catch(e) { results.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>'; return; }
   renderRecoveryOptions(data);
@@ -9534,7 +9552,7 @@ async function acceptRecoveryOption(){
         reached_target: _RECPICK.reached_target,
       }),
     });
-    const d = await r.json();
+    const d = await readJson(r);
     if(!r.ok) throw new Error(d.error || 'could not apply this option');
     note.textContent = 'Reassigned. Your new pairing is in Messages.';
     btn.textContent = 'Reassigned';
