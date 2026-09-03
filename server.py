@@ -3374,15 +3374,50 @@ def recover_accept(seq_number):
     position = (seq["positions"][0] if seq.get("positions") else "")
     _add_message(current_user.id, "disruption",
                  _disruption_message(record, seq_number, duty_day, leg, kind, at_hhmm,
-                                     day.get("report") or "", originated),
+                                     day.get("report") or "", originated,
+                                     ap=ap, station=at_station, base=dom),
                  key + ":reported", record=record)
     _add_message(current_user.id, "reassignment",
                  _reassignment_message(record, starred, kind,
-                                       new_seq.get("duty_days") or [], position),
+                                       new_seq.get("duty_days") or [], position,
+                                       ap=ap, base=dom),
                  key + ":assigned", record=record)
 
     return jsonify({"sequence": new_seq, "seq": starred,
                     "unacknowledged": _unacked_message_count()})
+
+
+@app.route("/pbs/sequences/restore", methods=["POST"])
+def restore_sequences():
+    """Add sequences from a PBS file WITHOUT replacing the ones already
+    imported — the difference between this and /import-pbs, which swaps the
+    whole bid pack. A trip that was dropped by accident is restored by
+    feeding back just its own text, and anything else in the list is left
+    alone. A sequence already present by number is replaced by the incoming
+    one rather than duplicated."""
+    text = request.get_data(as_text=True)
+    if not text or not text.strip():
+        return jsonify({"error": "empty body — POST the PBS text"}), 400
+    try:
+        incoming = pbs_parser.parse_pbs(text)
+    except Exception as e:
+        return jsonify({"error": f"could not parse that as PBS text: {e}"}), 400
+    if not incoming:
+        return jsonify({"error": "no sequences found in that text"}), 400
+
+    row = _pbs_row()
+    if not row:
+        row = PbsImport(user_id=current_user.id, meta=pbs_parser.parse_pbs_meta(text))
+        db.session.add(row)
+    numbers = {x["seq"] for x in incoming}
+    kept = [x for x in (row.sequences or []) if x["seq"] not in numbers]
+    row.sequences = kept + incoming
+    db.session.commit()
+    return jsonify({
+        "restored": sorted(numbers),
+        "sequences": len(row.sequences),
+        "legs": sum(len(d["legs"]) for s in incoming for d in s["duty_days"]),
+    })
 
 
 @app.route("/pbs/sequences/<seq_number>/revert", methods=["POST"])
@@ -3878,24 +3913,42 @@ def _candidate_days(new_seq, from_day):
     return out
 
 
+def _lcl_hbt(ap, hhmm, station, base):
+    """"1445/1745" — the station's own clock and the pilot's base clock, the
+    LCL/HBT pair every PBS line is already written in. A bare time is
+    ambiguous the moment the trip leaves the domicile, and stamping it SBT
+    (Scheduled Base Time) when it was typed in station-local — which is
+    what the field asks for — was worse than ambiguous."""
+    if not hhmm or len(hhmm) != 4:
+        return hhmm or ""
+    try:
+        utc = pairing_edit._hhmm_to_dec(hhmm) - ap.off(station)
+        return f"{hhmm}/{pairing_edit._dec_to_hhmm(utc + ap.off(base))}"
+    except (ValueError, KeyError, TypeError):
+        return hhmm
+
+
 def _disruption_message(record, seq_number, duty_day, leg, kind, at_hhmm,
-                        report_hhmm, originated):
+                        report_hhmm, originated, ap=None, station=None, base=None):
     """The first message: what happened, and how long to stay contactable."""
     window = _repair_window_end(at_hhmm, report_hhmm, originated)
+    if ap is not None and station and base:
+        at_hhmm = _lcl_hbt(ap, at_hhmm, station, base)
+        window = _lcl_hbt(ap, window, station, base)
     leg_txt = f"{(leg or {}).get('origin','?')}-{(leg or {}).get('destination','?')}"
     lines = [
         f"{_msg_prefix(record)} [DISRUPTION] SEQ {seq_number}",
         f"TYPE   {_DISRUPTION_LABELS.get(kind, str(kind).upper())}",
         f"LEG    {leg_txt}  DAY {duty_day}",
-        f"START  {at_hhmm}L at {(leg or {}).get('origin', '?')}",
+        f"START  {at_hhmm}  LCL/HBT",
     ]
     if window:
-        lines.append(f"REMAIN CONTACTABLE UNTIL {window}L")
+        lines.append(f"REMAIN CONTACTABLE UNTIL {window} LCL/HBT")
     lines.append("STATUS RELEASED PENDING REPAIR")
     return "\n".join(lines)
 
 
-def _reassignment_message(record, seq_number, kind, days, position):
+def _reassignment_message(record, seq_number, kind, days, position, ap=None, base=None):
     """The second message: the repaired sequence itself.
 
     Field order follows the real notification — flight number, date,
@@ -3918,16 +3971,19 @@ def _reassignment_message(record, seq_number, kind, days, position):
     pos = (position or "").strip().upper()
     if pos:
         lines.append(f"POS    {pos}")
-    lines.append("NEW PAIRING IS AS FOLLOWS:")
+    lines.append("NEW PAIRING IS AS FOLLOWS:   (DEP LCL/HBT)")
     for day in days or []:
         lines.append("")
         lines.append(f"DAY {day.get('duty_day', '?')}")
         for leg in day.get("legs") or []:
             dhd = "  dhd" if leg.get("deadhead") else ""
+            dep = leg.get("dep_local") or "----"
+            if ap is not None and base and leg.get("origin"):
+                dep = _lcl_hbt(ap, dep, leg["origin"], base)
             lines.append(
-                "  {:<6} {:<5} {}-{}{}".format(
+                "  {:<6} {:<11} {}-{}{}".format(
                     leg.get("flight_number") or "----",
-                    leg.get("dep_local") or "----",
+                    dep,
                     leg.get("origin") or "???",
                     leg.get("destination") or "???",
                     dhd,
@@ -4935,6 +4991,10 @@ if (window.matchMedia) {
     <input type="file" id="pbs-file" accept=".txt,text/plain" onchange="loadPbsFile(event)">
     <div id="import-msg" class="msg"></div>
 
+    <label for="pbs-restore" style="margin-top:18px;display:block;">Restore a trip (adds, doesn't replace)</label>
+    <input type="file" id="pbs-restore" accept=".txt,text/plain" onchange="loadRestoreFile(event)">
+    <div id="restore-msg" class="msg"></div>
+
     <h1 style="margin-top:28px;">Sequences <button class="clear-all-link" onclick="clearAllSequences()">Clear All</button></h1>
     <div id="seq-list"><p class="empty">No sequences imported yet.</p></div>
     <div id="seq-open-msg" class="msg"></div>
@@ -5088,6 +5148,28 @@ function loadPbsFile(e){
   };
   reader.readAsText(file);
 }
+// Same picker, opposite intent: /import-pbs swaps the whole bid pack,
+// this puts one trip back beside whatever is already there.
+function loadRestoreFile(e){
+  const file = e.target.files[0];
+  if(!file) return;
+  const el = document.getElementById('restore-msg');
+  const reader = new FileReader();
+  reader.onload = () => {
+    fetch('/pbs/sequences/restore', {method:'POST', headers:{'Content-Type':'text/plain'}, body: reader.result})
+      .then(r => r.json().then(data => ({ok:r.ok, data})))
+      .then(({ok, data}) => {
+        if(!ok){ el.textContent = data.error || 'Restore failed'; el.style.color = 'var(--red)'; return; }
+        el.textContent = 'Restored SEQ ' + data.restored.join(', ') + ' (' + data.legs + ' legs).';
+        el.style.color = 'var(--green)';
+        loadSequences();
+      })
+      .catch(err => { el.textContent = 'Request failed: ' + err; el.style.color = 'var(--red)'; });
+  };
+  reader.onerror = () => { el.textContent = 'Could not read that file.'; el.style.color = 'var(--red)'; };
+  reader.readAsText(file);
+}
+
 function importPbs(text){
   const el = document.getElementById('import-msg');
   if(!text || !text.trim()){ el.textContent = 'That file was empty.'; el.style.color = 'var(--red)'; return; }
