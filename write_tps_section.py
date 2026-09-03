@@ -1218,7 +1218,9 @@ def write_takeoff_performance_string(
             # scaled off the planned runway by field length, so the table shows
             # real alternatives instead of unusable ones.
             # ---------------------------------------------------------------
-            _WHOLE_TARGET = 5
+            # The table holds five runway rows in total: the planned one,
+            # its most restrictive intersection, and whatever else scores
+            # best. _slots_for_others above owns that budget.
             try:
                 _have_ids = {r.get('id', '').upper() for r in valid_runways}
                 _full_idx = load_full_runway_index().get(_orig_icao_r.upper(), {})
@@ -1248,13 +1250,27 @@ def write_takeoff_performance_string(
                     # Longest runways first — they are the useful alternatives.
                     _missing.sort(key=lambda kv: -kv[1]['tora_ft'])
 
-                    # Unusable runways must not consume fill slots — that is
-                    # how PDX ended up showing 28L plus two 6000ft strips the
+                    # Every missing runway becomes a candidate; the composite
+                    # score below does the choosing.
+                    #
+                    # Cutting the list to the slot count HERE, on length
+                    # alone, decided the table before wind was ever
+                    # consulted — and a runway ties exactly with its own
+                    # reciprocal, so the tie broke on the order they happen
+                    # to sit in runway_index.dat. At KSFO that meant 10L
+                    # (11864ft) always beat 28R (the same strip, same
+                    # length) and 10R always beat 28L, so a westerly day
+                    # filled the table with the ends nobody was using while
+                    # the departure runway's own parallel never appeared.
+                    # Scoring already knows about headwind, ATIS, weight
+                    # margin and the reciprocal; it just needs to be given
+                    # the candidates.
+                    #
+                    # Unusable runways still cannot crowd the table out —
+                    # _unusable() costs a candidate 1000 points, which is
+                    # what keeps PDX from showing two 6000ft strips the
                     # aeroplane cannot depart from.
-                    _usable_have = {r.get('id', '').upper() for r in valid_runways
-                                    if not _unusable(r)}
-                    _slots = max(0, _WHOLE_TARGET - max(1, len(_usable_have)))
-                    for _rid, _geo in _missing[:_slots]:
+                    for _rid, _geo in _missing:
                         _syn = dict(_base_rwy)
                         _ratio = _geo['tora_ft'] / _plan_len
                         _mw    = _plan_mw * (_ratio ** 0.5)
