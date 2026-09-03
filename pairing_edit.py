@@ -203,6 +203,7 @@ def apply_leg_edit(seq, dom, ap, legs, duty_day, leg_index,
 
     new_seq = copy.deepcopy(seq)
     new_seq["duty_days"] = days[:day_idx] + [new_day]
+    _renumber(new_seq)
 
     meta = {
         "truncated_legs_same_day": len(legs_this_day) - leg_index - 1,
@@ -226,6 +227,20 @@ def anchor_arrival(ap, disrupted_leg, actual_destination, actual_arrival_local):
     if actual_leg_block < 0:
         actual_leg_block += 24
     return original_dep_utc, original_dep_utc + actual_leg_block, actual_leg_block
+
+
+def _renumber(sequence):
+    """Force a sequence's duty days to run 1..n.
+
+    Numbering only the freshly rendered days is not enough: the days kept
+    from before the splice, and the original days reattached after it,
+    carry whatever numbering the sequence already had — and a sequence
+    that was itself the output of an earlier repair can arrive already
+    wrong. Since a day number is a position and nothing else, the whole
+    list is restated rather than patched in the middle."""
+    for i, day in enumerate(sequence.get("duty_days") or [], start=1):
+        day["duty_day"] = i
+    return sequence
 
 
 def anchor_available(ap, disrupted_leg, kept_legs, available_local):
@@ -440,6 +455,7 @@ def apply_recovery(seq, dom, ap, legs, duty_day, leg_index, actual_destination,
 
     new_seq = copy.deepcopy(seq)
     new_seq["duty_days"] = days[:day_idx] + new_days
+    _renumber(new_seq)
     return new_seq, []
 
 
@@ -678,6 +694,7 @@ def retry_shifted_plan(seq, dom, ap, legs, duty_day, leg_index, rest_start_local
 
     new_seq = copy.deepcopy(seq)
     new_seq["duty_days"] = days[:day_idx] + new_days
+    _renumber(new_seq)
     return new_seq, None
 
 
@@ -883,6 +900,7 @@ def apply_day_patch(seq, dom, ap, legs, duty_day, leg_index, rest_start_local,
 
     new_seq = copy.deepcopy(seq)
     new_seq["duty_days"] = days[:day_idx] + new_days + reattached
+    _renumber(new_seq)
     return new_seq, []
 
 

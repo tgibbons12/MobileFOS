@@ -5660,10 +5660,33 @@ if (window.matchMedia) {
   .msg-preview{margin-top:3px;font-size:12.5px;line-height:1.35;color:var(--label);
     display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
   .msg-empty{padding:40px 20px;text-align:center;color:var(--label);font-size:14px;}
-  /* Reading pane. Monospace because the body is a fixed-column teletype
-     block — proportional type would break its alignment. */
+  /* Reading pane, after the airline's own rescheduling notification: a
+     card, a headline, the facts as a labelled list, and the pairing laid
+     out day by day. The body is still stored as teletype text — that is
+     the record — but reading it should not feel like reading a printout,
+     so it is parsed back into structure here. Digits use tabular figures
+     so times and flight numbers still line up in proportional type. */
   .msg-detail{padding:16px;}
-  .msg-detail-hdr{font-size:12px;color:var(--label);margin-bottom:12px;}
+  .msg-detail-hdr{font-size:12px;color:var(--label);margin-bottom:10px;}
+  .msg-card{background:var(--card);border:1px solid var(--border);
+    border-radius:14px;padding:18px 18px 20px;}
+  .msg-title{font-size:17px;font-weight:700;color:var(--value);
+    letter-spacing:-0.2px;line-height:1.3;margin-bottom:2px;}
+  .msg-lede{font-size:15px;line-height:1.45;color:var(--value);margin-top:12px;}
+  .msg-facts{list-style:none;margin:16px 0 0;padding:0;display:flex;
+    flex-direction:column;gap:9px;}
+  .msg-facts li{display:flex;gap:10px;font-size:14px;line-height:1.4;}
+  .msg-facts .k{color:var(--label);min-width:104px;flex:none;}
+  .msg-facts .v{color:var(--value);font-variant-numeric:tabular-nums;}
+  .msg-day{margin-top:18px;}
+  .msg-day-hdr{font-size:11px;font-weight:700;letter-spacing:.7px;
+    text-transform:uppercase;color:var(--label);margin-bottom:6px;}
+  .msg-leg{display:flex;gap:12px;font-size:14.5px;line-height:1.7;
+    color:var(--value);font-variant-numeric:tabular-nums;}
+  .msg-leg .flt{color:var(--blue);min-width:48px;}
+  .msg-leg .tm{color:var(--label);min-width:46px;}
+  .msg-status{margin-top:18px;padding-top:14px;border-top:1px solid var(--border);
+    font-size:12.5px;letter-spacing:.4px;text-transform:uppercase;color:var(--label);}
   .msg-body{font-family:var(--mono);font-size:12.5px;line-height:1.5;
     color:var(--value);white-space:pre-wrap;word-break:break-word;}
   .msg-ackbar{margin-top:18px;}
@@ -6615,6 +6638,113 @@ async function initMessages(){
   });
 }
 
+// The stored body is teletype text — that is the record, and it is what
+// gets written and deduped. Reading it, though, should look like the
+// notification it stands in for, so it is parsed back into structure:
+// a headline, the facts as a labelled list, the pairing day by day.
+// Anything that matches none of those shapes is shown as written, so an
+// unrecognised line is never silently dropped.
+const _MSG_FIELD = /^([A-Z][A-Z ]{1,9}?)\\s{2,}(.+)$/;
+const _MSG_DAY = /^DAY\\s+(\\S+)$/;
+const _MSG_LEG = /^\\s{2,}(\\S+)\\s+(\\S+)\\s+([A-Z]{3}-[A-Z]{3})(\\s+dhd)?\\s*$/;
+const _MSG_FIELD_LABEL = {
+  TYPE: 'Disruption type', LEG: 'Flight leg', START: 'Disruption start',
+  POS: 'Position', STATUS: 'Status',
+};
+
+// The stored body is upper-case teletype; read as prose it shouts. Only
+// the sentences are cased down, and only words that are neither a known
+// operational acronym nor carrying a digit or a hyphen — so SBT, DHD and
+// station pairs survive while "YOU HAVE BEEN REASSIGNED" stops yelling.
+const _MSG_KEEP_CAPS = new Set(['SBT', 'ECS', 'PBS', 'FFD', 'DHD', 'CA', 'FO', 'UTC', 'MOT']);
+function _msgSentence(line){
+  const cased = line.split(' ').map(w => {
+    const bare = w.replace(/[^A-Za-z]/g, '');
+    if(!bare || _MSG_KEEP_CAPS.has(bare) || /[0-9-]/.test(w)) return w;
+    return w.toLowerCase();
+  }).join(' ');
+  return cased.charAt(0).toUpperCase() + cased.slice(1);
+}
+
+function renderMessageBody(bodyText){
+  const card = document.createElement('div');
+  card.className = 'msg-card';
+  const lines = String(bodyText || '').split('\\n');
+
+  const title = document.createElement('div');
+  title.className = 'msg-title';
+  title.textContent = lines[0] || '';
+  card.appendChild(title);
+
+  let facts = null, day = null;
+  const endFacts = () => { facts = null; };
+
+  lines.slice(1).forEach(raw => {
+    const line = raw.replace(/\\s+$/, '');
+    if(!line){ return; }
+
+    const legM = _MSG_LEG.exec(line);
+    if(legM && day){
+      const row = document.createElement('div');
+      row.className = 'msg-leg';
+      const f = document.createElement('span'); f.className = 'flt'; f.textContent = legM[1];
+      const t = document.createElement('span'); t.className = 'tm'; t.textContent = legM[2];
+      const p = document.createElement('span'); p.textContent = legM[3] + (legM[4] ? '  DHD' : '');
+      row.appendChild(f); row.appendChild(t); row.appendChild(p);
+      day.appendChild(row);
+      return;
+    }
+
+    const dayM = _MSG_DAY.exec(line);
+    if(dayM){
+      endFacts();
+      day = document.createElement('div');
+      day.className = 'msg-day';
+      const h = document.createElement('div');
+      h.className = 'msg-day-hdr';
+      h.textContent = 'Day ' + dayM[1];
+      day.appendChild(h);
+      card.appendChild(day);
+      return;
+    }
+
+    const fieldM = _MSG_FIELD.exec(line);
+    if(fieldM && !day){
+      if(!facts){
+        facts = document.createElement('ul');
+        facts.className = 'msg-facts';
+        card.appendChild(facts);
+      }
+      const key = fieldM[1].trim();
+      const li = document.createElement('li');
+      const k = document.createElement('span');
+      k.className = 'k';
+      k.textContent = _MSG_FIELD_LABEL[key] || key.charAt(0) + key.slice(1).toLowerCase();
+      const v = document.createElement('span');
+      v.className = 'v';
+      v.textContent = fieldM[2].trim();
+      li.appendChild(k); li.appendChild(v);
+      facts.appendChild(li);
+      return;
+    }
+
+    endFacts();
+    day = null;
+    if(/^STATUS\\b/.test(line)){
+      const st = document.createElement('div');
+      st.className = 'msg-status';
+      st.textContent = line;
+      card.appendChild(st);
+      return;
+    }
+    const p = document.createElement('div');
+    p.className = 'msg-lede';
+    p.textContent = _msgSentence(line);
+    card.appendChild(p);
+  });
+  return card;
+}
+
 function openMessage(id){
   const m = _messagesCache.find(x => String(x.id) === String(id));
   if(!m) return;
@@ -6628,10 +6758,7 @@ function openMessage(id){
   hdr.textContent = m.created_at ? new Date(m.created_at).toLocaleString() : '';
   wrap.appendChild(hdr);
 
-  const pre = document.createElement('div');
-  pre.className = 'msg-body';
-  pre.textContent = m.body;          // textContent: the body is teletype text, not markup
-  wrap.appendChild(pre);
+  wrap.appendChild(renderMessageBody(m.body));
 
   if(m.acknowledged_at){
     const done = document.createElement('div');
