@@ -230,16 +230,41 @@ def anchor_arrival(ap, disrupted_leg, actual_destination, actual_arrival_local):
 
 
 def _renumber(sequence):
-    """Force a sequence's duty days to run 1..n.
+    """Force a sequence's duty days to run 1..n, and restate the legs' own
+    "da" (duty/calendar day) to match.
 
     Numbering only the freshly rendered days is not enough: the days kept
     from before the splice, and the original days reattached after it,
     carry whatever numbering the sequence already had — and a sequence
     that was itself the output of an earlier repair can arrive already
     wrong. Since a day number is a position and nothing else, the whole
-    list is restated rather than patched in the middle."""
+    list is restated rather than patched in the middle.
+
+    `da` matters because that is what the trip cards actually label
+    themselves by — a long layover can swallow a whole calendar day that
+    never gets a duty number, so the calendar half is the honest label.
+    The patched days are rendered as their own little sequence, though, so
+    their `da` restarts at 1/1 and the cards read 1, 2, 1, 4, 5 with the
+    duty numbers themselves perfectly correct. Each day keeps whatever
+    calendar gap it genuinely carried (cal - duty), and the running
+    calendar number is never allowed to stand still or go backwards."""
+    prev_cal = 0
     for i, day in enumerate(sequence.get("duty_days") or [], start=1):
         day["duty_day"] = i
+        gap = 0
+        for leg in (day.get("legs") or []):
+            raw = str(leg.get("da") or "")
+            if "/" in raw:
+                d, _, c = raw.partition("/")
+                try:
+                    gap = max(0, int(c) - int(d))
+                except ValueError:
+                    gap = 0
+            break
+        cal = max(i + gap, prev_cal + 1)
+        for leg in (day.get("legs") or []):
+            leg["da"] = f"{i}/{cal}"
+        prev_cal = cal
     return sequence
 
 
