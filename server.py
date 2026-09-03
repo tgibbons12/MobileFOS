@@ -3193,6 +3193,27 @@ def recover_step(seq_number):
             if planned:
                 break
 
+    # Delaying the rest of the day in one tap. Offered only when there is
+    # more than one leg left to place — a single leg is already one tap on
+    # the planned-leg card, and a second button for the same action is
+    # just noise.
+    rest_of_day = [l for l in (day_legs[leg_index:] if drop else day_legs[leg_index + 1:])]
+    cascade = None
+    if len(rest_of_day) > 1 and not picks:
+        c_picks, placed, stopped = pairing_edit.cascade_delay(
+            ap, legs_net, startstate, rest_of_day, picks)
+        if len(placed) > 1:
+            cascade = {
+                "picks": c_picks,
+                "legs": [{"flight_number": o["flight_number"], "origin": o["origin"],
+                          "destination": o["destination"], "dep_local": o["dep_local"],
+                          "arr_local": o["arr_local"], "after_rest": o["after_rest"],
+                          "instead_of": o.get("instead_of")}
+                         for o in placed],
+                "covers": len(placed), "of": len(rest_of_day),
+                "stopped_because": stopped,
+            }
+
     state = {"station": station, "avail": avail, "dlegs_today": legs_flown,
              "dblk_today": block_flown, "duty_report_utc": report_utc,
              "day_number": day_number, "hbt": endstate["hbt"]}
@@ -3205,7 +3226,7 @@ def recover_step(seq_number):
         "avail_local": pairing_edit._dec_to_hhmm(avail + ap.off(station)),
         "day_number": _label.get(day_number, duty_day), "legs_today": legs_flown,
         "block_today": round(block_flown, 2),
-        "trail": trail, "options": options,
+        "trail": trail, "options": options, "cascade": cascade,
         "repair_window_end": _repair_window_end(
             at_hhmm, day.get("report") or "",
             leg_index > 0 or duty_day > (days[0].get("duty_day") if days else 1)),
@@ -3866,10 +3887,10 @@ def _disruption_message(record, seq_number, duty_day, leg, kind, at_hhmm,
         f"{_msg_prefix(record)} [DISRUPTION] SEQ {seq_number}",
         f"TYPE   {_DISRUPTION_LABELS.get(kind, str(kind).upper())}",
         f"LEG    {leg_txt}  DAY {duty_day}",
-        f"START  {at_hhmm} SBT",
+        f"START  {at_hhmm}L at {(leg or {}).get('origin', '?')}",
     ]
     if window:
-        lines.append(f"REMAIN CONTACTABLE UNTIL {window} SBT")
+        lines.append(f"REMAIN CONTACTABLE UNTIL {window}L")
     lines.append("STATUS RELEASED PENDING REPAIR")
     return "\n".join(lines)
 
@@ -9936,6 +9957,49 @@ function renderRecoveryStep(d){
     wrap.appendChild(note);
     done.appendChild(wrap);
     results.appendChild(done);
+  }
+
+  // Delaying the whole day at once. Sits above the per-leg cards because
+  // when it applies it is usually the answer — pushing one departure
+  // moves everything behind it, and tapping each one in turn to say "the
+  // same flight, later" is work the app can do.
+  if(d.cascade){
+    const c = d.cascade;
+    const panel = _recPanel('Delay the Rest of Today',
+      'Every remaining leg at its next legal slot \u2014 same flights, later');
+    c.legs.forEach(l => {
+      const row = document.createElement('div');
+      row.className = 'doc-row';
+      const left = document.createElement('div');
+      const code = document.createElement('div');
+      code.className = 'code';
+      code.textContent = (l.flight_number || '----') + '   ' + l.origin + '-' + l.destination;
+      const desc = document.createElement('div');
+      desc.className = 'desc';
+      desc.textContent = l.dep_local + ' - ' + l.arr_local
+        + (l.after_rest ? '   after rest' : '')
+        + (l.instead_of ? ('   in place of ' + l.instead_of) : '');
+      left.appendChild(code); left.appendChild(desc);
+      row.appendChild(left);
+      panel.appendChild(row);
+    });
+    if(c.stopped_because){
+      const stop = document.createElement('div');
+      stop.style.cssText = 'padding:8px 14px 0;font-size:12px;color:var(--label);line-height:1.5;';
+      stop.textContent = 'Covers ' + c.covers + ' of ' + c.of + ' remaining legs \u2014 '
+        + c.stopped_because + '. Pick the rest yourself below.';
+      panel.appendChild(stop);
+    }
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'padding:12px 14px;';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'docs-btn';
+    btn.textContent = 'Delay These ' + c.covers + ' Legs';
+    btn.onclick = () => { _recPicks = c.picks; loadRecoveryStep(); };
+    wrap.appendChild(btn);
+    panel.appendChild(wrap);
+    results.appendChild(panel);
   }
 
   // The leg the pairing gave you, answered first and on its own terms.

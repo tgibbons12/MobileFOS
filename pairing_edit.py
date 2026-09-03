@@ -344,18 +344,29 @@ def step_options(ap, legs, state, planned=None, limit=40):
     # its next legal occurrence — the "delay it" answer, as against the
     # "fly something else" answers below.
     if planned:
-        # find_network_leg hands back the leg itself, not its position —
-        # the position is what a pick has to carry.
-        leg = find_network_leg(legs, planned.get("origin"), planned.get("destination"),
-                               planned.get("flight_number"))
+        # The planned flight by number when the network has it. When it
+        # does not, the honest stand-in is the same city pair leaving
+        # soonest AFTER the crew is free — not find_network_leg's earliest
+        # departure by clock, which can hand back a 1005 that has already
+        # gone and push the leg into tomorrow when an 1726 would have made
+        # it today.
+        o = (planned.get("origin") or "").strip().upper()
+        dst = (planned.get("destination") or "").strip().upper()
+        fn = str(planned.get("flight_number") or "").strip()
+        pool = [(i, l) for i, l in enumerate(legs) if l["o"] == o and l["d"] == dst]
+        exact = [(i, l) for i, l in pool if l["f"] == fn] if fn else []
+        pool = exact or pool
+        idx, leg = min(pool, key=lambda il: _next_dep_after(il[1], same_day_earliest),
+                       default=(None, None))
         if leg is not None:
-            idx = next((i for i, l in enumerate(legs) if l is leg), None)
+            substituted = None if leg["f"] == fn else fn
             as_planned = _price(leg, _next_dep_after(leg, same_day_earliest), False)
             delayed = None
             if not as_planned["legal"]:
                 d_rest = _price(leg, _next_dep_after(leg, rest_earliest), True)
                 delayed = d_rest if d_rest["legal"] else None
-            out["planned"] = {"index": idx, "as_planned": as_planned, "delayed": delayed}
+            out["planned"] = {"index": idx, "as_planned": as_planned, "delayed": delayed,
+                              "substituted_for": substituted}
 
     # 2. Everything else that leaves this station, priced the same way.
     for i, leg in enumerate(legs):
@@ -465,6 +476,54 @@ def apply_steps(seq, dom, ap, duty_day, leg_index, prefix_steps, steps, rests):
     new_seq["duty_days"] = days[:day_idx] + new_days
     _renumber(new_seq)
     return new_seq, []
+
+
+def cascade_delay(ap, legs, start, planned_legs, picks_so_far=None):
+    """Delay a run of planned legs in one go, each to its next legal slot.
+
+    Delaying one leg is rarely the whole story — push the first departure
+    of the day and everything behind it has to move too, and picking each
+    one back off a list is tedious when the answer is always "the same
+    flight, later". This walks the planned legs in order, taking each as
+    scheduled when that is still legal and at its next legal occurrence
+    when it is not, and stops at the first one that cannot be placed at
+    all.
+
+    Returns (picks, placed, stopped_because). `picks` extends whatever was
+    already picked, so the caller can hand it straight back to
+    replay_picks — the cascade is a shortcut for tapping, not a second
+    way of building a trip.
+    """
+    picks = list(picks_so_far or [])
+    placed, stopped = [], None
+
+    for pl in planned_legs:
+        steps, _rests, state, err = replay_picks(ap, legs, start, picks)
+        if err:
+            return picks, placed, err
+        if pl.get("origin") != state["station"]:
+            stopped = (f"the trip's next leg leaves {pl.get('origin')}, "
+                       f"but this lands you at {state['station']}")
+            break
+        opts = step_options(ap, legs, {
+            "station": state["station"], "avail": state["avail"],
+            "dlegs_today": state["legs_flown"], "dblk_today": state["block_flown"],
+            "duty_report_utc": state["report_utc"], "hbt": state["hbt"],
+        }, planned=pl, limit=0)
+        chosen = None
+        if opts["planned"]:
+            if opts["planned"]["as_planned"]["legal"]:
+                chosen = opts["planned"]["as_planned"]
+            elif opts["planned"]["delayed"]:
+                chosen = opts["planned"]["delayed"]
+        if chosen is None:
+            why = (opts["planned"] and opts["planned"]["as_planned"].get("why_not")) or "no such flight in the network"
+            stopped = f"{pl.get('flight_number') or 'the next leg'} cannot be delayed into anything legal ({why})"
+            break
+        picks.append({"index": opts["planned"]["index"], "after_rest": chosen["after_rest"]})
+        placed.append(dict(chosen, instead_of=opts["planned"].get("substituted_for")))
+
+    return picks, placed, stopped
 
 
 def anchor_available(ap, disrupted_leg, kept_legs, available_local):
