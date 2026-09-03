@@ -2952,6 +2952,9 @@ def recover_options(seq_number):
                 LOG.warning(f"day patch trial failed for {seq_number}: {e}")
                 continue
             if patched is not None:
+                # The trial apply already built the repaired trip, so the
+                # legs it would give are free to carry along.
+                c = dict(c, days=_candidate_days(patched, duty_day))
                 applicable.append(c)
         if applicable:
             tiers.append({"tier": "day_intact", "target": target,
@@ -2969,9 +2972,23 @@ def recover_options(seq_number):
             except Exception as e:
                 LOG.warning(f"recover_from_disruption({extra}) failed: {e}")
                 cands, violations = [], [str(e)]
-            if cands:
+            applicable = []
+            for c in cands:
+                try:
+                    rebuilt, _errs = pairing_edit.apply_recovery(
+                        seq, dom, ap, legs_net, duty_day, leg_index,
+                        at_station, at_hhmm,
+                        c["chain"], c["day_number"], c["dlegs_today"],
+                        c["dblk_today"], c["duty_report_utc"], c["total_days"],
+                    )
+                except Exception as e:
+                    LOG.warning(f"recovery trial failed for {seq_number}: {e}")
+                    continue
+                if rebuilt is not None:
+                    applicable.append(dict(c, days=_candidate_days(rebuilt, duty_day)))
+            if applicable:
                 tiers.append({"tier": tier_name, "target": dom,
-                              "reached_target": True, "candidates": cands})
+                              "reached_target": True, "candidates": applicable})
                 break
 
     return jsonify({
@@ -3498,6 +3515,31 @@ _DISRUPTION_LABELS = {
     "diverted": "DIVERTED",
     "cancelled": "CANCELLED",
 }
+
+
+def _candidate_days(new_seq, from_day):
+    """The legs an accepted option would actually give you, from the
+    disrupted day onward — days before it are untouched, so listing them
+    back would only bury the part that changed."""
+    out = []
+    for day in (new_seq.get("duty_days") or []):
+        if day.get("duty_day", 0) < from_day:
+            continue
+        out.append({
+            "duty_day": day.get("duty_day"),
+            "report": day.get("report") or "",
+            "release": day.get("release") or "",
+            "legs": [{
+                "flight_number": l.get("flight_number") or "",
+                "origin": l.get("origin") or "",
+                "destination": l.get("destination") or "",
+                "dep_local": l.get("dep_local") or "",
+                "arr_local": l.get("arr_local") or "",
+                "equipment": l.get("equipment") or "",
+                "deadhead": bool(l.get("deadhead")),
+            } for l in (day.get("legs") or [])],
+        })
+    return out
 
 
 def _disruption_message(record, seq_number, duty_day, leg, kind, at_hhmm,
@@ -9492,8 +9534,15 @@ function renderRecoveryOptions(data){
       mark.className = 'actions rec-pick';
       mark.style.cssText = 'color:var(--blue);font-size:12px;';
       row.appendChild(mark);
-      row.onclick = () => pickRecoveryOption(tier.tier, cand, tier.reached_target, row);
       panel.appendChild(row);
+      // The legs themselves, folded away until this option is the one
+      // being considered — a routing line says where, not what you fly.
+      const detail = document.createElement('div');
+      detail.className = 'rec-detail';
+      detail.hidden = true;
+      detail.appendChild(recoveryLegTable(cand.days || []));
+      panel.appendChild(detail);
+      row.onclick = () => pickRecoveryOption(tier.tier, cand, tier.reached_target, row, detail);
     });
     results.appendChild(panel);
   });
@@ -9520,13 +9569,57 @@ function renderRecoveryOptions(data){
 let _RECPICK = null;
 let _RECDATA = null;
 
-function pickRecoveryOption(tier, cand, reachedTarget, row){
+// One option's own day-by-day legs, in the shape the pairing itself is
+// read: report and release bracketing the day, flight number, times, and
+// city pair per leg.
+function recoveryLegTable(days){
+  const wrap = document.createElement('div');
+  wrap.style.cssText = 'padding:4px 14px 14px;';
+  if(!days.length){
+    const p = document.createElement('div');
+    p.style.cssText = 'font-size:12px;color:var(--label);';
+    p.textContent = 'No leg detail available for this option.';
+    wrap.appendChild(p);
+    return wrap;
+  }
+  days.forEach(day => {
+    const hdr = document.createElement('div');
+    hdr.style.cssText = 'font-size:11px;letter-spacing:.6px;color:var(--label);'
+      + 'margin:10px 0 4px;text-transform:uppercase;';
+    const bracket = [day.report ? ('RPT ' + day.report) : '',
+                     day.release ? ('RLS ' + day.release) : ''].filter(Boolean).join('   ');
+    hdr.textContent = 'Day ' + day.duty_day + (bracket ? ('   ' + bracket) : '');
+    wrap.appendChild(hdr);
+    (day.legs || []).forEach(l => {
+      const line = document.createElement('div');
+      line.style.cssText = 'font-family:var(--mono);font-size:12.5px;color:var(--value);'
+        + 'padding:3px 0;display:flex;gap:10px;';
+      const flt = document.createElement('span');
+      flt.style.cssText = 'min-width:52px;color:var(--blue);';
+      flt.textContent = l.flight_number || '----';
+      const pair = document.createElement('span');
+      pair.style.minWidth = '78px';
+      pair.textContent = (l.origin || '???') + '-' + (l.destination || '???');
+      const times = document.createElement('span');
+      times.style.color = 'var(--label)';
+      times.textContent = (l.dep_local || '----') + ' - ' + (l.arr_local || '----')
+        + (l.deadhead ? '  DHD' : '');
+      line.appendChild(flt); line.appendChild(pair); line.appendChild(times);
+      wrap.appendChild(line);
+    });
+  });
+  return wrap;
+}
+
+function pickRecoveryOption(tier, cand, reachedTarget, row, detail){
   _RECPICK = { tier: tier, candidate: cand, reached_target: reachedTarget };
   document.querySelectorAll('#rec-results .doc-row').forEach(r => {
     r.style.background = '';
     const m = r.querySelector('.rec-pick');
     if(m) m.textContent = '';
   });
+  document.querySelectorAll('#rec-results .rec-detail').forEach(d => { d.hidden = true; });
+  if(detail) detail.hidden = false;
   row.style.background = 'var(--bg)';
   const m = row.querySelector('.rec-pick');
   if(m) m.textContent = 'selected';
