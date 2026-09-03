@@ -4960,6 +4960,10 @@ if (window.matchMedia) {
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
       <div><div class="tile-title">Create a Flight</div><div class="tile-sub">Skip PBS — just origin, destination, and flight number</div></div>
     </button>
+    <button class="home-tile" onclick="showHomeView('load-sequence');showTab('pbs');">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
+      <div><div class="tile-title">Import or Restore a Trip</div><div class="tile-sub">Load a bid pack, or put back a trip you dropped</div></div>
+    </button>
     <button class="home-tile" onclick="showHomeView('import-simbrief')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg>
       <div><div class="tile-title">Import from SimBrief</div><div class="tile-sub">Load whatever OFP is on your account right now</div></div>
