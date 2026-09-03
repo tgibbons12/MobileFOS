@@ -5660,13 +5660,17 @@ if (window.matchMedia) {
   .msg-preview{margin-top:3px;font-size:12.5px;line-height:1.35;color:var(--label);
     display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
   .msg-empty{padding:40px 20px;text-align:center;color:var(--label);font-size:14px;}
-  /* Reading pane. Monospace because the body is a fixed-column teletype
-     block — proportional type would break its alignment. The message IS
-     text: it is not reformatted into HTML, only shown as written. */
+  /* Reading pane. The message is text and is shown as written — never
+     reformatted into HTML — but text does not mean teletype: it reads in
+     the same face as the rest of the app. pre-wrap keeps the line breaks
+     and indentation the format itself carries, and tabular figures keep
+     the flight numbers and times lining up without monospacing the prose
+     along with them. */
   .msg-detail{padding:16px;}
   .msg-detail-hdr{font-size:12px;color:var(--label);margin-bottom:12px;}
-  .msg-body{font-family:var(--mono);font-size:12.5px;line-height:1.5;
-    color:var(--value);white-space:pre-wrap;word-break:break-word;}
+  .msg-body{font-size:14.5px;line-height:1.55;color:var(--value);
+    white-space:pre-wrap;word-break:break-word;
+    font-variant-numeric:tabular-nums;}
   .msg-ackbar{margin-top:18px;}
   .msg-ackbar button{margin:0;padding:11px 18px;font-size:14px;font-weight:600;
     background:var(--blue);color:#fff;border:none;border-radius:7px;cursor:pointer;}
