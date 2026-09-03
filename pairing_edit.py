@@ -268,6 +268,205 @@ def _renumber(sequence):
     return sequence
 
 
+def _next_dep_after(leg, earliest_utc):
+    """A network leg's departure is a time of day, not an instant — roll it
+    forward whole days until it is at or after `earliest_utc`."""
+    dep = leg["dep"]
+    while dep < earliest_utc:
+        dep += 24
+    return dep
+
+
+def step_options(ap, legs, state, planned=None, limit=40):
+    """Everything that can legally be flown next from where the crew is
+    standing, and what each choice would cost. Nothing is ranked and
+    nothing is chosen — the pilot picks; this only says what the rules
+    allow and what it would do to the duty day.
+
+    `state` is where they are and when: station, avail (UTC, earliest they
+    can leave), day_number, dlegs_today, dblk_today, duty_report_utc, hbt.
+    `planned` is the leg the pairing said to fly next, if there still is
+    one — it gets answered first and separately, because "can I still fly
+    what I was given" is the question before "what else is there".
+
+    Returns {planned: {...} or None, same_day: [...], after_rest: [...]}.
+    A same_day option keeps the current duty period; an after_rest option
+    ends it and reports fresh, so it starts a new duty day.
+    """
+    stn = state["station"]
+    avail = float(state["avail"])
+    dlegs = int(state.get("dlegs_today") or 0)
+    dblk = float(state.get("dblk_today") or 0.0)
+    rep = float(state["duty_report_utc"])
+    hbt = float(state.get("hbt") or ap.off(stn))
+
+    same_day_earliest = avail + (mct_after_arrival(ap, stn, stn) if dlegs else 0.0)
+    rest_earliest = avail + Rules.DEBRIEF + Rules.MIN_REST + Rules.BRIEF
+
+    def _price(leg, dep, after_rest):
+        """What this leg would cost, or why it cannot be flown."""
+        if after_rest:
+            new_rep = dep - Rules.BRIEF
+            nlegs, nblk = 1, leg["blk"]
+        else:
+            new_rep = rep
+            nlegs, nblk = dlegs + 1, dblk + leg["blk"]
+        arr = dep + leg["blk"]
+        blk_cap = min(Rules.MAX_DUTY_BLOCK, table_a(new_rep + hbt))
+        fdp_cap = table_b(new_rep + hbt, nlegs)
+        fdp_used = (arr + Rules.DEBRIEF) - new_rep
+        why = None
+        if not after_rest and nlegs > Rules.MAX_LEGS_DAY:
+            why = f"{nlegs} legs, the day allows {Rules.MAX_LEGS_DAY}"
+        elif not after_rest and dep - avail > max_sit_at(ap, stn):
+            why = f"{dep - avail:.1f}h sit at {stn}, longer than the day allows"
+        elif nblk > blk_cap:
+            why = f"{nblk:.1f}h block, the day allows {blk_cap:.1f}h"
+        elif fdp_used > fdp_cap:
+            why = f"{fdp_used:.1f}h duty, the FDP allows {fdp_cap:.1f}h"
+        return {
+            "flight_number": leg["f"], "origin": leg["o"], "destination": leg["d"],
+            "block": round(leg["blk"], 2),
+            "dep_local": _dec_to_hhmm(dep + ap.off(leg["o"])),
+            "arr_local": _dec_to_hhmm(arr + ap.off(leg["d"])),
+            "dep_utc": round(dep, 4), "arr_utc": round(arr, 4),
+            "after_rest": after_rest,
+            "legs_today": nlegs, "block_today": round(nblk, 2),
+            "fdp_used": round(fdp_used, 2), "fdp_cap": round(fdp_cap, 2),
+            "duty_report_utc": round(new_rep, 4),
+            "legal": why is None, "why_not": why,
+        }
+
+    out = {"planned": None, "same_day": [], "after_rest": []}
+
+    # 1. The leg the pairing gave them. Answered on its own terms: flown as
+    # scheduled if that is still legal, and if not, the same city pair at
+    # its next legal occurrence — the "delay it" answer, as against the
+    # "fly something else" answers below.
+    if planned:
+        # find_network_leg hands back the leg itself, not its position —
+        # the position is what a pick has to carry.
+        leg = find_network_leg(legs, planned.get("origin"), planned.get("destination"),
+                               planned.get("flight_number"))
+        if leg is not None:
+            idx = next((i for i, l in enumerate(legs) if l is leg), None)
+            as_planned = _price(leg, _next_dep_after(leg, same_day_earliest), False)
+            delayed = None
+            if not as_planned["legal"]:
+                d_rest = _price(leg, _next_dep_after(leg, rest_earliest), True)
+                delayed = d_rest if d_rest["legal"] else None
+            out["planned"] = {"index": idx, "as_planned": as_planned, "delayed": delayed}
+
+    # 2. Everything else that leaves this station, priced the same way.
+    for i, leg in enumerate(legs):
+        if leg["o"] != stn:
+            continue
+        same = _price(leg, _next_dep_after(leg, same_day_earliest), False)
+        if same["legal"]:
+            out["same_day"].append(dict(same, index=i))
+        rest = _price(leg, _next_dep_after(leg, rest_earliest), True)
+        if rest["legal"]:
+            out["after_rest"].append(dict(rest, index=i))
+
+    out["same_day"].sort(key=lambda o: o["dep_utc"])
+    out["after_rest"].sort(key=lambda o: o["dep_utc"])
+    out["same_day"] = out["same_day"][:limit]
+    out["after_rest"] = out["after_rest"][:limit]
+    return out
+
+
+def _dec_to_hhmm(t):
+    t %= 24
+    h = int(t)
+    m = int(round((t - h) * 60))
+    if m == 60:
+        h, m = h + 1, 0
+    return f"{h % 24:02d}{m:02d}"
+
+
+def replay_picks(ap, legs, start, picks):
+    """Walk the legs the pilot picked, in order, from where the disruption
+    left them. Each pick says whether it was taken from the same-day list
+    or the after-rest one, so this can never place a leg differently from
+    the way it was offered — which is why the trip that gets committed is
+    the trip that was on screen.
+
+    Returns (steps, rests, state, error). `steps` and `rests` are in the
+    shape pbs_build.days_from_steps wants, so the same walk both previews
+    and commits.
+    """
+    station = start["station"]
+    avail = float(start["avail"])
+    legs_flown = int(start.get("legs_flown") or 0)
+    block_flown = float(start.get("block_flown") or 0.0)
+    report_utc = float(start["report_utc"])
+    day_number = int(start["day_number"])
+
+    steps, rests = [], []
+    for pick in picks:
+        idx, after_rest = pick["index"], bool(pick.get("after_rest"))
+        if idx < 0 or idx >= len(legs):
+            return [], [], None, "unknown leg in picks"
+        net = legs[idx]
+        if net["o"] != station:
+            return [], [], None, f"{net['f']} leaves {net['o']}, but you are at {station}"
+        if after_rest:
+            earliest = avail + Rules.DEBRIEF + Rules.MIN_REST + Rules.BRIEF
+        else:
+            earliest = avail + (mct_after_arrival(ap, station, station) if legs_flown else 0.0)
+        dep = _next_dep_after(net, earliest)
+        arr = dep + net["blk"]
+        if after_rest:
+            rests.append(round((dep - Rules.BRIEF) - (avail + Rules.DEBRIEF), 2))
+            day_number += 1
+            report_utc, legs_flown, block_flown = dep - Rules.BRIEF, 1, net["blk"]
+        else:
+            legs_flown += 1
+            block_flown += net["blk"]
+        steps.append(dict(
+            day=day_number,
+            leg=dict(f=net["f"], o=net["o"], d=net["d"], blk=net["blk"],
+                      fleet=net.get("fleet", "")),
+            dep=dep, arr=arr,
+        ))
+        station, avail = net["d"], arr
+
+    return steps, rests, {
+        "station": station, "avail": avail, "legs_flown": legs_flown,
+        "block_flown": block_flown, "report_utc": report_utc,
+        "day_number": day_number, "hbt": ap.off(station),
+    }, None
+
+
+def apply_steps(seq, dom, ap, duty_day, leg_index, prefix_steps, steps, rests):
+    """Commit a hand-built repair: whatever was flown before the disruption,
+    then exactly the legs the pilot picked. Unlike apply_recovery this
+    searches for nothing and decides nothing — the walk has already
+    happened in replay_picks, and this only renders it back into a
+    sequence."""
+    days = seq.get("duty_days") or []
+    day_idx = next((i for i, d in enumerate(days) if d["duty_day"] == duty_day), None)
+    if day_idx is None:
+        return None, ["duty_day not found"]
+    if not steps:
+        return None, ["nothing picked yet"]
+
+    all_steps = list(prefix_steps) + list(steps)
+    rendered_days = pbs_build.days_from_steps(ap, all_steps, rests, dom)
+    lines = pbs_format.sequence_lines(9999, rendered_days, 1, [])
+    reparsed = pbs_parser.parse_pbs("\n".join(lines) + "\n")
+    if not reparsed or not reparsed[0]["duty_days"]:
+        return None, ["internal error: could not reconstruct the repaired days"]
+    new_days = reparsed[0]["duty_days"]
+    for offset, rday in enumerate(new_days):
+        rday["duty_day"] = duty_day + offset
+
+    new_seq = copy.deepcopy(seq)
+    new_seq["duty_days"] = days[:day_idx] + new_days
+    _renumber(new_seq)
+    return new_seq, []
+
+
 def anchor_available(ap, disrupted_leg, kept_legs, available_local):
     """The other shape a disruption takes: the planned leg is NOT flown —
     it cancelled, or it is going so late that what actually gets flown has

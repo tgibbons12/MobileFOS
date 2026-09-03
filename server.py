@@ -3043,6 +3043,175 @@ def recover_options(seq_number):
     })
 
 
+def _disruption_start(ap, days, day, leg, leg_index, kind, at_hhmm, station_hint):
+    """Where the disruption leaves the crew, and in what duty state.
+
+    Returns (start, prefix_steps, error). `prefix_steps` is whatever they
+    genuinely flew before the repair begins — the legs earlier in the day,
+    plus the disrupted leg itself when it actually operated (a diversion or
+    an overrun) and not when it never left the gate.
+    """
+    day_legs = day.get("legs") or []
+    kept = day_legs[:leg_index]
+    drop = kind in ("late_departure", "cancelled")
+    try:
+        if drop:
+            station, avail = pairing_edit.anchor_available(ap, leg, kept, at_hhmm)
+            legs_flown = len(kept)
+            block_flown = sum(pairing_edit._bid_or_hhmm_span_to_dec(l) for l in kept)
+            disrupted_step = None
+        else:
+            station = (station_hint or leg.get("destination")) if kind == "diverted" \
+                else leg.get("destination")
+            dep_utc, avail, blk = pairing_edit.anchor_arrival(ap, leg, station, at_hhmm)
+            legs_flown = len(kept) + 1
+            block_flown = sum(pairing_edit._bid_or_hhmm_span_to_dec(l) for l in kept) + blk
+            disrupted_step = dict(
+                day=day["duty_day"],
+                leg=dict(f=leg.get("flight_number", ""), o=leg["origin"], d=station,
+                          blk=blk, fleet=leg.get("equipment", "")),
+                dep=dep_utc, arr=avail,
+            )
+    except (ValueError, KeyError) as e:
+        return None, None, f"invalid disruption data: {e}"
+
+    if kept:
+        first = kept[0]
+        report_utc = (pairing_edit._hhmm_to_dec(first["dep_local"])
+                      - ap.off(first["origin"]) - pairing_engine.Rules.BRIEF)
+    else:
+        report_utc = avail - pairing_engine.Rules.BRIEF
+
+    prefix_steps = [dict(
+        day=day["duty_day"],
+        leg=dict(f=l["flight_number"], o=l["origin"], d=l["destination"],
+                  blk=pairing_edit._bid_or_hhmm_span_to_dec(l), fleet=l.get("equipment", "")),
+        dep=pairing_edit._hhmm_to_dec(l["dep_local"]) - ap.off(l["origin"]),
+        arr=pairing_edit._hhmm_to_dec(l["arr_local"]) - ap.off(l["destination"]),
+    ) for l in kept]
+    if disrupted_step:
+        prefix_steps.append(disrupted_step)
+
+    return {
+        "station": station, "avail": avail, "legs_flown": legs_flown,
+        "block_flown": block_flown, "report_utc": report_utc,
+        "day_number": day["duty_day"], "hbt": ap.off(station),
+    }, prefix_steps, None
+
+
+@app.route("/pbs/sequences/<seq_number>/recover-step", methods=["POST"])
+def recover_step(seq_number):
+    """One step of building the repair by hand.
+
+    The pilot picks every leg; this only replays what they have picked so
+    far and says what the rules allow next. Nothing is ranked, nothing is
+    chosen, and no chain is searched for — the compute is theirs.
+
+    `picks` is the network leg indices chosen so far, in order. Replaying
+    them each time keeps this stateless, the same way every other route
+    here works, and means a Back is just a shorter list.
+    """
+    seq = next((x for x in _pbs_sequences() if x["seq"] == seq_number), None)
+    if not seq:
+        return jsonify({"error": "sequence not found"}), 404
+
+    body = request.get_json(silent=True) or {}
+    try:
+        duty_day = int(body.get("duty_day"))
+        leg_index = int(body.get("leg_index"))
+        # Each pick says which list it came from. Inferring it here instead
+        # would let the replay disagree with what was actually offered —
+        # a leg can be legal only after a rest, and guessing "same day"
+        # because its clock time is earlier would rebuild a different trip
+        # from the one the pilot chose.
+        picks = [{"index": int(p["index"]), "after_rest": bool(p.get("after_rest"))}
+                 for p in (body.get("picks") or [])]
+    except (TypeError, ValueError, KeyError):
+        return jsonify({"error": "duty_day, leg_index and picks are required"}), 400
+    kind = (body.get("kind") or "").strip() or "late_departure"
+    if kind not in _DISRUPTION_LABELS:
+        return jsonify({"error": f"unknown disruption type {kind!r}"}), 400
+    at_hhmm = re.sub(r"[^0-9]", "", str(body.get("at") or ""))[:4]
+    if len(at_hhmm) != 4:
+        return jsonify({"error": "a time in HHMM is required"}), 400
+
+    days = seq.get("duty_days") or []
+    day = next((d for d in days if d.get("duty_day") == duty_day), None)
+    if not day:
+        return jsonify({"error": f"sequence has no duty day {duty_day}"}), 404
+    day_legs = day.get("legs") or []
+    if leg_index < 0 or leg_index >= len(day_legs):
+        return jsonify({"error": "no such leg on that day"}), 404
+    leg = day_legs[leg_index]
+    dom = days[0]["legs"][0]["origin"] if days and days[0].get("legs") else ""
+
+    legs_net, ap = pairing_engine.get_route_data()
+    drop = kind in ("late_departure", "cancelled")
+
+    startstate, _prefix, err = _disruption_start(
+        ap, days, day, leg, leg_index, kind, at_hhmm,
+        (body.get("station") or "").strip().upper())
+    if err:
+        return jsonify({"error": err}), 400
+
+    steps, _rests, endstate, err = pairing_edit.replay_picks(ap, legs_net, startstate, picks)
+    if err:
+        return jsonify({"error": err}), 400
+    station = endstate["station"]
+    avail = endstate["avail"]
+    legs_flown = endstate["legs_flown"]
+    block_flown = endstate["block_flown"]
+    report_utc = endstate["report_utc"]
+    day_number = endstate["day_number"]
+    # Label the trail with the day numbers the trip will actually end up
+    # with. replay_picks counts duty periods from the disrupted day, but a
+    # day left with no flying at all simply ceases to exist once the repair
+    # is rendered — so a preview that counted it would be one ahead of the
+    # trip the pilot gets.
+    _seen = sorted({st["day"] for st in steps})
+    _label = {d: duty_day + i for i, d in enumerate(_seen)}
+    trail = [{
+        "index": p["index"], "flight_number": st["leg"]["f"],
+        "origin": st["leg"]["o"], "destination": st["leg"]["d"],
+        "dep_local": pairing_edit._dec_to_hhmm(st["dep"] + ap.off(st["leg"]["o"])),
+        "arr_local": pairing_edit._dec_to_hhmm(st["arr"] + ap.off(st["leg"]["d"])),
+        "day": _label[st["day"]], "after_rest": bool(p.get("after_rest")),
+    } for p, st in zip(picks, steps)]
+
+    # The leg the pairing said to fly next, if the original trip still has
+    # one to offer from where they now stand.
+    planned = None
+    if not picks:
+        rest_today = day_legs[leg_index + 1:] if not drop else day_legs[leg_index:]
+        planned = next((l for l in rest_today if l.get("origin") == station), None)
+    else:
+        for d in days:
+            if d.get("duty_day", 0) < duty_day:
+                continue
+            planned = next((l for l in (d.get("legs") or [])
+                            if l.get("origin") == station), None)
+            if planned:
+                break
+
+    state = {"station": station, "avail": avail, "dlegs_today": legs_flown,
+             "dblk_today": block_flown, "duty_report_utc": report_utc,
+             "day_number": day_number, "hbt": endstate["hbt"]}
+    options = pairing_edit.step_options(ap, legs_net, state, planned=planned)
+
+    return jsonify({
+        "seq": seq_number, "duty_day": duty_day, "leg_index": leg_index,
+        "kind": kind, "at": at_hhmm, "domicile": dom,
+        "station": station, "at_home": station == dom and bool(picks),
+        "avail_local": pairing_edit._dec_to_hhmm(avail + ap.off(station)),
+        "day_number": _label.get(day_number, duty_day), "legs_today": legs_flown,
+        "block_today": round(block_flown, 2),
+        "trail": trail, "options": options,
+        "repair_window_end": _repair_window_end(
+            at_hhmm, day.get("report") or "",
+            leg_index > 0 or duty_day > (days[0].get("duty_day") if days else 1)),
+    })
+
+
 @app.route("/pbs/sequences/<seq_number>/recover-accept", methods=["POST"])
 def recover_accept(seq_number):
     """Takes one option from /recover-options and makes it the trip.
@@ -3066,17 +3235,26 @@ def recover_accept(seq_number):
     body = request.get_json(silent=True) or {}
     cand = body.get("candidate") or {}
     tier = (body.get("tier") or "").strip()
-    if tier not in ("day_intact", "same_length", "get_home"):
+    if tier not in ("manual", "day_intact", "same_length", "get_home"):
         return jsonify({"error": f"unknown tier {tier!r}"}), 400
+    picks, chain = [], []
+    day_number = dlegs_today = duty_report_utc = total_days = 0
+    dblk_today = 0.0
     try:
         duty_day = int(body.get("duty_day"))
         leg_index = int(body.get("leg_index"))
-        chain = [int(i) for i in cand["chain"]]
-        day_number = int(cand["day_number"])
-        dlegs_today = int(cand["dlegs_today"])
-        dblk_today = float(cand["dblk_today"])
-        duty_report_utc = float(cand["duty_report_utc"])
-        total_days = int(cand["total_days"])
+        if tier == "manual":
+            picks = [{"index": int(p["index"]), "after_rest": bool(p.get("after_rest"))}
+                     for p in (body.get("picks") or [])]
+            if not picks:
+                return jsonify({"error": "nothing picked yet"}), 400
+        else:
+            chain = [int(i) for i in cand["chain"]]
+            day_number = int(cand["day_number"])
+            dlegs_today = int(cand["dlegs_today"])
+            dblk_today = float(cand["dblk_today"])
+            duty_report_utc = float(cand["duty_report_utc"])
+            total_days = int(cand["total_days"])
     except (TypeError, ValueError, KeyError) as e:
         return jsonify({"error": f"incomplete candidate: {e}"}), 400
     kind = (body.get("kind") or "").strip() or "late_departure"
@@ -3120,7 +3298,19 @@ def recover_accept(seq_number):
         at_station = (body.get("station") or "").strip().upper() or leg.get("destination")
 
     legs_net, ap = pairing_engine.get_route_data()
-    if tier == "day_intact":
+    if tier == "manual":
+        startstate, prefix_steps, err = _disruption_start(
+            ap, days, day, leg, leg_index, kind, at_hhmm,
+            (body.get("station") or "").strip().upper())
+        if err:
+            return jsonify({"error": err}), 400
+        steps, rests, _end, err = pairing_edit.replay_picks(
+            ap, legs_net, startstate, picks)
+        if err:
+            return jsonify({"error": err}), 400
+        new_seq, errs = pairing_edit.apply_steps(
+            seq, dom, ap, duty_day, leg_index, prefix_steps, steps, rests)
+    elif tier == "day_intact":
         new_seq, errs = pairing_edit.apply_day_patch(
             seq, dom, ap, legs_net, duty_day, leg_index,
             at_hhmm if signed else None,
@@ -9449,6 +9639,7 @@ async function resolveLegEdit(seq, action){
 // because the pilot should not have to know that it changes the answer.
 // ---------------------------------------------------------------------
 let _recSeq = null, _recDay = null, _recLegIndex = null, _recKind = 'late_departure';
+let _recAt = '', _recStation = '';
 
 const _REC_KINDS = [
   ['late_departure', 'Late Departure', 'Still at the gate, going later'],
@@ -9585,12 +9776,6 @@ function renderRecovery(){
   body.appendChild(results);
 }
 
-const _REC_TIER_LABEL = {
-  day_intact:  ['Trip Preserved', 'Reaches this day\u2019s planned destination \u2014 every later day is unchanged'],
-  same_length: ['Same Length', 'Rebuilt to domicile without adding a day'],
-  get_home:    ['Get Home', 'Back to domicile, and it costs extra days'],
-};
-
 // A response that isn't JSON is the failure mode this app keeps hitting —
 // a proxy error page, a redirect to the login form, a route that isn't
 // deployed yet. response.json() then throws the browser's own opaque
@@ -9609,214 +9794,234 @@ async function readJson(r){
   }
 }
 
+// The pilot builds the repair, one leg at a time. Nothing here ranks or
+// chooses: the server says what the rules allow from where they are
+// standing, and every step of the trip is a tap. `_recPicks` is the whole
+// state — each entry says which network leg and whether it was taken
+// after a rest, so Back is just dropping the last one.
+let _recPicks = [];
+let _recStep = null;
+
 async function submitRecovery(){
   const at = (document.getElementById('rec-at').value || '').replace(/[^0-9]/g, '');
-  const results = document.getElementById('rec-results');
   if(at.length !== 4){ showToast('Enter a time as HHMM'); return; }
-  const station = (document.getElementById('rec-station') || {}).value;
-  results.innerHTML = '';
-  showLoading(results);
-  let data;
-  try {
-    const r = await fetch('/pbs/sequences/' + encodeURIComponent(_recSeq.seq) + '/recover-options', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({duty_day: _recDay, leg_index: _recLegIndex,
-                            kind: _recKind, at: at, station: station || ''}),
-    });
-    data = await readJson(r);
-    if(!r.ok){ results.innerHTML = '<p class="placeholder-note">' + (data.error || 'Search failed') + '</p>'; return; }
-  } catch(e) { results.innerHTML = '<p class="placeholder-note">Request failed: ' + e + '</p>'; return; }
-  renderRecoveryOptions(data);
+  _recAt = at;
+  _recStation = (document.getElementById('rec-station') || {}).value || '';
+  _recPicks = [];
+  await loadRecoveryStep();
 }
 
-function renderRecoveryOptions(data){
-  _RECDATA = data;
-  _RECPICK = null;
+async function loadRecoveryStep(){
   const results = document.getElementById('rec-results');
   results.innerHTML = '';
-
-  // What the app worked out for itself, stated plainly — the duty state
-  // changes which options are legal, so it should not be invisible.
-  const state = document.createElement('div');
-  state.style.cssText = 'padding:12px 14px;font-size:12.5px;color:var(--label);line-height:1.6;';
-  state.textContent = data.ffd_signed
-    ? ('Fit for Duty signed \u2014 duty is running, so only what fits the current duty period is offered.'
-       + (data.repair_window_end ? ' Remain contactable until ' + data.repair_window_end + '.' : ''))
-    : ('Fit for Duty not signed \u2014 the duty day has not started, so you can be fully reassigned.'
-       + (data.repair_window_end ? ' Remain contactable until ' + data.repair_window_end + '.' : ''));
-  results.appendChild(state);
-
-  const opts = data.options || [];
-  if(!opts.length){
-    const none = document.createElement('p');
-    none.className = 'placeholder-note';
-    none.style.padding = '14px';
-    none.textContent = 'No legal recovery found from ' + data.station + ' at ' + data.at + '.';
-    results.appendChild(none);
-    return;
+  showLoading(results);
+  try {
+    const r = await fetch('/pbs/sequences/' + encodeURIComponent(_recSeq.seq) + '/recover-step', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({duty_day: _recDay, leg_index: _recLegIndex, kind: _recKind,
+                            at: _recAt, station: _recStation, picks: _recPicks}),
+    });
+    const data = await readJson(r);
+    if(!r.ok){ results.innerHTML = '<p class="placeholder-note">' + (data.error || 'Could not read your options') + '</p>'; return; }
+    _recStep = data;
+    renderRecoveryStep(data);
+  } catch(e){
+    results.innerHTML = '<p class="placeholder-note">' + e.message + '</p>';
   }
-  opts.forEach(tier => {
-    const [name, hint] = _REC_TIER_LABEL[tier.tier] || [tier.tier, ''];
-    const panel = document.createElement('div');
-    panel.className = 'panel';
-    const hdr = document.createElement('div');
-    hdr.className = 'panel-card-hdr';
-    hdr.textContent = name + '  (' + tier.candidates.length + ')';
-    panel.appendChild(hdr);
+}
+
+function _recOptionRow(o, label, onPick){
+  const row = document.createElement('div');
+  row.className = 'doc-row';
+  row.style.cursor = 'pointer';
+  const left = document.createElement('div');
+  const code = document.createElement('div');
+  code.className = 'code';
+  code.textContent = (o.flight_number || '----') + '   ' + o.origin + '-' + o.destination;
+  const desc = document.createElement('div');
+  desc.className = 'desc';
+  const bits = [o.dep_local + ' - ' + o.arr_local];
+  if(o.after_rest) bits.push('next duty day');
+  else bits.push('leg ' + o.legs_today + ' of the day');
+  bits.push(o.fdp_used.toFixed(1) + 'h of ' + o.fdp_cap.toFixed(1) + 'h FDP');
+  desc.textContent = bits.join('  \u00b7  ');
+  left.appendChild(code); left.appendChild(desc);
+  row.appendChild(left);
+  if(label){
+    const tag = document.createElement('div');
+    tag.className = 'actions';
+    tag.style.cssText = 'color:var(--blue);font-size:12px;font-weight:600;';
+    tag.textContent = label;
+    row.appendChild(tag);
+  }
+  row.onclick = onPick;
+  return row;
+}
+
+function _recPanel(title, hint){
+  const panel = document.createElement('div');
+  panel.className = 'panel';
+  const hdr = document.createElement('div');
+  hdr.className = 'panel-card-hdr';
+  hdr.textContent = title;
+  panel.appendChild(hdr);
+  if(hint){
     const sub = document.createElement('div');
     sub.style.cssText = 'padding:8px 14px 4px;font-size:12px;color:var(--label);';
     sub.textContent = hint;
     panel.appendChild(sub);
-    tier.candidates.forEach((cand, i) => {
+  }
+  return panel;
+}
+
+function renderRecoveryStep(d){
+  const results = document.getElementById('rec-results');
+  results.innerHTML = '';
+
+  const state = document.createElement('div');
+  state.style.cssText = 'padding:12px 14px;font-size:12.5px;color:var(--label);line-height:1.6;';
+  state.textContent = 'You are at ' + d.station + ' from ' + d.avail_local
+    + ' \u2014 day ' + d.day_number + ', ' + d.legs_today
+    + (d.legs_today === 1 ? ' leg' : ' legs') + ' and ' + d.block_today.toFixed(1) + 'h block so far.'
+    + (d.repair_window_end ? ' Remain contactable until ' + d.repair_window_end + '.' : '');
+  results.appendChild(state);
+
+  // What has been built so far, and a way back out of it.
+  if(d.trail.length){
+    const built = _recPanel('Your Repair So Far', '');
+    d.trail.forEach(t => {
       const row = document.createElement('div');
       row.className = 'doc-row';
       const left = document.createElement('div');
       const code = document.createElement('div');
       code.className = 'code';
-      // The engine hands back network leg INDICES in `chain` plus a
-      // station-by-station `routing`; the routing is what a pilot reads.
-      const routing = cand.routing || [];
-      code.textContent = routing.length ? routing.join(' \u2192 ')
-                                        : ('Option ' + (i + 1));
+      code.textContent = 'DAY ' + t.day + '   ' + (t.flight_number || '----')
+        + '   ' + t.origin + '-' + t.destination;
       const desc = document.createElement('div');
       desc.className = 'desc';
-      const lpd = cand.legs_per_day || [];
-      const bits = [];
-      if(cand.total_days) bits.push(cand.total_days + (cand.total_days === 1 ? ' day' : ' days'));
-      if(lpd.length) bits.push(lpd.join('/') + (lpd.length > 1 || lpd[0] !== 1 ? ' legs' : ' leg'));
-      if(cand.block) bits.push(cand.block.toFixed(1) + 'h block');
-      desc.textContent = bits.join('  \u00b7  ');
+      desc.textContent = t.dep_local + ' - ' + t.arr_local + (t.after_rest ? '   after rest' : '');
       left.appendChild(code); left.appendChild(desc);
       row.appendChild(left);
-      row.style.cursor = 'pointer';
-      const mark = document.createElement('div');
-      mark.className = 'actions rec-pick';
-      mark.style.cssText = 'color:var(--blue);font-size:12px;';
-      row.appendChild(mark);
-      panel.appendChild(row);
-      // The legs themselves, folded away until this option is the one
-      // being considered — a routing line says where, not what you fly.
-      const detail = document.createElement('div');
-      detail.className = 'rec-detail';
-      detail.hidden = true;
-      detail.appendChild(recoveryLegTable(cand.days || []));
-      panel.appendChild(detail);
-      row.onclick = () => pickRecoveryOption(tier.tier, cand, tier.reached_target, row, detail);
+      built.appendChild(row);
     });
-    results.appendChild(panel);
-  });
-
-  // Accept lives at the bottom of the whole list, not inside one tier —
-  // the choice is between every option shown, not within a group.
-  const foot = document.createElement('div');
-  foot.style.cssText = 'padding:14px;';
-  const btn = document.createElement('button');
-  btn.className = 'docs-btn';
-  btn.id = 'rec-accept-btn';
-  btn.disabled = true;
-  btn.textContent = 'Select an option above';
-  btn.onclick = acceptRecoveryOption;
-  foot.appendChild(btn);
-  const note = document.createElement('div');
-  note.id = 'rec-accept-note';
-  note.style.cssText = 'padding:8px 2px 0;font-size:12px;color:var(--label);';
-  foot.appendChild(note);
-  results.appendChild(foot);
-}
-
-// The option the pilot has tapped, held until they accept it.
-let _RECPICK = null;
-let _RECDATA = null;
-
-// One option's own day-by-day legs, in the shape the pairing itself is
-// read: report and release bracketing the day, flight number, times, and
-// city pair per leg.
-function recoveryLegTable(days){
-  const wrap = document.createElement('div');
-  wrap.style.cssText = 'padding:4px 14px 14px;';
-  if(!days.length){
-    const p = document.createElement('div');
-    p.style.cssText = 'font-size:12px;color:var(--label);';
-    p.textContent = 'No leg detail available for this option.';
-    wrap.appendChild(p);
-    return wrap;
+    const undo = document.createElement('div');
+    undo.style.cssText = 'padding:12px 14px;';
+    const ub = document.createElement('button');
+    ub.type = 'button';
+    ub.className = 'docs-btn';
+    ub.style.cssText = 'border-radius:7px;background:var(--card);color:var(--label);border:1px solid var(--border);';
+    ub.textContent = 'Undo Last Leg';
+    ub.onclick = () => { _recPicks.pop(); loadRecoveryStep(); };
+    undo.appendChild(ub);
+    built.appendChild(undo);
+    results.appendChild(built);
   }
-  days.forEach(day => {
-    const hdr = document.createElement('div');
-    hdr.style.cssText = 'font-size:11px;letter-spacing:.6px;color:var(--label);'
-      + 'margin:10px 0 4px;text-transform:uppercase;';
-    const bracket = [day.report ? ('RPT ' + day.report) : '',
-                     day.release ? ('RLS ' + day.release) : ''].filter(Boolean).join('   ');
-    hdr.textContent = 'Day ' + day.duty_day + (bracket ? ('   ' + bracket) : '');
-    wrap.appendChild(hdr);
-    (day.legs || []).forEach(l => {
-      const line = document.createElement('div');
-      line.style.cssText = 'font-family:var(--mono);font-size:12.5px;color:var(--value);'
-        + 'padding:3px 0;display:flex;gap:10px;';
-      const flt = document.createElement('span');
-      flt.style.cssText = 'min-width:52px;color:var(--blue);';
-      flt.textContent = l.flight_number || '----';
-      const pair = document.createElement('span');
-      pair.style.minWidth = '78px';
-      pair.textContent = (l.origin || '???') + '-' + (l.destination || '???');
-      const times = document.createElement('span');
-      times.style.color = 'var(--label)';
-      times.textContent = (l.dep_local || '----') + ' - ' + (l.arr_local || '----')
-        + (l.deadhead ? '  DHD' : '');
-      line.appendChild(flt); line.appendChild(pair); line.appendChild(times);
-      wrap.appendChild(line);
-    });
-  });
-  return wrap;
+
+  // Home. Offered the moment it is true, never forced.
+  if(d.at_home){
+    const done = _recPanel('Back at ' + d.domicile,
+                           'Your repair ends here. Accept it, or keep going.');
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'padding:12px 14px;';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'docs-btn';
+    btn.id = 'rec-accept-btn';
+    btn.textContent = 'Accept This Trip';
+    btn.onclick = acceptRecoverySteps;
+    wrap.appendChild(btn);
+    const note = document.createElement('div');
+    note.id = 'rec-accept-note';
+    note.style.cssText = 'padding:8px 2px 0;font-size:12px;color:var(--label);';
+    wrap.appendChild(note);
+    done.appendChild(wrap);
+    results.appendChild(done);
+  }
+
+  // The leg the pairing gave you, answered first and on its own terms.
+  const pl = d.options.planned;
+  if(pl){
+    const panel = _recPanel('Your Next Planned Leg', '');
+    if(pl.as_planned.legal){
+      panel.appendChild(_recOptionRow(pl.as_planned, 'fly it',
+        () => pickRecoveryStep(pl.index, pl.as_planned.after_rest)));
+    } else {
+      const why = document.createElement('div');
+      why.style.cssText = 'padding:10px 14px;font-size:12.5px;color:var(--red);line-height:1.5;';
+      why.textContent = (pl.as_planned.flight_number || '----') + ' ' + pl.as_planned.origin
+        + '-' + pl.as_planned.destination + ' as scheduled: ' + pl.as_planned.why_not + '.';
+      panel.appendChild(why);
+      if(pl.delayed){
+        panel.appendChild(_recOptionRow(pl.delayed, 'delay',
+          () => pickRecoveryStep(pl.index, pl.delayed.after_rest)));
+      } else {
+        const none = document.createElement('div');
+        none.style.cssText = 'padding:0 14px 12px;font-size:12.5px;color:var(--label);';
+        none.textContent = 'It cannot be delayed into anything legal either \u2014 reassign below.';
+        panel.appendChild(none);
+      }
+    }
+    results.appendChild(panel);
+  }
+
+  const same = d.options.same_day || [];
+  if(same.length){
+    const panel = _recPanel('Reassign \u2014 Same Duty Day (' + same.length + ')',
+                            'Keeps today going, from ' + d.station);
+    same.forEach(o => panel.appendChild(_recOptionRow(o, '',
+      () => pickRecoveryStep(o.index, false))));
+    results.appendChild(panel);
+  }
+
+  const rest = d.options.after_rest || [];
+  if(rest.length){
+    const panel = _recPanel('Reassign \u2014 After Rest (' + rest.length + ')',
+                            'Ends the day here and reports fresh at ' + d.station);
+    rest.forEach(o => panel.appendChild(_recOptionRow(o, '',
+      () => pickRecoveryStep(o.index, true))));
+    results.appendChild(panel);
+  }
+
+  if(!pl && !same.length && !rest.length){
+    const none = document.createElement('p');
+    none.className = 'placeholder-note';
+    none.style.padding = '14px';
+    none.textContent = 'Nothing can legally be flown from ' + d.station + ' from ' + d.avail_local + '.';
+    results.appendChild(none);
+  }
 }
 
-function pickRecoveryOption(tier, cand, reachedTarget, row, detail){
-  _RECPICK = { tier: tier, candidate: cand, reached_target: reachedTarget };
-  document.querySelectorAll('#rec-results .doc-row').forEach(r => {
-    r.style.background = '';
-    const m = r.querySelector('.rec-pick');
-    if(m) m.textContent = '';
-  });
-  document.querySelectorAll('#rec-results .rec-detail').forEach(d => { d.hidden = true; });
-  if(detail) detail.hidden = false;
-  row.style.background = 'var(--bg)';
-  const m = row.querySelector('.rec-pick');
-  if(m) m.textContent = 'selected';
-  const btn = document.getElementById('rec-accept-btn');
-  if(btn){ btn.disabled = false; btn.textContent = 'Accept Reassignment'; }
+function pickRecoveryStep(index, afterRest){
+  _recPicks.push({index: index, after_rest: !!afterRest});
+  loadRecoveryStep();
 }
 
-async function acceptRecoveryOption(){
-  if(!_RECPICK || !_RECDATA) return;
+async function acceptRecoverySteps(){
+  if(!_recStep || !_recPicks.length) return;
   const btn = document.getElementById('rec-accept-btn');
   const note = document.getElementById('rec-accept-note');
   btn.disabled = true;
   btn.textContent = 'Reassigning\u2026';
   note.textContent = '';
   try {
-    const r = await fetch('/pbs/sequences/' + encodeURIComponent(_RECDATA.seq) + '/recover-accept', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+    const r = await fetch('/pbs/sequences/' + encodeURIComponent(_recSeq.seq) + '/recover-accept', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
-        duty_day: _RECDATA.duty_day, leg_index: _RECDATA.leg_index,
-        kind: _RECDATA.kind, at: _RECDATA.at, station: _RECDATA.station,
-        tier: _RECPICK.tier, candidate: _RECPICK.candidate,
-        reached_target: _RECPICK.reached_target,
+        duty_day: _recDay, leg_index: _recLegIndex, kind: _recKind,
+        at: _recAt, station: _recStation, tier: 'manual', picks: _recPicks,
       }),
     });
     const d = await readJson(r);
-    if(!r.ok) throw new Error(d.error || 'could not apply this option');
-    note.textContent = 'Reassigned. Your new pairing is in Messages.';
+    if(!r.ok) throw new Error(d.error || 'could not apply this trip');
+    note.textContent = 'Reassigned as SEQ ' + d.seq + '. Your new pairing is in Messages.';
     btn.textContent = 'Reassigned';
-    _RECPICK = null;
     paintMessageBadge(d.unacknowledged || 0);
-    // The trip has changed underneath us — hand the detail view the
-    // repaired sequence, not the one we opened with.
     _recSeq = d.sequence || _recSeq;
-    setTimeout(closeRecovery, 1200);
+    _recPicks = [];
+    setTimeout(closeRecovery, 1400);
   } catch(e){
     btn.disabled = false;
-    btn.textContent = 'Accept Reassignment';
+    btn.textContent = 'Accept This Trip';
     note.style.color = 'var(--red)';
     note.textContent = e.message;
   }
