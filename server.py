@@ -395,6 +395,31 @@ def _ensure_columns():
         with db.engine.begin() as conn:
             conn.execute(sa_text("ALTER TABLE users ADD COLUMN last_seen TIMESTAMP"))
         LOG.info("Migrated: added users.last_seen")
+    # Message.body started life as String(200) and was widened to Text when
+    # a reassignment began carrying a whole repaired pairing. The model
+    # change alone is invisible to an existing database: SQLite ignores the
+    # length entirely (so local development never noticed), while Postgres
+    # enforces it and rejects the insert — "value too long for type
+    # character varying(200)" — which surfaced as a 500 on recover-accept.
+    # SQLite is skipped rather than migrated: it does not enforce a VARCHAR
+    # length in the first place (nothing to fix), and it has no ALTER COLUMN
+    # TYPE, so attempting it would only fail.
+    if db.engine.dialect.name != "sqlite":
+        for col in inspector.get_columns("messages"):
+            if col["name"] != "body":
+                continue
+            if getattr(col["type"], "length", None) is not None:
+                try:
+                    with db.engine.begin() as conn:
+                        conn.execute(sa_text("ALTER TABLE messages ALTER COLUMN body TYPE TEXT"))
+                    LOG.info("Migrated: widened messages.body to TEXT")
+                except Exception as e:
+                    # Never let a migration stop the app from booting — the
+                    # symptom without it is one failing message insert, not
+                    # a dead deployment.
+                    LOG.error(f"Could not widen messages.body to TEXT: {e}")
+            break
+
     existing_pbs = {c["name"] for c in inspector.get_columns("pbs_imports")}
     if "pending_edits" not in existing_pbs:
         with db.engine.begin() as conn:
