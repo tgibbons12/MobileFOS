@@ -3261,6 +3261,37 @@ def recover_step(seq_number):
                 "stopped_because": stopped,
             }
 
+    # The first question a stranded crew asks: how do I get home, and does
+    # it still fit the trip. Offered for the two disruptions that genuinely
+    # break the plan — a cancellation and a diversion — where a late
+    # departure or arrival is usually answered by delaying the day.
+    route = None
+    if not picks and kind in ("cancelled", "diverted"):
+        _ex = [i for i, l in enumerate(legs_net)
+               if cancelled_key and (str(l["f"]).strip(), l["o"], l["d"]) == cancelled_key]
+        try:
+            rh = pairing_edit.route_home(
+                seq, dom, ap, legs_net, duty_day, leg_index,
+                startstate["station"], at_hhmm,
+                drop_disrupted=drop, exclude_idx=_ex)
+        except Exception as e:
+            LOG.warning(f"route_home failed for {seq_number} d{duty_day}: {e}")
+            rh = None
+        if rh:
+            _lbl = {i: duty_day + n for n, i in enumerate(sorted({st["day"] for st in rh["steps"]}))}
+            route = {
+                "picks": rh["picks"],
+                "extra_days": rh["extra_days"],
+                "ends_day": rh["ends_day"],
+                "original_days": rh["original_days"],
+                "legs": [{
+                    "flight_number": st["leg"]["f"], "origin": st["leg"]["o"],
+                    "destination": st["leg"]["d"], "day": _lbl[st["day"]],
+                    "dep_local": pairing_edit._dec_to_hhmm(st["dep"] + ap.off(st["leg"]["o"])),
+                    "arr_local": pairing_edit._dec_to_hhmm(st["arr"] + ap.off(st["leg"]["d"])),
+                } for st in rh["steps"]],
+            }
+
     state = {"station": station, "avail": avail, "dlegs_today": legs_flown,
              "dblk_today": block_flown, "duty_report_utc": report_utc,
              "day_number": day_number, "hbt": endstate["hbt"]}
@@ -3275,6 +3306,7 @@ def recover_step(seq_number):
         "day_number": _label.get(day_number, duty_day), "legs_today": legs_flown,
         "block_today": round(block_flown, 2),
         "trail": trail, "options": options, "cascade": cascade,
+        "route_home": route,
         "repair_window_end": _repair_window_end(
             at_hhmm, day.get("report") or "",
             leg_index > 0 or duty_day > (days[0].get("duty_day") if days else 1)),
@@ -10135,6 +10167,48 @@ function renderRecoveryStep(d){
     wrap.appendChild(note);
     done.appendChild(wrap);
     results.appendChild(done);
+  }
+
+  // The way home, as one option. First card, because on a cancellation or
+  // a diversion it is the question being asked.
+  if(d.route_home){
+    const rh = d.route_home;
+    const late = rh.extra_days > 0;
+    const panel = _recPanel('Back to ' + d.domicile,
+      late ? ('Home on day ' + rh.ends_day + ' \u2014 ' + rh.extra_days
+              + (rh.extra_days === 1 ? ' day' : ' days') + ' past the trip\u2019s '
+              + rh.original_days)
+           : ('Home by day ' + rh.ends_day + ' \u2014 the trip\u2019s own last day'));
+    rh.legs.forEach(l => {
+      const row = document.createElement('div');
+      row.className = 'doc-row';
+      const left = document.createElement('div');
+      const code = document.createElement('div');
+      code.className = 'code';
+      code.textContent = 'DAY ' + l.day + '   ' + (l.flight_number || '----')
+        + '   ' + l.origin + '-' + l.destination;
+      const desc = document.createElement('div');
+      desc.className = 'desc';
+      desc.textContent = l.dep_local + ' - ' + l.arr_local;
+      left.appendChild(code); left.appendChild(desc);
+      row.appendChild(left);
+      panel.appendChild(row);
+    });
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'padding:12px 14px;';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'docs-btn';
+    if(late){
+      btn.style.cssText = 'border-radius:7px;background:var(--card);color:var(--blue-dark);border:1px solid var(--blue-dark);';
+    }
+    btn.textContent = 'Take This Routing';
+    // Loaded as picks, not committed — it lands in the trail and can be
+    // undone a leg at a time like anything else.
+    btn.onclick = () => { _recPicks = rh.picks.slice(); loadRecoveryStep(); };
+    wrap.appendChild(btn);
+    panel.appendChild(wrap);
+    results.appendChild(panel);
   }
 
   // Delaying the whole day at once. Sits above the per-leg cards because

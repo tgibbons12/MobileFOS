@@ -534,6 +534,88 @@ def cascade_delay(ap, legs, start, planned_legs, picks_so_far=None, exclude=()):
     return picks, placed, stopped
 
 
+def route_home(seq, dom, ap, legs, duty_day, leg_index, at_station, at_hhmm,
+               drop_disrupted=False, exclude_idx=(), max_extra=2):
+    """A finished way back to domicile, as one option.
+
+    The step picker answers "what can I fly next"; this answers the
+    question a stranded crew actually asks first — how do I get home, and
+    does it still fit the trip I was given. The search targets `dom` and
+    is asked for the pairing's OWN length first: cancel on day 5 of 5 and
+    it must get home today; cancel on day 4 of 5 and it has day 5 to do it
+    in. Only if that fails does it widen a day at a time, so the answer
+    can say what it cost.
+
+    Returns {picks, legs, extra_days, total_days} or None. `picks` is in
+    the step picker's own currency, so taking this routing loads it as a
+    set of picks the pilot can still edit or undo, rather than a separate
+    kind of answer.
+    """
+    days = seq.get("duty_days") or []
+    original_days = days[-1]["duty_day"] if days else duty_day
+    excluded = set(exclude_idx)
+
+    for extra in range(max_extra + 1):
+        try:
+            cands, _violations = recover_from_disruption(
+                seq, dom, ap, legs, duty_day, leg_index, at_station, at_hhmm,
+                max_extra_days=extra, drop_disrupted=drop_disrupted,
+            )
+        except (ValueError, KeyError):
+            return None
+        # A cancelled flight cannot be part of the way home either.
+        cands = [c for c in cands if not (excluded & set(c["chain"]))]
+        if not cands:
+            continue
+
+        # recover_from_disruption ranks by block-per-day, which is the right
+        # measure when building a pairing for value and the wrong one for
+        # getting home: it put a SBA and a DFW turn ahead of the flight to
+        # domicile. Re-rank for the question actually being asked — fewest
+        # duty days, then home soonest, then fewest legs — walking only the
+        # shortest chains, since thousands can come back.
+        def _walk(c):
+            st, _ = pairing_engine.walk_from(
+                legs, ap, c["chain"], c["resume_station"], c["resume_utc"],
+                c["day_number"], c["dlegs_today"], c["dblk_today"],
+                c["duty_report_utc"])
+            return st
+
+        cands.sort(key=lambda c: len(c["chain"]))
+        scored = []
+        for c in cands[:60]:
+            st = _walk(c)
+            if not st:
+                continue
+            scored.append((len({x["day"] for x in st}), st[-1]["arr"], len(c["chain"]), c, st))
+        if not scored:
+            continue
+        scored.sort(key=lambda t: (t[0], t[1], t[2]))
+        _ndays, _home_utc, _nlegs, best, _steps = scored[0]
+
+        steps, _rests = pairing_engine.walk_from(
+            legs, ap, best["chain"], best["resume_station"], best["resume_utc"],
+            best["day_number"], best["dlegs_today"], best["dblk_today"],
+            best["duty_report_utc"],
+        )
+        # The picker's currency is (leg index, was it after a rest) — read
+        # the second half off the walk's own day numbering rather than
+        # guessing it from clock times.
+        picks, prev_day = [], best["day_number"]
+        for idx, st in zip(best["chain"], steps):
+            picks.append({"index": idx, "after_rest": st["day"] != prev_day})
+            prev_day = st["day"]
+        # What it actually costs is the day it really ends on, not the day
+        # budget the search was given — those differ, and quoting the
+        # budget claimed a day's delay for a routing that got home on time.
+        ends_day = duty_day + len({x["day"] for x in steps}) - 1
+        return {"chain": best["chain"], "steps": steps, "picks": picks,
+                "extra_days": max(0, ends_day - original_days),
+                "ends_day": ends_day,
+                "original_days": original_days}
+    return None
+
+
 def anchor_available(ap, disrupted_leg, kept_legs, available_local):
     """The other shape a disruption takes: the planned leg is NOT flown —
     it cancelled, or it is going so late that what actually gets flown has
@@ -650,6 +732,10 @@ def recover_from_disruption(seq, dom, ap, legs, duty_day, leg_index,
                 "total_days": total_days, "day_number": day_number,
                 "dlegs_today": dlegs_so_far, "dblk_today": dblk_so_far,
                 "duty_report_utc": rpt_utc,
+                # Where and when the chain resumes from, so a caller can
+                # walk it again without re-deriving the anchor.
+                "resume_station": actual_destination,
+                "resume_utc": actual_arrival_utc,
             })
         if candidates:
             break
