@@ -3273,24 +3273,29 @@ def recover_step(seq_number):
             rh = pairing_edit.route_home(
                 seq, dom, ap, legs_net, duty_day, leg_index,
                 startstate["station"], at_hhmm,
-                drop_disrupted=drop, exclude_idx=_ex)
+                drop_disrupted=drop, exclude_idx=_ex, limit=5)
         except Exception as e:
             LOG.warning(f"route_home failed for {seq_number} d{duty_day}: {e}")
-            rh = None
-        if rh:
-            _lbl = {i: duty_day + n for n, i in enumerate(sorted({st["day"] for st in rh["steps"]}))}
-            route = {
-                "picks": rh["picks"],
-                "extra_days": rh["extra_days"],
-                "ends_day": rh["ends_day"],
-                "original_days": rh["original_days"],
+            rh = []
+        route = []
+        for opt in (rh or []):
+            _lbl = {i: duty_day + n for n, i in enumerate(sorted({st["day"] for st in opt["steps"]}))}
+            route.append({
+                "picks": opt["picks"],
+                "extra_days": opt["extra_days"],
+                "ends_day": opt["ends_day"],
+                "original_days": opt["original_days"],
+                "block": opt["block"],
+                "legs_count": opt["legs_count"],
+                "routing": [opt["steps"][0]["leg"]["o"]] + [st["leg"]["d"] for st in opt["steps"]],
                 "legs": [{
                     "flight_number": st["leg"]["f"], "origin": st["leg"]["o"],
                     "destination": st["leg"]["d"], "day": _lbl[st["day"]],
                     "dep_local": pairing_edit._dec_to_hhmm(st["dep"] + ap.off(st["leg"]["o"])),
                     "arr_local": pairing_edit._dec_to_hhmm(st["arr"] + ap.off(st["leg"]["d"])),
-                } for st in rh["steps"]],
-            }
+                } for st in opt["steps"]],
+            })
+        route = route or None
 
     state = {"station": station, "avail": avail, "dlegs_today": legs_flown,
              "dblk_today": block_flown, "duty_report_utc": report_utc,
@@ -10169,45 +10174,80 @@ function renderRecoveryStep(d){
     results.appendChild(done);
   }
 
-  // The way home, as one option. First card, because on a cancellation or
-  // a diversion it is the question being asked.
-  if(d.route_home){
-    const rh = d.route_home;
-    const late = rh.extra_days > 0;
+  // The ways home. First card, because on a cancellation or a diversion
+  // that is the question being asked — and more than one answer, because
+  // the direct flight home is only right if you did not want the flying.
+  if(d.route_home && d.route_home.length){
+    const onTime = d.route_home.filter(o => o.extra_days === 0).length;
     const panel = _recPanel('Back to ' + d.domicile,
-      late ? ('Home on day ' + rh.ends_day + ' \u2014 ' + rh.extra_days
-              + (rh.extra_days === 1 ? ' day' : ' days') + ' past the trip\u2019s '
-              + rh.original_days)
-           : ('Home by day ' + rh.ends_day + ' \u2014 the trip\u2019s own last day'));
-    rh.legs.forEach(l => {
+      onTime ? (onTime + (onTime === 1 ? ' way' : ' ways') + ' home by day '
+                + d.route_home[0].original_days + ', the trip\u2019s own last day')
+             : ('Nothing gets home by day ' + d.route_home[0].original_days
+                + ' \u2014 these cost a day'));
+    d.route_home.forEach(opt => {
       const row = document.createElement('div');
       row.className = 'doc-row';
+      row.style.cursor = 'pointer';
       const left = document.createElement('div');
       const code = document.createElement('div');
       code.className = 'code';
-      code.textContent = 'DAY ' + l.day + '   ' + (l.flight_number || '----')
-        + '   ' + l.origin + '-' + l.destination;
+      code.textContent = (opt.routing || []).join('-');
       const desc = document.createElement('div');
       desc.className = 'desc';
-      desc.textContent = l.dep_local + ' - ' + l.arr_local;
+      const bits = [opt.legs_count + (opt.legs_count === 1 ? ' leg' : ' legs'),
+                    opt.block.toFixed(1) + 'h block'];
+      bits.push(opt.extra_days === 0
+        ? ('home day ' + opt.ends_day)
+        : ('home day ' + opt.ends_day + ' \u2014 +' + opt.extra_days
+           + (opt.extra_days === 1 ? ' day' : ' days')));
+      desc.textContent = bits.join('  \u00b7  ');
+      if(opt.extra_days > 0) desc.style.color = 'var(--red)';
       left.appendChild(code); left.appendChild(desc);
       row.appendChild(left);
       panel.appendChild(row);
+
+      // The legs, folded away until this routing is the one being read.
+      const detail = document.createElement('div');
+      detail.className = 'rh-detail';
+      detail.hidden = true;
+      const wrap = document.createElement('div');
+      wrap.style.cssText = 'padding:2px 14px 14px;';
+      opt.legs.forEach(l => {
+        const line = document.createElement('div');
+        line.style.cssText = 'font-size:13px;padding:3px 0;display:flex;gap:10px;'
+          + 'font-variant-numeric:tabular-nums;color:var(--value);';
+        const dy = document.createElement('span');
+        dy.style.cssText = 'color:var(--label);min-width:46px;';
+        dy.textContent = 'DAY ' + l.day;
+        const flt = document.createElement('span');
+        flt.style.cssText = 'color:var(--blue);min-width:46px;';
+        flt.textContent = l.flight_number || '----';
+        const pair = document.createElement('span');
+        pair.style.minWidth = '74px';
+        pair.textContent = l.origin + '-' + l.destination;
+        const tm = document.createElement('span');
+        tm.style.color = 'var(--label)';
+        tm.textContent = l.dep_local + ' - ' + l.arr_local;
+        line.appendChild(dy); line.appendChild(flt); line.appendChild(pair); line.appendChild(tm);
+        wrap.appendChild(line);
+      });
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'docs-btn';
+      btn.style.marginTop = '10px';
+      btn.textContent = 'Take This Routing';
+      btn.onclick = () => { _recPicks = opt.picks.slice(); loadRecoveryStep(); };
+      wrap.appendChild(btn);
+      detail.appendChild(wrap);
+      panel.appendChild(detail);
+
+      row.onclick = () => {
+        const open = !detail.hidden;
+        panel.querySelectorAll('.rh-detail').forEach(x => { x.hidden = true; });
+        panel.querySelectorAll('.doc-row').forEach(x => { x.style.background = ''; });
+        if(!open){ detail.hidden = false; row.style.background = 'var(--bg)'; }
+      };
     });
-    const wrap = document.createElement('div');
-    wrap.style.cssText = 'padding:12px 14px;';
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'docs-btn';
-    if(late){
-      btn.style.cssText = 'border-radius:7px;background:var(--card);color:var(--blue-dark);border:1px solid var(--blue-dark);';
-    }
-    btn.textContent = 'Take This Routing';
-    // Loaded as picks, not committed — it lands in the trail and can be
-    // undone a leg at a time like anything else.
-    btn.onclick = () => { _recPicks = rh.picks.slice(); loadRecoveryStep(); };
-    wrap.appendChild(btn);
-    panel.appendChild(wrap);
     results.appendChild(panel);
   }
 

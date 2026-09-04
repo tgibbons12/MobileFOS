@@ -535,7 +535,7 @@ def cascade_delay(ap, legs, start, planned_legs, picks_so_far=None, exclude=()):
 
 
 def route_home(seq, dom, ap, legs, duty_day, leg_index, at_station, at_hhmm,
-               drop_disrupted=False, exclude_idx=(), max_extra=2):
+               drop_disrupted=False, exclude_idx=(), max_extra=2, limit=5):
     """A finished way back to domicile, as one option.
 
     The step picker answers "what can I fly next"; this answers the
@@ -546,10 +546,10 @@ def route_home(seq, dom, ap, legs, duty_day, leg_index, at_station, at_hhmm,
     in. Only if that fails does it widen a day at a time, so the answer
     can say what it cost.
 
-    Returns {picks, legs, extra_days, total_days} or None. `picks` is in
-    the step picker's own currency, so taking this routing loads it as a
-    set of picks the pilot can still edit or undo, rather than a separate
-    kind of answer.
+    Returns a list of options, best first, or []. Each carries `picks` in
+    the step picker's own currency, so taking one loads it as a set of
+    picks the pilot can still edit or undo, rather than a separate kind of
+    answer.
     """
     days = seq.get("duty_days") or []
     original_days = days[-1]["duty_day"] if days else duty_day
@@ -570,10 +570,12 @@ def route_home(seq, dom, ap, legs, duty_day, leg_index, at_station, at_hhmm,
 
         # recover_from_disruption ranks by block-per-day, which is the right
         # measure when building a pairing for value and the wrong one for
-        # getting home: it put a SBA and a DFW turn ahead of the flight to
-        # domicile. Re-rank for the question actually being asked — fewest
-        # duty days, then home soonest, then fewest legs — walking only the
-        # shortest chains, since thousands can come back.
+        # getting home — it put a SBA turn and a DFW turn ahead of the
+        # flight to domicile. Rank for the question being asked, and hand
+        # back a SPREAD rather than one answer: the direct flight home is
+        # only the right choice if you did not want the flying. AUS-RDU,
+        # AUS-SAN-RDU and AUS-FLL-LGA-RDU can all get you home on the same
+        # day, and which of those you want is not the app's call.
         def _walk(c):
             st, _ = pairing_engine.walk_from(
                 legs, ap, c["chain"], c["resume_station"], c["resume_utc"],
@@ -581,39 +583,87 @@ def route_home(seq, dom, ap, legs, duty_day, leg_index, at_station, at_hhmm,
                 c["duty_report_utc"])
             return st
 
-        cands.sort(key=lambda c: len(c["chain"]))
-        scored = []
-        for c in cands[:60]:
+        # Thousands of chains can come back, so only a sample gets walked —
+        # but the sample has to span the choice, not one end of it. Taking
+        # the highest-block chains alone dropped the direct flight home
+        # before it was ever considered: MIA-RDU never appeared because it
+        # is the least flying, which is exactly why someone might want it.
+        # So: the fullest routings, the shortest ones, and the ones that
+        # land soonest.
+        _pool, _seen_id = [], set()
+        # The fourth key is the one that finds the routing most people
+        # actually want: the FULLEST day that still gets home today. A
+        # single duty period cannot exceed MAX_DUTY_BLOCK, so chains above
+        # that are certain to need another day and only crowd the sample —
+        # ranking what remains by block surfaces MIA-AUS-SAN-RDU instead of
+        # only MIA-RDU and a set of two-day options.
+        _one_day = [c for c in cands if c["block"] <= Rules.MAX_DUTY_BLOCK]
+        for _key, _src in ((lambda c: (c["total_days"], -c["block"]), cands),
+                           (lambda c: (c["total_days"], len(c["chain"]), c["block"]), cands),
+                           (lambda c: (c["total_days"], c["resume_utc"], len(c["chain"])), cands),
+                           (lambda c: -c["block"], _one_day)):
+            for c in sorted(_src, key=_key)[:50]:
+                _cid = id(c)
+                if _cid not in _seen_id:
+                    _seen_id.add(_cid)
+                    _pool.append(c)
+        walked = []
+        for c in _pool:
             st = _walk(c)
-            if not st:
-                continue
-            scored.append((len({x["day"] for x in st}), st[-1]["arr"], len(c["chain"]), c, st))
-        if not scored:
+            if st:
+                walked.append((c, st))
+        if not walked:
             continue
-        scored.sort(key=lambda t: (t[0], t[1], t[2]))
-        _ndays, _home_utc, _nlegs, best, _steps = scored[0]
 
-        steps, _rests = pairing_engine.walk_from(
-            legs, ap, best["chain"], best["resume_station"], best["resume_utc"],
-            best["day_number"], best["dlegs_today"], best["dblk_today"],
-            best["duty_report_utc"],
-        )
-        # The picker's currency is (leg index, was it after a rest) — read
-        # the second half off the walk's own day numbering rather than
-        # guessing it from clock times.
-        picks, prev_day = [], best["day_number"]
-        for idx, st in zip(best["chain"], steps):
-            picks.append({"index": idx, "after_rest": st["day"] != prev_day})
-            prev_day = st["day"]
-        # What it actually costs is the day it really ends on, not the day
-        # budget the search was given — those differ, and quoting the
-        # budget claimed a day's delay for a routing that got home on time.
-        ends_day = duty_day + len({x["day"] for x in steps}) - 1
-        return {"chain": best["chain"], "steps": steps, "picks": picks,
+        def _shape(c, st):
+            ndays = len({x["day"] for x in st})
+            return {
+                "cand": c, "steps": st, "ndays": ndays,
+                "home_utc": st[-1]["arr"],
+                "block": c["block"], "nlegs": len(c["chain"]),
+                "routing": tuple([c["resume_station"]] + [legs[i]["d"] for i in c["chain"]]),
+            }
+
+        shapes = [_shape(c, st) for c, st in walked]
+        # One entry per distinct routing — the same string of stations at a
+        # different time is not a different choice to make.
+        by_routing = {}
+        for sh in shapes:
+            k = sh["routing"]
+            if k not in by_routing or sh["home_utc"] < by_routing[k]["home_utc"]:
+                by_routing[k] = sh
+        uniq = list(by_routing.values())
+
+        quickest = min(uniq, key=lambda x: (x["ndays"], x["home_utc"], x["nlegs"]))
+        fullest = sorted(uniq, key=lambda x: (x["ndays"], -x["block"], x["home_utc"]))
+        chosen, seen = [], set()
+        for sh in [quickest] + fullest:
+            if sh["routing"] in seen:
+                continue
+            seen.add(sh["routing"])
+            chosen.append(sh)
+            if len(chosen) >= limit:
+                break
+
+        out = []
+        for sh in chosen:
+            c, st = sh["cand"], sh["steps"]
+            picks, prev_day = [], c["day_number"]
+            for idx, step in zip(c["chain"], st):
+                picks.append({"index": idx, "after_rest": step["day"] != prev_day})
+                prev_day = step["day"]
+            # What it costs is the day it really ends on, not the day budget
+            # the search was given — those differ, and quoting the budget
+            # claimed a day's delay for a routing that got home on time.
+            ends_day = duty_day + sh["ndays"] - 1
+            out.append({
+                "chain": c["chain"], "steps": st, "picks": picks,
+                "block": round(sh["block"], 1), "legs_count": sh["nlegs"],
                 "extra_days": max(0, ends_day - original_days),
-                "ends_day": ends_day,
-                "original_days": original_days}
-    return None
+                "ends_day": ends_day, "original_days": original_days,
+            })
+        return out
+    return []
 
 
 def anchor_available(ap, disrupted_leg, kept_legs, available_local):
