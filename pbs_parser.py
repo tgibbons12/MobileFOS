@@ -298,17 +298,41 @@ def mot_for_leg(day, leg_index, report_override=None):
         duty_total = float(day.get("duty"))
     except (TypeError, ValueError):
         duty_total = None
+
     if duty_total is not None:
+        # Slack is what the day has spare: the FDP it is allowed, less the
+        # duty it is planned to use. It is the same for every leg, so each
+        # leg's MOT is simply its own scheduled departure plus that slack.
+        #
+        # Anchoring on the leg's DEPARTURE is the whole point. Counting
+        # back from the FDP deadline by the duty still to come lands on the
+        # latest REPORT, not the latest push — the report-to-departure
+        # brief never got credited — so every MOT came out one brief early,
+        # and on a day planned tight against its FDP that put MOT before
+        # the departure it was supposed to be a limit on.
+        # `report` is the override when one applies, so slack is measured
+        # against the report actually in force — measuring it from the
+        # published one while shifting the departure counted the delay
+        # twice.
+        slack = fdp_end - _hhmm_to_dec(report) - duty_total
+        dep = legs[leg_index].get("dep_local")
+        if dep:
+            shift = 0.0
+            if report_override and day.get("report"):
+                shift = _hhmm_to_dec(report_override) - _hhmm_to_dec(day["report"])
+            return _dec_to_hhmm(_hhmm_to_dec(dep) + shift + slack)
+        # No published departure for this leg — fall through to the older
+        # count-back rather than returning nothing.
         time_used = sum(
             float(l.get("block") or 0) + float(l.get("ground") or 0)
             for l in legs[:leg_index]
         )
-        time_remaining = duty_total - time_used
-    else:
-        time_remaining = sum(
-            float(l.get("block") or 0) + float(l.get("ground") or 0)
-            for l in legs[leg_index:]
-        )
+        return _dec_to_hhmm(fdp_end - (duty_total - time_used))
+
+    time_remaining = sum(
+        float(l.get("block") or 0) + float(l.get("ground") or 0)
+        for l in legs[leg_index:]
+    )
     return _dec_to_hhmm(fdp_end - time_remaining)
 
 
