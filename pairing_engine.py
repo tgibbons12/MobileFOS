@@ -178,6 +178,7 @@ def load_legs_csv(csv_path, ap, fleets, opr=None, region=None):
             fl = (r[COL["FLEET"]] or "").strip().upper()
             op = (r[COL["OPR"]] or "").strip().upper()
             reg = (r[COL["REGION"]] or "").strip()
+            ac = (r[COL["AC"]] or "").strip().upper()
             o = (r[COL["ORIG"]] or "").strip().upper()
             d = (r[COL["DEST"]] or "").strip().upper()
             if not o or not d:
@@ -200,7 +201,10 @@ def load_legs_csv(csv_path, ap, fleets, opr=None, region=None):
                     continue
                 legs.append(dict(
                     f=str(fn or "").strip().replace(".0", ""), o=a, d=b,
-                    blk=bk, reg=reg, opr=op, fleet=fl,
+                    # `fleet` is the bid-pack grouping ("320/D"); `ac` is the
+                    # sub-fleet code a PBS line actually prints in its EQ
+                    # column ("321R"), which is what decodes to a real type.
+                    blk=bk, reg=reg, opr=op, fleet=fl, ac=ac,
                     dep=dp - ap.off(a),
                 ))
     for l in legs:

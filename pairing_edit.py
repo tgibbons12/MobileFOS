@@ -154,11 +154,11 @@ def apply_leg_edit(seq, dom, ap, legs, duty_day, leg_index,
     for l in kept_legs:
         ss.append(dict(
             leg=dict(f=l["flight_number"], o=l["origin"], d=l["destination"],
-                      blk=_bid_or_hhmm_span_to_dec(l), fleet=l.get("equipment", "")),
+                      blk=_bid_or_hhmm_span_to_dec(l), fleet=l.get("equipment", ""), ac=l.get("equipment", "")),
             dep=_hhmm_to_dec(l["dep_local"]) - ap.off(l["origin"]),
             arr=_hhmm_to_dec(l["arr_local"]) - ap.off(l["destination"]),
         ))
-    ss.append(dict(leg=dict(f=fn, o=origin, d=new_destination, blk=blk, fleet=equip),
+    ss.append(dict(leg=dict(f=fn, o=origin, d=new_destination, blk=blk, fleet=equip, ac=equip),
                     dep=dep_utc, arr=arr_utc))
 
     rls_utc = ss[-1]["arr"] + Rules.DEBRIEF
@@ -437,7 +437,7 @@ def replay_picks(ap, legs, start, picks):
         steps.append(dict(
             day=day_number,
             leg=dict(f=net["f"], o=net["o"], d=net["d"], blk=net["blk"],
-                      fleet=net.get("fleet", "")),
+                      fleet=net.get("fleet", ""), ac=net.get("ac", "")),
             dep=dep, arr=arr,
         ))
         station, avail = net["d"], arr
@@ -694,7 +694,7 @@ def apply_recovery(seq, dom, ap, legs, duty_day, leg_index, actual_destination,
         prefix_steps.append(dict(
             day=duty_day,
             leg=dict(f=l["flight_number"], o=l["origin"], d=l["destination"],
-                      blk=_bid_or_hhmm_span_to_dec(l), fleet=l.get("equipment", "")),
+                      blk=_bid_or_hhmm_span_to_dec(l), fleet=l.get("equipment", ""), ac=l.get("equipment", "")),
             dep=_hhmm_to_dec(l["dep_local"]) - ap.off(l["origin"]),
             arr=_hhmm_to_dec(l["arr_local"]) - ap.off(l["destination"]),
         ))
@@ -705,7 +705,7 @@ def apply_recovery(seq, dom, ap, legs, duty_day, leg_index, actual_destination,
             day=duty_day,
             leg=dict(f=disrupted_leg.get("flight_number", ""), o=disrupted_leg["origin"],
                       d=actual_destination, blk=actual_leg_block,
-                      fleet=disrupted_leg.get("equipment", "")),
+                      fleet=disrupted_leg.get("equipment", ""), ac=disrupted_leg.get("equipment", "")),
             dep=original_dep_utc, arr=actual_arrival_utc,
         ))
 
@@ -951,7 +951,7 @@ def retry_shifted_plan(seq, dom, ap, legs, duty_day, leg_index, rest_start_local
         prefix_steps.append(dict(
             day=duty_day,
             leg=dict(f=l["flight_number"], o=l["origin"], d=l["destination"],
-                      blk=_bid_or_hhmm_span_to_dec(l), fleet=l.get("equipment", "")),
+                      blk=_bid_or_hhmm_span_to_dec(l), fleet=l.get("equipment", ""), ac=l.get("equipment", "")),
             dep=_hhmm_to_dec(l["dep_local"]) - ap.off(l["origin"]),
             arr=_hhmm_to_dec(l["arr_local"]) - ap.off(l["destination"]),
         ))
@@ -1119,7 +1119,7 @@ def apply_day_patch(seq, dom, ap, legs, duty_day, leg_index, rest_start_local,
         prefix_steps.append(dict(
             day=duty_day,
             leg=dict(f=l["flight_number"], o=l["origin"], d=l["destination"],
-                      blk=_bid_or_hhmm_span_to_dec(l), fleet=l.get("equipment", "")),
+                      blk=_bid_or_hhmm_span_to_dec(l), fleet=l.get("equipment", ""), ac=l.get("equipment", "")),
             dep=_hhmm_to_dec(l["dep_local"]) - ap.off(l["origin"]),
             arr=_hhmm_to_dec(l["arr_local"]) - ap.off(l["destination"]),
         ))

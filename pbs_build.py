@@ -57,7 +57,13 @@ def days_from_steps(ap, steps, rests, dom, eq_of=None):
                 grnd = ss[k + 1]["dep"] - s["arr"]
             rows.append(dict(
                 dp=dn, da=f'{dn}/{cal_day(s["dep"])}',
-                eq=(eq_of or {}).get(g["f"], g.get("fleet", "")[:2] or "32"),
+                # The leg's own sub-fleet code when it has one — a kept pack
+                # leg carries "321R", a network leg carries it as `ac`.
+                # Falling straight through to fleet[:2] printed every
+                # repaired pairing as "32", losing the type entirely.
+                eq=((eq_of or {}).get(g["f"])
+                    or g.get("ac") or g.get("eq")
+                    or g.get("fleet", "")[:2] or "32"),
                 flt=g["f"][:4],
                 orig=g["o"], dest=g["d"],
                 dep=f"{F.hhmm(L(s['dep'], g['o']))}/{F.hhmm(L(s['dep'], dom))}",

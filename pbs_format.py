@@ -35,9 +35,9 @@ import calendar as _cal
 from datetime import date, timedelta
 
 W_SEP   = 107
-C_ML, C_DEST, C_ADEP = 28, 30, 34
-R_BLOCK, R_SYNTH, R_TPAY, R_DUTY, R_TAFB, R_FDP = 54, 61, 69, 75, 81, 87
-C_CAL, CAL_W = 88, 3
+C_ML, C_DEST, C_ADEP = 30, 33, 37
+R_BLOCK, R_SYNTH, R_TPAY, R_DUTY, R_TAFB, R_FDP = 56, 63, 71, 77, 83, 89
+C_CAL, CAL_W = 90, 3
 DOW = ['MO','TU','WE','TH','FR','SA','SU']
 
 def _put(buf, col, text):
@@ -123,9 +123,13 @@ def sequence_lines(seq_no, days, ops, cal_rows, note=''):
 
         for lg in day['legs']:
             b = _blank()
-            _put(b, 0, str(lg['dp'])); _put(b, 2, lg['da']); _put(b, 6, lg['eq'])
-            _put(b, 9, lg['flt'])
-            _put(b, 14, lg['orig']); _put(b, 18, lg['dep'])
+            # EQ is four wide, as the real packs print it ("321R"), so the
+            # flight number starts at 11 rather than 9. Writing a four-char
+            # code into a three-char slot let the flight number overwrite
+            # its last character.
+            _put(b, 0, str(lg['dp'])); _put(b, 2, lg['da']); _put(b, 6, lg['eq'][:4])
+            _put(b, 11, lg['flt'])
+            _put(b, 16, lg['orig']); _put(b, 20, lg['dep'])
             if lg.get('ml'): _put(b, C_ML, lg['ml'])
             _put(b, C_DEST, lg['dest']); _put(b, C_ADEP, lg['arr'])
             _rt(b, R_BLOCK, bid(lg['blk']))
