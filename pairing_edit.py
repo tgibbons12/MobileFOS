@@ -634,10 +634,20 @@ def route_home(seq, dom, ap, legs, duty_day, leg_index, at_station, at_hhmm,
                 by_routing[k] = sh
         uniq = list(by_routing.values())
 
+        # Home soonest, then home earliest in the day. Ranking by MOST
+        # block instead offered AUS-MIA-PHX-RDU and AUS-YVR-LAX-RDU —
+        # transcontinental detours that happen to log hours — ahead of the
+        # AUS-DEN-RDU and AUS-BWI-RDU the pack itself is full of. Someone
+        # who wants the flying can take a longer one from further down the
+        # list; nobody wants to be shown only the wandering ones.
         quickest = min(uniq, key=lambda x: (x["ndays"], x["home_utc"], x["nlegs"]))
-        fullest = sorted(uniq, key=lambda x: (x["ndays"], -x["block"], x["home_utc"]))
+        soonest = sorted(uniq, key=lambda x: (x["ndays"], x["home_utc"], x["nlegs"]))
+        # A couple of fuller days, for whoever would rather fly than sit,
+        # but only ones that get home no later than the quickest does.
+        fullest = sorted([x for x in uniq if x["ndays"] == quickest["ndays"]],
+                         key=lambda x: (-x["block"], x["home_utc"]))
         chosen, seen = [], set()
-        for sh in [quickest] + fullest:
+        for sh in [quickest] + soonest[:3] + fullest + soonest:
             if sh["routing"] in seen:
                 continue
             seen.add(sh["routing"])
@@ -755,6 +765,13 @@ def recover_from_disruption(seq, dom, ap, legs, duty_day, leg_index,
     original_total_days = days[-1]["duty_day"] if days else duty_day
     floor_days = max(original_total_days, duty_day)
 
+    # The budget has to leave room to fly, not just to finish. Seeded on
+    # the pairing's last day with a budget of that same day, the search
+    # returns before expanding a single leg — which is why a disruption on
+    # day 4 of 4 produced nothing at all until the search was allowed a
+    # further day. Ending early is fine (exact_days is off), so the extra
+    # day costs nothing when it is not needed.
+    floor_days = max(floor_days, day_number + 1)
     candidates, tried = [], []
     for total_days in range(floor_days, floor_days + max_extra_days + 1):
         tried.append(total_days)

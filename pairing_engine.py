@@ -243,7 +243,8 @@ class Search:
         return self._search(dom, need, exact_days, seeds, target=dom)
 
     def run_from(self, station, earliest_utc, dom, day_number, dlegs_today, dblk_today,
-                 duty_report_utc, remaining_days, must_touch=None, target=None):
+                 duty_report_utc, remaining_days, must_touch=None, target=None,
+                 exact_days=False):
         """Resume the search mid-trip — e.g. recovering from a disruption.
         `station`/`earliest_utc` is where the trip actually stands right now;
         `day_number`/`dlegs_today`/`dblk_today`/`duty_report_utc` describe the
@@ -265,7 +266,14 @@ class Search:
                      dlegs=dlegs_today, dblk=dblk_today, rep=duty_report_utc,
                      chain=[], hit=not need)
         self.days = remaining_days
-        return self._search(dom, need, True, [seed], target=target or dom)
+        # exact_days=False by default here, unlike run(): a fresh pairing
+        # must be exactly the length it was bid for, but a recovery that
+        # gets home EARLY is not a failed recovery. Requiring the chain to
+        # consume the whole budget rejected every same-day way home — the
+        # search found AUS-DEN-RDU and AUS-CVG-RDU and then threw them away
+        # because they finished on day 4 when the budget said 5, leaving
+        # only their overnight cousins.
+        return self._search(dom, need, exact_days, [seed], target=target or dom)
 
     def _search(self, dom, need, exact_days, seeds, target=None):
         legs, ap, R = self.legs, self.ap, Rules
