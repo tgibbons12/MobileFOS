@@ -3211,9 +3211,24 @@ def recover_step(seq_number):
 
     # The leg the pairing said to fly next, if the original trip still has
     # one to offer from where they now stand.
+    # A cancelled flight is not flying, so it is neither the next planned
+    # leg nor an option anywhere else in this duty day — offering it back
+    # as "delay it" was reporting a cancellation and being told to take
+    # the cancelled flight. A late departure is the opposite case: that is
+    # the same flight, later, which is exactly what delay means.
+    cancelled_key = None
+    if kind == "cancelled":
+        cancelled_key = ((leg.get("flight_number") or "").strip(),
+                         leg.get("origin"), leg.get("destination"))
+    # Only until the day ends. After a rest it is a new duty day, and that
+    # flight number operates again.
+    exclude = () if (not cancelled_key or any(p["after_rest"] for p in picks)) \
+        else (cancelled_key,)
+
     planned = None
     if not picks:
-        rest_today = day_legs[leg_index + 1:] if not drop else day_legs[leg_index:]
+        _from = leg_index + 1 if (kind == "cancelled" or not drop) else leg_index
+        rest_today = day_legs[_from:]
         planned = next((l for l in rest_today if l.get("origin") == station), None)
     else:
         for d in days:
@@ -3228,11 +3243,12 @@ def recover_step(seq_number):
     # more than one leg left to place — a single leg is already one tap on
     # the planned-leg card, and a second button for the same action is
     # just noise.
-    rest_of_day = [l for l in (day_legs[leg_index:] if drop else day_legs[leg_index + 1:])]
+    rest_of_day = [l for l in day_legs[(leg_index if (drop and kind != "cancelled")
+                                        else leg_index + 1):]]
     cascade = None
     if len(rest_of_day) > 1 and not picks:
         c_picks, placed, stopped = pairing_edit.cascade_delay(
-            ap, legs_net, startstate, rest_of_day, picks)
+            ap, legs_net, startstate, rest_of_day, picks, exclude=exclude)
         if len(placed) > 1:
             cascade = {
                 "picks": c_picks,
@@ -3248,7 +3264,8 @@ def recover_step(seq_number):
     state = {"station": station, "avail": avail, "dlegs_today": legs_flown,
              "dblk_today": block_flown, "duty_report_utc": report_utc,
              "day_number": day_number, "hbt": endstate["hbt"]}
-    options = pairing_edit.step_options(ap, legs_net, state, planned=planned)
+    options = pairing_edit.step_options(ap, legs_net, state, planned=planned,
+                                        exclude=exclude)
 
     return jsonify({
         "seq": seq_number, "duty_day": duty_day, "leg_index": leg_index,

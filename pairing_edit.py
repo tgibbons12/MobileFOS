@@ -277,7 +277,7 @@ def _next_dep_after(leg, earliest_utc):
     return dep
 
 
-def step_options(ap, legs, state, planned=None, limit=40):
+def step_options(ap, legs, state, planned=None, limit=40, exclude=()):
     """Everything that can legally be flown next from where the crew is
     standing, and what each choice would cost. Nothing is ranked and
     nothing is chosen — the pilot picks; this only says what the rules
@@ -293,6 +293,11 @@ def step_options(ap, legs, state, planned=None, limit=40):
     A same_day option keeps the current duty period; an after_rest option
     ends it and reports fresh, so it starts a new duty day.
     """
+    # Flights that must not be offered at all — a cancelled leg is not an
+    # option, however legal its timing looks. Keyed (flight, origin, dest)
+    # so the same aircraft rotation elsewhere in the network is unaffected.
+    excluded = {(str(f).strip(), o, d) for f, o, d in exclude}
+
     stn = state["station"]
     avail = float(state["avail"])
     dlegs = int(state.get("dlegs_today") or 0)
@@ -353,7 +358,8 @@ def step_options(ap, legs, state, planned=None, limit=40):
         o = (planned.get("origin") or "").strip().upper()
         dst = (planned.get("destination") or "").strip().upper()
         fn = str(planned.get("flight_number") or "").strip()
-        pool = [(i, l) for i, l in enumerate(legs) if l["o"] == o and l["d"] == dst]
+        pool = [(i, l) for i, l in enumerate(legs) if l["o"] == o and l["d"] == dst
+                and (str(l["f"]).strip(), l["o"], l["d"]) not in excluded]
         exact = [(i, l) for i, l in pool if l["f"] == fn] if fn else []
         pool = exact or pool
         idx, leg = min(pool, key=lambda il: _next_dep_after(il[1], same_day_earliest),
@@ -371,6 +377,8 @@ def step_options(ap, legs, state, planned=None, limit=40):
     # 2. Everything else that leaves this station, priced the same way.
     for i, leg in enumerate(legs):
         if leg["o"] != stn:
+            continue
+        if (str(leg["f"]).strip(), leg["o"], leg["d"]) in excluded:
             continue
         same = _price(leg, _next_dep_after(leg, same_day_earliest), False)
         if same["legal"]:
@@ -478,7 +486,7 @@ def apply_steps(seq, dom, ap, duty_day, leg_index, prefix_steps, steps, rests):
     return new_seq, []
 
 
-def cascade_delay(ap, legs, start, planned_legs, picks_so_far=None):
+def cascade_delay(ap, legs, start, planned_legs, picks_so_far=None, exclude=()):
     """Delay a run of planned legs in one go, each to its next legal slot.
 
     Delaying one leg is rarely the whole story — push the first departure
@@ -509,7 +517,7 @@ def cascade_delay(ap, legs, start, planned_legs, picks_so_far=None):
             "station": state["station"], "avail": state["avail"],
             "dlegs_today": state["legs_flown"], "dblk_today": state["block_flown"],
             "duty_report_utc": state["report_utc"], "hbt": state["hbt"],
-        }, planned=pl, limit=0)
+        }, planned=pl, limit=0, exclude=exclude)
         chosen = None
         if opts["planned"]:
             if opts["planned"]["as_planned"]["legal"]:
