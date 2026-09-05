@@ -1606,17 +1606,39 @@ BOEING_TAKEOFF_THRUST = {
     },
     ('B763', 'CF6-80C2B6F'): {
         'param': 'N1',
-        # 763GE/toga.txt — 6 pressure altitudes x 13 OATs, 1000ft steps
-        'max_alt_gap': 1500,
+        # 767-300 / CF6-80C2B6F FCOM, PI.10.14 "Takeoff %N1" — transcribed
+        # from the manual, not from the sim file. The X-Plane copy of this
+        # table is abridged: no 9000ft column, no -20/-30/-40 rows, and
+        # 109.7 where the manual says 109.6 at 8000ft/30C.
+        'max_alt_gap': 2500,
         'max_temp_gap': 6,
-        'alt_snap': 500,
+        'alt_snap': 1000,
+        # "Based on engine bleed for packs on, EEC NORM or ALTN and anti-ice
+        # ON OR OFF" — anti-ice does not move N1 on this engine, so there is
+        # no anti-ice correction here, only packs.
+        'bleed_corrections': {
+            'packs_off': [(2000, 0.3), (4000, 0.4), (None, 0.5)],
+        },
+        # PI.10.18, TO1 = 10% thrust reduction. A derate is a different
+        # rating, not a reduction applied to this grid, so it gets its own.
+        'derates': {
+            'TO1': {
+                -1000: {55: 103.6, 50: 104.4, 45: 105, 40: 105.5, 35: 105.8, 30: 105.7, 25: 104.8, 20: 103.9, 15: 103.1, 10: 102.2, 0: 100.4, -10: 98.6, -20: 96.7, -30: 94.8, -40: 92.9, -50: 90.9},
+                0: {55: 103.6, 50: 104.4, 45: 105, 40: 105.4, 35: 105.8, 30: 106.2, 25: 105.3, 20: 104.4, 15: 103.6, 10: 102.7, 0: 100.9, -10: 99, -20: 97.2, -30: 95.3, -40: 93.3, -50: 91.3},
+                2000: {55: 103.4, 50: 104.4, 45: 105, 40: 105.5, 35: 105.8, 30: 106.2, 25: 106.4, 20: 105.5, 15: 104.6, 10: 103.7, 0: 101.9, -10: 100.1, -20: 98.2, -30: 96.3, -40: 94.3, -50: 92.3},
+                4000: {55: 103, 50: 104, 45: 104.8, 40: 105.3, 35: 105.7, 30: 106.1, 25: 106.6, 20: 106.4, 15: 105.5, 10: 104.6, 0: 102.8, -10: 100.9, -20: 99.1, -30: 97.1, -40: 95.2, -50: 93.2},
+                6000: {55: 102.7, 50: 103.6, 45: 104.6, 40: 105.2, 35: 105.6, 30: 106.1, 25: 106.5, 20: 106.9, 15: 106.4, 10: 105.5, 0: 103.7, -10: 101.8, -20: 99.9, -30: 98, -40: 96, -50: 94},
+                8000: {55: 102.5, 50: 103.4, 45: 104.4, 40: 105.1, 35: 105.6, 30: 106.1, 25: 106.6, 20: 106.9, 15: 107.1, 10: 106.4, 0: 104.5, -10: 102.6, -20: 100.7, -30: 98.8, -40: 96.8, -50: 94.7},
+            },
+        },
         'toga': {
-            -1000: {55: 106.1, 50: 106.8, 45: 107.5, 40: 108.2, 35: 109, 30: 109.1, 25: 108.2, 20: 107.3, 15: 106.4, 10: 105.5, 0: 103.6, -10: 101.7, -50: 93.8},
-            0: {55: 106.1, 50: 106.9, 45: 107.5, 40: 108.2, 35: 108.9, 30: 109.8, 25: 108.9, 20: 108, 15: 107.1, 10: 106.2, 0: 104.3, -10: 102.4, -50: 94.4},
-            2000: {55: 105.9, 50: 106.8, 45: 107.5, 40: 108.2, 35: 109, 30: 109.8, 25: 110.3, 20: 109.4, 15: 108.5, 10: 107.5, 0: 105.7, -10: 103.8, -50: 95.8},
-            4000: {55: 105.5, 50: 106.5, 45: 107.3, 40: 108, 35: 108.8, 30: 109.7, 25: 110.6, 20: 110.6, 15: 109.7, 10: 108.8, 0: 106.9, -10: 104.9, -50: 96.9},
-            6000: {55: 105.1, 50: 106.1, 45: 107, 40: 107.9, 35: 108.7, 30: 109.6, 25: 110.5, 20: 111.3, 15: 111, 10: 110, 0: 108.1, -10: 106.1, -50: 98},
-            8000: {55: 104.9, 50: 105.9, 45: 106.9, 40: 107.8, 35: 108.7, 30: 109.7, 25: 110.6, 20: 111.4, 15: 112, 10: 111.3, 0: 109.4, -10: 107.4, -50: 99.2},
+            -1000: {55: 106.1, 50: 106.8, 45: 107.5, 40: 108.2, 35: 109, 30: 109.1, 25: 108.2, 20: 107.3, 15: 106.4, 10: 105.5, 0: 103.6, -10: 101.7, -20: 99.8, -30: 97.9, -40: 95.9, -50: 93.8},
+            0: {55: 106.1, 50: 106.9, 45: 107.5, 40: 108.2, 35: 108.9, 30: 109.8, 25: 108.9, 20: 108, 15: 107.1, 10: 106.2, 0: 104.3, -10: 102.4, -20: 100.4, -30: 98.5, -40: 96.4, -50: 94.4},
+            2000: {55: 105.9, 50: 106.8, 45: 107.5, 40: 108.2, 35: 109, 30: 109.8, 25: 110.3, 20: 109.4, 15: 108.5, 10: 107.5, 0: 105.7, -10: 103.8, -20: 101.8, -30: 99.8, -40: 97.8, -50: 95.8},
+            4000: {55: 105.5, 50: 106.5, 45: 107.3, 40: 108, 35: 108.8, 30: 109.7, 25: 110.6, 20: 110.6, 15: 109.7, 10: 108.8, 0: 106.9, -10: 104.9, -20: 103, -30: 101, -40: 99, -50: 96.9},
+            6000: {55: 105.1, 50: 106.1, 45: 107, 40: 107.9, 35: 108.7, 30: 109.6, 25: 110.5, 20: 111.3, 15: 111, 10: 110, 0: 108.1, -10: 106.1, -20: 104.2, -30: 102.2, -40: 100.1, -50: 98},
+            8000: {55: 104.9, 50: 105.9, 45: 106.9, 40: 107.8, 35: 108.7, 30: 109.6, 25: 110.6, 20: 111.4, 15: 112, 10: 111.3, 0: 109.4, -10: 107.4, -20: 105.4, -30: 103.4, -40: 101.3, -50: 99.2},
+            9000: {55: 104.7, 50: 105.7, 45: 106.6, 40: 107.7, 35: 108.6, 30: 109.6, 25: 110.6, 20: 111.3, 15: 112.1, 10: 112.1, 0: 110.1, -10: 108.1, -20: 106.1, -30: 104, -40: 102, -50: 99.8},
         },
     },
     ('B763', 'PW4060'): {
@@ -1717,6 +1739,7 @@ def _interp_grid(grid, temp, altitude, max_alt_gap=None, max_temp_gap=None,
 
 
 def get_takeoff_thrust(icao_code, engine, oat, altitude, assumed_temp=None, packs_off=False, anti_ice=None,
+                       derate=None,
                        apu_on=False):
     """Max (TOGA) or reduced (FLEX) takeoff thrust for an Airbus.
 
@@ -1739,8 +1762,22 @@ def get_takeoff_thrust(icao_code, engine, oat, altitude, assumed_temp=None, pack
     # at the actual OAT, flex is it read at the assumed temperature. Only a
     # type whose flex grid was measured separately — the Airbus entries —
     # needs one of its own.
+    # A derate is a different thrust rating with its own published grid, not
+    # a percentage taken off this one — TO1 at 55C reads 103.6 where full
+    # thrust reads 106.1, which is not 10% of anything. Unknown derate on a
+    # type that has none returns nothing rather than quietly giving full
+    # thrust: showing TOGA to someone who asked for TO1 is the dangerous
+    # direction.
+    _grids = entry
+    if derate:
+        _grids = (entry.get('derates') or {}).get(str(derate).strip().upper())
+        if not _grids:
+            return None
+        if not isinstance(_grids, dict) or 'toga' not in _grids:
+            _grids = {'toga': _grids}
+
     value = _interp_grid(
-        (entry.get('flex') or entry.get('toga')) if flex else entry.get('toga'),
+        (_grids.get('flex') or _grids.get('toga')) if flex else _grids.get('toga'),
         assumed_temp if flex else oat, altitude,
         entry.get('max_alt_gap'), entry.get('max_temp_gap'),
         entry.get('alt_snap'),
@@ -1765,7 +1802,7 @@ def get_takeoff_thrust(icao_code, engine, oat, altitude, assumed_temp=None, pack
     # OAT. Without this a cold day would happily flex to an EPR the FCOM
     # forbids — the reduction is capped at 25% of thrust, not unlimited.
     if flex and entry.get('flex_min_epr') and oat is not None:
-        full = _interp_grid(entry.get('toga'), oat, altitude,
+        full = _interp_grid(_grids.get('toga'), oat, altitude,
                             entry.get('max_alt_gap'), entry.get('max_temp_gap'),
                             entry.get('alt_snap'))
         if full is not None:
