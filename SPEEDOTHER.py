@@ -1496,7 +1496,7 @@ BOEING_TAKEOFF_THRUST = {
     ('B752', 'PW2037'): {
         'param': 'EPR',
         # 752PW/toga.txt — 8 pressure altitudes x 13 OATs, 1000ft steps
-        'max_alt_gap': 1500,
+        'max_alt_gap': 2500,
         'max_temp_gap': 6,
         'alt_snap': 500,
         'toga': {
@@ -1528,7 +1528,7 @@ BOEING_TAKEOFF_THRUST = {
             'engine_wing_anti_ice': [(8000, -0.01), (None, -0.02)],
         },
         # 752RR/toga.txt — 7 pressure altitudes x 13 OATs, 1000ft steps
-        'max_alt_gap': 1500,
+        'max_alt_gap': 2500,
         'max_temp_gap': 6,
         'alt_snap': 500,
         'toga': {
@@ -1544,7 +1544,7 @@ BOEING_TAKEOFF_THRUST = {
     ('B753', 'PW2040'): {
         'param': 'EPR',
         # 753PW/toga.txt — 8 pressure altitudes x 13 OATs, 1000ft steps
-        'max_alt_gap': 1500,
+        'max_alt_gap': 2500,
         'max_temp_gap': 6,
         'alt_snap': 500,
         'toga': {
@@ -1561,7 +1561,7 @@ BOEING_TAKEOFF_THRUST = {
     ('B753', 'RB211-535E4-B'): {
         'param': 'EPR',
         # 753RR/toga.txt — 7 pressure altitudes x 13 OATs, 1000ft steps
-        'max_alt_gap': 1500,
+        'max_alt_gap': 2500,
         'max_temp_gap': 6,
         'alt_snap': 500,
         'toga': {
@@ -1577,7 +1577,7 @@ BOEING_TAKEOFF_THRUST = {
     ('B762', 'CF6-80A'): {
         'param': 'N1',
         # 762GE/toga.txt — 6 pressure altitudes x 15 OATs, 1000ft steps
-        'max_alt_gap': 1500,
+        'max_alt_gap': 2500,
         'max_temp_gap': 6,
         'alt_snap': 500,
         'toga': {
@@ -1592,7 +1592,7 @@ BOEING_TAKEOFF_THRUST = {
     ('B762', 'PW4056'): {
         'param': 'EPR',
         # 762PW/toga.txt — 6 pressure altitudes x 13 OATs, 1000ft steps
-        'max_alt_gap': 1500,
+        'max_alt_gap': 2500,
         'max_temp_gap': 6,
         'alt_snap': 500,
         'toga': {
@@ -1644,7 +1644,7 @@ BOEING_TAKEOFF_THRUST = {
     ('B763', 'PW4060'): {
         'param': 'EPR',
         # 763PW/toga.txt — 6 pressure altitudes x 13 OATs, 1000ft steps
-        'max_alt_gap': 1500,
+        'max_alt_gap': 2500,
         'max_temp_gap': 6,
         'alt_snap': 500,
         'toga': {
@@ -1659,7 +1659,7 @@ BOEING_TAKEOFF_THRUST = {
     ('B763', 'RB211-524H'): {
         'param': 'EPR',
         # 763RR/toga.txt — 6 pressure altitudes x 13 OATs, 1000ft steps
-        'max_alt_gap': 1500,
+        'max_alt_gap': 2500,
         'max_temp_gap': 6,
         'alt_snap': 500,
         'toga': {
@@ -1674,7 +1674,7 @@ BOEING_TAKEOFF_THRUST = {
     ('B764', 'CF6-80C2B8F'): {
         'param': 'N1',
         # 764GE/toga.txt — 6 pressure altitudes x 13 OATs, 1000ft steps
-        'max_alt_gap': 1500,
+        'max_alt_gap': 2500,
         'max_temp_gap': 6,
         'alt_snap': 500,
         'toga': {
@@ -1736,6 +1736,23 @@ def _interp_grid(grid, temp, altitude, max_alt_gap=None, max_temp_gap=None,
     if v_lo is None or v_hi is None:
         return None
     return v_lo + (v_hi - v_lo) * ((altitude - lo) / (hi - lo))
+
+
+def derate_from_thrust_setting(thrust_setting):
+    """'D-TO1' -> 'TO1'. SimBrief's TLR names the rating in <thrust_setting>:
+    D-TO1/D-TO2 for the derates, TO or TOGA for full thrust.
+
+    Anything else that looks like a derate is returned as-is rather than
+    treated as full thrust, so an unrecognised rating reaches
+    get_takeoff_thrust, finds no grid, and shows nothing. A blank is
+    honest; printing TOGA numbers to a crew who selected a derate is not.
+    """
+    s = (thrust_setting or '').strip().upper().replace(' ', '')
+    if not s or s in ('TO', 'TOGA', 'MAX', 'XXX'):
+        return None
+    if s.startswith('D-'):
+        s = s[2:]
+    return s or None
 
 
 def get_takeoff_thrust(icao_code, engine, oat, altitude, assumed_temp=None, packs_off=False, anti_ice=None,

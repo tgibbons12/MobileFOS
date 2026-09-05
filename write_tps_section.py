@@ -53,7 +53,8 @@ import textwrap
 import traceback
 from datetime import datetime, timezone
 
-from SPEEDOTHER import get_speed_other, get_reduced_thrust_n1, get_takeoff_thrust, engine_family
+from SPEEDOTHER import (get_speed_other, get_reduced_thrust_n1, get_takeoff_thrust,
+                        engine_family, derate_from_thrust_setting)
 from calm_wind_tlr import (atow_delta_lbs, interpolate_to_atow,
                            parse_calm_wind_tables)
 from ENGINEFAILPROC import get_airport_specific_altitudes
@@ -1671,8 +1672,14 @@ def write_takeoff_performance_string(
                 # bleed air, which is the manual's packs-off case. Stated
                 # rather than assumed silently: if that mapping is wrong,
                 # this is the one line to change.
+                # thr is this runway's <thrust_setting> from the TLR —
+                # "D-TO1" when the analysis used the first derate. bld is
+                # <bleed_setting>: ON means engine bleeds on, which is the
+                # manual's packs-on base case, so OFF is its packs-off
+                # correction.
                 _fx = get_takeoff_thrust(icaocode, engine_designation, temp, alt_val,
                                          assumed_temp=_fx_temp,
+                                         derate=derate_from_thrust_setting(thr),
                                          packs_off=(str(bld).strip().upper() == 'OFF'),
                                          anti_ice='engine' if anti_ice_on else None)
                 if _thr_param:
