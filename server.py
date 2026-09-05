@@ -4107,6 +4107,10 @@ OPERATOR_RELEASE_DEFAULTS = {
     "PFT": ("jetplan", "TLR"),
 }
 _RELEASE_FALLBACK = ("masterlog", "TPS")
+# The sheet a format is built around, used when the pilot picks a format but
+# leaves the sheet on "follow the operator". MASTERLOG renders either, so it
+# keeps whatever the operator asked for.
+FORMAT_REPORT_TYPES = {"jetplan": "TLR", "fos": "TPS"}
 
 
 def _release_choice(record):
@@ -4121,6 +4125,13 @@ def _release_choice(record):
     chosen_fmt = (getattr(current_user, "ofp_format", "") or "").strip().lower()
     if chosen_fmt and chosen_fmt != "auto":
         fmt = chosen_fmt
+        # A format carries its own sheet: JetPlan is a TLR layout, FOS a TPS
+        # one. Choosing JetPlan while the report type stayed on "follow the
+        # operator" left a NAC leg on TPS, so JetPlan rendered the WBD-headed
+        # weight-and-balance standalone — FOS pages, from the format picked
+        # to get away from them. Overriding the report type explicitly still
+        # wins, below.
+        rpt = FORMAT_REPORT_TYPES.get(fmt, rpt)
     chosen_rpt = (getattr(current_user, "report_type", "") or "").strip().upper()
     if chosen_rpt and chosen_rpt != "AUTO":
         rpt = chosen_rpt

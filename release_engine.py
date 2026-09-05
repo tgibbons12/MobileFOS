@@ -251,7 +251,12 @@ def _generate_with(generator, user_id, gate, arr_gate, generation, ofp_format):
             )
 
         rls_files = sorted(glob.glob(os.path.join(tmpdir, "*-RLS.pdf")))
-        wb_files = sorted(glob.glob(os.path.join(tmpdir, "*-WB.pdf")))
+        # The companion document is named for what it holds: -WB.pdf in TPS
+        # mode, -TLR.pdf in TLR mode. Globbing only for -WB.pdf meant a
+        # JetPlan release silently came back without its TLR — the very
+        # document that mode exists to produce.
+        wb_files = (sorted(glob.glob(os.path.join(tmpdir, "*-WB.pdf")))
+                    or sorted(glob.glob(os.path.join(tmpdir, "*-TLR.pdf"))))
         if not rls_files:
             raise RuntimeError("generate_enhanced_howgozit ran but produced no -RLS.pdf")
 
