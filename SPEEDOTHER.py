@@ -1518,6 +1518,30 @@ BOEING_TAKEOFF_THRUST = {
         # ATI FCOM PI.10.10, Assumed Temperature Reduced Thrust (25%
         # reduction), FULL column: max takeoff EPR for the ACTUAL OAT ->
         # minimum EPR a flex setting may be reduced to.
+        # ATI 757-200 FCOM: PI.10.12 "TO1 Takeoff EPR" and PI.10.14 "TO2
+        # Takeoff EPR". Both are published for packs on, engine anti-ice on
+        # or off, wing anti-ice off — a different bleed basis from the full
+        # thrust page, which is packs on and anti-ice off.
+        'derates': {
+            'TO1': {
+                -1000: {55: 1.51, 50: 1.53, 45: 1.56, 40: 1.58, 35: 1.61, 30: 1.63, 25: 1.63, 20: 1.63, 15: 1.63, 10: 1.63},
+                0: {55: 1.51, 50: 1.53, 45: 1.56, 40: 1.58, 35: 1.61, 30: 1.63, 25: 1.64, 20: 1.64, 15: 1.64, 10: 1.64},
+                2000: {55: 1.5, 50: 1.53, 45: 1.56, 40: 1.58, 35: 1.61, 30: 1.63, 25: 1.66, 20: 1.66, 15: 1.66, 10: 1.66},
+                4000: {55: 1.5, 50: 1.53, 45: 1.56, 40: 1.59, 35: 1.61, 30: 1.64, 25: 1.66, 20: 1.68, 15: 1.68, 10: 1.68},
+                6000: {55: 1.5, 50: 1.53, 45: 1.56, 40: 1.59, 35: 1.61, 30: 1.64, 25: 1.66, 20: 1.68, 15: 1.69, 10: 1.69},
+                8000: {55: 1.5, 50: 1.53, 45: 1.56, 40: 1.59, 35: 1.61, 30: 1.64, 25: 1.66, 20: 1.68, 15: 1.7, 10: 1.71},
+                10000: {55: 1.5, 50: 1.52, 45: 1.54, 40: 1.57, 35: 1.6, 30: 1.62, 25: 1.64, 20: 1.67, 15: 1.69, 10: 1.7},
+            },
+            'TO2': {
+                -1000: {55: 1.46, 50: 1.49, 45: 1.51, 40: 1.54, 35: 1.56, 30: 1.58, 25: 1.58, 20: 1.58, 15: 1.58, 10: 1.58},
+                0: {55: 1.46, 50: 1.49, 45: 1.51, 40: 1.53, 35: 1.56, 30: 1.58, 25: 1.58, 20: 1.58, 15: 1.58, 10: 1.58},
+                2000: {55: 1.46, 50: 1.49, 45: 1.51, 40: 1.54, 35: 1.56, 30: 1.58, 25: 1.6, 20: 1.6, 15: 1.6, 10: 1.6},
+                4000: {55: 1.46, 50: 1.49, 45: 1.51, 40: 1.54, 35: 1.56, 30: 1.59, 25: 1.61, 20: 1.62, 15: 1.62, 10: 1.62},
+                6000: {55: 1.46, 50: 1.49, 45: 1.51, 40: 1.54, 35: 1.56, 30: 1.59, 25: 1.61, 20: 1.63, 15: 1.64, 10: 1.64},
+                8000: {55: 1.46, 50: 1.49, 45: 1.51, 40: 1.54, 35: 1.56, 30: 1.59, 25: 1.61, 20: 1.63, 15: 1.64, 10: 1.65},
+                10000: {55: 1.45, 50: 1.47, 45: 1.5, 40: 1.52, 35: 1.55, 30: 1.57, 25: 1.59, 20: 1.61, 15: 1.63, 10: 1.65},
+            },
+        },
         'flex_min_epr': {1.80: 1.60, 1.75: 1.56, 1.70: 1.53,
                          1.65: 1.49, 1.60: 1.45, 1.55: 1.41},
         # ATI FCOM PI.10.10, "EPR Adjustments for Engine Bleeds". The grid
@@ -1696,7 +1720,13 @@ BOEING_TAKEOFF_THRUST = {
 # both as well; the freighters especially. The two grids are byte-identical
 # in this data — the engines are flat-rated alike — so each airframe is
 # pointed at the same object rather than given a copy that could drift.
-BOEING_TAKEOFF_THRUST[('B752', 'RB211-535E4-B')] = BOEING_TAKEOFF_THRUST[('B753', 'RB211-535E4-B')]
+# All four 535 keys share ONE entry. The -E4 and -E4-B grids are
+# byte-identical in this data, so the manual's TO1/TO2 derates reach the -B
+# too. That is an inference: the FCOM read here is titled 535E4, and no
+# -E4-B manual has been seen. If one ever disagrees, split this back into
+# separate entries rather than editing shared numbers.
+BOEING_TAKEOFF_THRUST[('B752', 'RB211-535E4-B')] = BOEING_TAKEOFF_THRUST[('B752', 'RB211-535E4')]
+BOEING_TAKEOFF_THRUST[('B753', 'RB211-535E4-B')] = BOEING_TAKEOFF_THRUST[('B752', 'RB211-535E4')]
 BOEING_TAKEOFF_THRUST[('B753', 'RB211-535E4')] = BOEING_TAKEOFF_THRUST[('B752', 'RB211-535E4')]
 
 # Freighters and sub-variants share their passenger airframe's tables.
