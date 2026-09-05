@@ -33,6 +33,8 @@ import logging
 import os
 import sys
 import tempfile
+import importlib
+import inspect
 import traceback
 import types
 
@@ -93,6 +95,83 @@ except Exception as e:  # pragma: no cover - reported via /release/status
     _import_error = "".join(traceback.format_exception(type(e), e, e.__traceback__))
 
 
+# ---------------------------------------------------------------------------
+# OFP formats
+#
+# Three generators, each producing a different release layout from the same
+# SimBrief XML:
+#
+#   masterlog  MASTERLOG.py          the standard release
+#   jetplan    MASTERLOG_JetPlan.py  Jeppesen-style: its own page 1 ahead of
+#                                    the JetPlan OFP, nav log as TIME/DIST/FUEL
+#   fos        MASTERLOG_FOS.py      the older FOS layout; no operator picks it
+#                                    by default, it is a Settings choice only
+#
+# Imported lazily and cached: MASTERLOG_JetPlan pulls in write_tlr_section at
+# module level, so importing it eagerly would make a missing TLR renderer
+# break plain MASTERLOG releases too.
+# ---------------------------------------------------------------------------
+OFP_FORMATS = {
+    "masterlog": "MASTERLOG",
+    "jetplan": "MASTERLOG_JetPlan",
+    "fos": "MASTERLOG_FOS",
+}
+OFP_FORMAT_LABELS = {
+    "masterlog": "MASTERLOG",
+    "jetplan": "JetPlan",
+    "fos": "FOS",
+}
+_format_cache = {}
+
+
+def load_format(name):
+    """The generator module for `name`, or raise with something readable.
+
+    A missing write_tlr_section is the expected failure here — JetPlan calls
+    it unconditionally — so it is named rather than surfaced as an import
+    traceback about a file nobody asked about.
+    """
+    name = (name or "masterlog").strip().lower()
+    if name not in OFP_FORMATS:
+        raise RuntimeError(f"unknown OFP format {name!r}")
+    if name in _format_cache:
+        mod, err = _format_cache[name]
+        if err:
+            raise RuntimeError(err)
+        return mod
+    if name == "masterlog":
+        if _import_error:
+            _format_cache[name] = (None, f"release generation unavailable: {_import_error}")
+            raise RuntimeError(_format_cache[name][1])
+        _format_cache[name] = (MASTERLOG, None)
+        return MASTERLOG
+    try:
+        mod = importlib.import_module(OFP_FORMATS[name])
+    except NotImplementedError as e:
+        msg = (f"{OFP_FORMAT_LABELS[name]} needs the TLR generator, which is not "
+               f"installed here (write_tlr_section.py is a stub): {e}")
+        _format_cache[name] = (None, msg)
+        raise RuntimeError(msg)
+    except Exception as e:
+        msg = f"{OFP_FORMAT_LABELS[name]} could not be loaded: {e}"
+        _format_cache[name] = (None, msg)
+        raise RuntimeError(msg)
+    _format_cache[name] = (mod, None)
+    return mod
+
+
+def format_status():
+    """Which formats can actually run, for Settings and /release/status."""
+    out = {}
+    for name in OFP_FORMATS:
+        try:
+            load_format(name)
+            out[name] = {"label": OFP_FORMAT_LABELS[name], "available": True, "error": ""}
+        except RuntimeError as e:
+            out[name] = {"label": OFP_FORMAT_LABELS[name], "available": False, "error": str(e)}
+    return out
+
+
 def is_available():
     """True if the release-generation import chain loaded cleanly."""
     return _import_error is None
@@ -102,7 +181,8 @@ def import_error():
     return _import_error
 
 
-def generate_release_pdfs(user_id, gate="", arr_gate="", generation=0):
+def generate_release_pdfs(user_id, gate="", arr_gate="", generation=0,
+                          ofp_format="masterlog", report_type=""):
     """
     Run generate_enhanced_howgozit headlessly for the given SimBrief user_id.
     gate/arr_gate (if known — e.g. from an AeroAPI suggestion applied to the
@@ -113,18 +193,54 @@ def generate_release_pdfs(user_id, gate="", arr_gate="", generation=0):
     Returns (rls_bytes, wb_bytes_or_None, base_filename).
     Raises RuntimeError with a human-readable message on any failure.
     """
-    if not is_available():
-        raise RuntimeError(f"release generation unavailable: {_import_error}")
+    generator = load_format(ofp_format)
+
+    # report_type ("TPS"/"TLR") normally comes from a per-script .config file
+    # the desktop app writes. Here it is a per-flight decision — an EMY leg
+    # wants TLR from the same generator a NAC leg wants TPS from — so the
+    # module's own reader is overridden for the duration of this call rather
+    # than writing a config file the next request would race on.
+    _restore = None
+    if report_type and hasattr(generator, "get_report_type"):
+        _restore = generator.get_report_type
+        generator.get_report_type = lambda _rt=report_type.strip().upper(): _rt
 
     if not user_id:
         raise RuntimeError("no SimBrief user id given (set SIMBRIEF_USER or pass user_id)")
 
+    try:
+        return _generate_with(generator, user_id, gate, arr_gate, generation, ofp_format)
+    finally:
+        if _restore is not None:
+            generator.get_report_type = _restore
+
+
+def _generate_with(generator, user_id, gate, arr_gate, generation, ofp_format):
     with tempfile.TemporaryDirectory(prefix="fos-release-") as tmpdir:
         placeholder = os.path.join(tmpdir, "placeholder.pdf")
         try:
-            result = MASTERLOG.generate_enhanced_howgozit(user_id, output_path=placeholder, gate=gate, arr_gate=arr_gate, generation=generation)
+            # The generators do not share a signature: MASTERLOG takes
+            # gate/arr_gate/generation, the JetPlan and FOS layouts take
+            # only (user_id, output_path). Pass what each one actually
+            # accepts rather than assuming — a mismatch here would read as
+            # a TypeError from deep inside a 280KB file.
+            _kwargs = {"output_path": placeholder}
+            _accepts = inspect.signature(generator.generate_enhanced_howgozit).parameters
+            for _k, _v in (("gate", gate), ("arr_gate", arr_gate), ("generation", generation)):
+                if _k in _accepts:
+                    _kwargs[_k] = _v
+            result = generator.generate_enhanced_howgozit(user_id, **_kwargs)
         except SystemExit as e:
             raise RuntimeError(f"generate_enhanced_howgozit exited: {e}")
+        except NotImplementedError as e:
+            # write_tlr_section is a stub here, and JetPlan calls it
+            # unconditionally. Importing the module succeeds, so this only
+            # shows up mid-generation — say what is actually missing rather
+            # than surfacing a bare NotImplementedError.
+            raise RuntimeError(
+                f"{OFP_FORMAT_LABELS.get(ofp_format, ofp_format)} needs the TLR "
+                f"generator, which is not installed here — write_tlr_section.py "
+                f"is a stub ({e})")
         except Exception as e:
             raise RuntimeError(f"generate_enhanced_howgozit raised: {e}")
 

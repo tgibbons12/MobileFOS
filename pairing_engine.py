@@ -45,6 +45,11 @@ class Rules:
     MAX_SIT = 3.0
     MAX_SIT_INTL = 4.5
     MIN_REST = 10.0  # release -> report, NOT arrival -> departure
+    # How much later in the day a crew who has not reported yet can be
+    # asked to start. Long enough to reach an evening departure from a
+    # morning availability, short enough that it cannot quietly become
+    # tomorrow.
+    MAX_SAME_DAY_WAIT = 14.0
     MAX_REST = 30.0
     MAX_DUTY_BLOCK = 11.0
     MAX_LEGS_DAY = 4
@@ -244,7 +249,7 @@ class Search:
 
     def run_from(self, station, earliest_utc, dom, day_number, dlegs_today, dblk_today,
                  duty_report_utc, remaining_days, must_touch=None, target=None,
-                 exact_days=False):
+                 exact_days=False, not_reported=False):
         """Resume the search mid-trip — e.g. recovering from a disruption.
         `station`/`earliest_utc` is where the trip actually stands right now;
         `day_number`/`dlegs_today`/`dblk_today`/`duty_report_utc` describe the
@@ -266,6 +271,11 @@ class Search:
                      dlegs=dlegs_today, dblk=dblk_today, rep=duty_report_utc,
                      chain=[], hit=not need)
         self.days = remaining_days
+        # `not_reported`: the crew has not checked in, so earliest_utc is
+        # the earliest they COULD go, not the start of a duty period. The
+        # first leg they take sets the report, and until then there is no
+        # sit to be too long — see the seed branch in _search.
+        self.not_reported = bool(not_reported) and not dlegs_today
         # exact_days=False by default here, unlike run(): a fresh pairing
         # must be exactly the length it was bid for, but a recovery that
         # gets home EARLY is not a failed recovery. Requiring the chain to
@@ -295,6 +305,31 @@ class Search:
                 if i in used:
                     continue
                 g = legs[i]
+                # ---- first leg of a day that has not started yet ----
+                # Report follows the flight, so anything later today is
+                # reachable. Without this the search only ever looked a
+                # max-sit window past "available from", which is why a
+                # cancellation at 0800 could not find an afternoon
+                # departure.
+                if getattr(self, "not_reported", False) and not chain:
+                    dep = g["dep"]
+                    while dep < t:
+                        dep += 24
+                    # Later TODAY, not tomorrow. Rolling a departure a full
+                    # day forward and still calling it the same duty period
+                    # offered a 0743 to someone available from 0800 — the
+                    # next morning's flight, counted as though no rest had
+                    # been needed. Past this, the overnight branch handles
+                    # it properly and charges the day.
+                    if dep - t > R.MAX_SAME_DAY_WAIT:
+                        continue
+                    nrep = dep - R.BRIEF
+                    if g["blk"] <= min(R.MAX_DUTY_BLOCK, table_a(nrep + hbt)):
+                        arr = dep + g["blk"]
+                        if (arr + R.DEBRIEF) - nrep <= table_b(nrep + hbt, 1):
+                            dfs(g["d"], arr, used | {i}, day, 1, g["blk"], nrep,
+                                chain + [i], hit or g["d"] in need)
+                    continue
                 # ---- continue the duty day ----
                 if dlegs < R.MAX_LEGS_DAY:
                     dep = g["dep"]

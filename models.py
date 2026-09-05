@@ -53,6 +53,12 @@ class User(UserMixin, db.Model):
     # face MOT is displayed in; blank means "show it as computed" (the
     # bid pack's own local time, no conversion).
     timezone = db.Column(db.String(64))
+    # Which release layout and performance sheet to produce. Empty or
+    # "auto" means follow the operator's own default (see
+    # OPERATOR_RELEASE_DEFAULTS in server.py); anything else overrides it
+    # for every flight on this account.
+    ofp_format = db.Column(db.String(16))
+    report_type = db.Column(db.String(8))
     # One promoted sequence a pilot has deliberately "picked up" as their
     # current trip (Schedule > My Trip's Pick Up button) — not leg-scoped
     # like current_leg_id, and only cleared by an explicit Close Trip.

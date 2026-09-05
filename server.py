@@ -392,6 +392,14 @@ def _ensure_columns():
         with db.engine.begin() as conn:
             conn.execute(sa_text("ALTER TABLE users ADD COLUMN is_admin BOOLEAN"))
         LOG.info("Migrated: added users.is_admin")
+    if "ofp_format" not in existing:
+        with db.engine.begin() as conn:
+            conn.execute(sa_text("ALTER TABLE users ADD COLUMN ofp_format VARCHAR(16)"))
+        LOG.info("Migrated: added users.ofp_format")
+    if "report_type" not in existing:
+        with db.engine.begin() as conn:
+            conn.execute(sa_text("ALTER TABLE users ADD COLUMN report_type VARCHAR(8)"))
+        LOG.info("Migrated: added users.report_type")
     if "last_seen" not in existing:
         with db.engine.begin() as conn:
             conn.execute(sa_text("ALTER TABLE users ADD COLUMN last_seen TIMESTAMP"))
@@ -4079,6 +4087,46 @@ def _reassignment_message(record, seq_number, kind, days, position, ap=None, bas
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Which release an operator gets
+#
+# The generator and the performance sheet are chosen per operator, because
+# that is how the airlines themselves differ — not a preference. A pilot can
+# still override either in Settings; these are only what happens when they
+# have not.
+#
+# FOS is deliberately absent: no operator uses it by default any more. It
+# stays selectable in Settings so an old-format release can still be
+# produced on request.
+# ---------------------------------------------------------------------------
+OPERATOR_RELEASE_DEFAULTS = {
+    "NAC": ("masterlog", "TPS"),
+    "EMY": ("masterlog", "TLR"),
+    "SSX": ("jetplan", "TLR"),
+    "RBD": ("jetplan", "TLR"),
+    "PFT": ("jetplan", "TLR"),
+}
+_RELEASE_FALLBACK = ("masterlog", "TPS")
+
+
+def _release_choice(record):
+    """(ofp_format, report_type) for this leg — the pilot's Settings when
+    they have set one, otherwise the operator's own default.
+
+    `airline_iata` is the pack's OPERATOR code (NAC/EMY/SSX/RBD/PFT), which
+    is what the leg actually carries; there is no separate operator field.
+    """
+    opr = (record.get("airline_iata") or "").strip().upper()
+    fmt, rpt = OPERATOR_RELEASE_DEFAULTS.get(opr, _RELEASE_FALLBACK)
+    chosen_fmt = (getattr(current_user, "ofp_format", "") or "").strip().lower()
+    if chosen_fmt and chosen_fmt != "auto":
+        fmt = chosen_fmt
+    chosen_rpt = (getattr(current_user, "report_type", "") or "").strip().upper()
+    if chosen_rpt and chosen_rpt != "AUTO":
+        rpt = chosen_rpt
+    return fmt, rpt
+
+
 def _ofp_time_generated(user_id):
     """SimBrief's own timestamp for the OFP currently on an account, or "".
     Never raises: this is recorded alongside a release that has already been
@@ -4270,9 +4318,12 @@ def generate_release(leg_id):
     # existed, so an unregenerated release reads the same as it always did.
     generation = ((cached.payload.get("generation", -1) + 1) % 10) if cached else 0
     try:
+        _fmt, _rpt = _release_choice(record)
+        LOG.info(f"[RELEASE] operator={record.get('airline_iata') or '?'} "
+                 f"format={_fmt} report={_rpt}")
         rls_bytes, wb_bytes, filename = release_engine.generate_release_pdfs(
             user_id, gate=record.get("dep_gate", ""), arr_gate=record.get("arr_gate", ""),
-            generation=generation)
+            generation=generation, ofp_format=_fmt, report_type=_rpt)
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 502
 
@@ -4403,6 +4454,27 @@ def set_timezone():
     current_user.timezone = (body.get("timezone") or "").strip() or None
     db.session.commit()
     return jsonify({"ok": True})
+
+
+@app.route("/settings/release-format", methods=["POST"])
+def set_release_format():
+    """Override the operator's own release defaults for every flight on this
+    account. "auto" (or blank) hands the choice back to the operator — which
+    is what almost everyone should leave it on."""
+    body = request.get_json(silent=True) or {}
+    fmt = (body.get("ofp_format") or "").strip().lower()
+    rpt = (body.get("report_type") or "").strip().upper()
+    if fmt and fmt != "auto" and fmt not in release_engine.OFP_FORMATS:
+        return jsonify({"error": f"unknown OFP format {fmt!r}"}), 400
+    if rpt and rpt not in ("AUTO", "TPS", "TLR"):
+        return jsonify({"error": f"unknown report type {rpt!r}"}), 400
+    if "ofp_format" in body:
+        current_user.ofp_format = None if fmt in ("", "auto") else fmt
+    if "report_type" in body:
+        current_user.report_type = None if rpt in ("", "AUTO") else rpt
+    db.session.commit()
+    return jsonify({"ok": True, "ofp_format": current_user.ofp_format or "auto",
+                    "report_type": current_user.report_type or "AUTO"})
 
 
 @app.route("/settings/password", methods=["POST"])
@@ -4609,6 +4681,17 @@ _TIMEZONE_CHOICES = [
     ("America/Los_Angeles", "Pacific"), ("America/Anchorage", "Alaska"),
     ("Pacific/Honolulu", "Hawaii"), ("UTC", "UTC"),
 ]
+
+
+def _select_options_html(pairs, selected):
+    """<option> list with `selected` marked — same job _timezone_options_html
+    does for its own list, kept generic so the release-format selects do not
+    each grow their own copy."""
+    out = []
+    for value, label in pairs:
+        sel = " selected" if value == selected else ""
+        out.append(f'<option value="{html.escape(value)}"{sel}>{html.escape(label)}</option>')
+    return "".join(out)
 
 
 def _timezone_options_html(selected):
@@ -4860,6 +4943,15 @@ def render_fos_html(leg, default_view=""):
         LOG.warning(f"Could not recompute MOT for leg {ctx.get('id')}: {e}")
     ctx["mot_display"] = _mot_display(_mot, ctx.get("origin") or "", current_user.timezone)
     ctx["timezone_options"] = _timezone_options_html(current_user.timezone)
+    ctx["ofp_format_options"] = _select_options_html(
+        [("auto", "Follow the operator")]
+        + [(k, v["label"] + ("" if v["available"] else " — unavailable"))
+           for k, v in release_engine.format_status().items()],
+        current_user.ofp_format or "auto")
+    ctx["report_type_options"] = _select_options_html(
+        [("AUTO", "Follow the operator"), ("TPS", "TPS — performance sheet + W&B"),
+         ("TLR", "TLR — ops release only")],
+        current_user.report_type or "AUTO")
     ctx["default_view"] = default_view
     ctx["is_admin"] = "1" if bool(getattr(current_user, "is_admin", False)) else ""
     # Server-rendered rather than fetched, so the banner is on screen with
@@ -6578,6 +6670,21 @@ if (window.matchMedia) {
         <div style="font-size:12px;color:var(--label);margin-top:8px;">Controls what clock face Mandatory Off Time is shown in. Leave on "As Computed" to see it in the bid pack's own local time.</div>
       </div>
       <div class="search-block">
+        <label for="ofp-format-select">Release Format</label>
+        <select id="ofp-format-select" onchange="saveReleaseFormat()">$ofp_format_options</select>
+        <div style="font-size:12px;color:var(--label);margin-top:6px;">
+          Follow the operator unless you pick one: NAC and EMY fly MASTERLOG,
+          SSX, RBD and PFT fly JetPlan. FOS is the older layout and no operator
+          uses it by default.
+        </div>
+        <label for="report-type-select" style="margin-top:14px;display:block;">Performance Sheet</label>
+        <select id="report-type-select" onchange="saveReleaseFormat()">$report_type_options</select>
+        <div style="font-size:12px;color:var(--label);margin-top:6px;">
+          TPS is the takeoff performance sheet with its own W&amp;B file; TLR is
+          the ops release on its own. NAC takes TPS, everyone else TLR.
+        </div>
+      </div>
+      <div class="search-block">
         <label>Appearance</label>
         <div style="display:flex;gap:8px;">
           <button type="button" class="theme-opt" data-theme-opt="light" onclick="setThemePref('light')">Light</button>
@@ -6824,6 +6931,19 @@ function saveAeroApiKey(value){
     .then(()=>{ document.getElementById('settings-msg').textContent = 'Saved.'; })
     .catch(()=>{ document.getElementById('settings-msg').textContent = 'Could not save — try again.'; });
 }
+async function saveReleaseFormat(){
+  const fmt = document.getElementById('ofp-format-select').value;
+  const rpt = document.getElementById('report-type-select').value;
+  try {
+    const r = await fetch('/settings/release-format', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ofp_format: fmt, report_type: rpt}),
+    });
+    const d = await readJson(r);
+    showToast(r.ok ? 'Release format saved' : (d.error || 'Could not save'));
+  } catch(e) { showToast(e.message); }
+}
+
 function saveTimezone(value){
   fetch('/settings/timezone', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({timezone: value})})
     .then(()=>{ document.getElementById('settings-msg').textContent = 'Saved.'; })

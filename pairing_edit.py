@@ -308,9 +308,19 @@ def step_options(ap, legs, state, planned=None, limit=40, exclude=()):
     same_day_earliest = avail + (mct_after_arrival(ap, stn, stn) if dlegs else 0.0)
     rest_earliest = avail + Rules.DEBRIEF + Rules.MIN_REST + Rules.BRIEF
 
+    # Nothing flown in this duty period yet means the crew has not
+    # reported, and "available from" is the earliest they COULD go, not a
+    # check-in. The duty clock has not started, so it starts with whatever
+    # they actually take: report floats to that flight's own brief, and
+    # there is no sit to be too long, because sitting is something you do
+    # after reporting. Treating the availability time as a report anchored
+    # the FDP hours before anything was flown and threw away every
+    # departure later in the day as an over-long sit.
+    not_reported = dlegs <= 0
+
     def _price(leg, dep, after_rest):
         """What this leg would cost, or why it cannot be flown."""
-        if after_rest:
+        if after_rest or not_reported:
             new_rep = dep - Rules.BRIEF
             nlegs, nblk = 1, leg["blk"]
         else:
@@ -321,9 +331,10 @@ def step_options(ap, legs, state, planned=None, limit=40, exclude=()):
         fdp_cap = table_b(new_rep + hbt, nlegs)
         fdp_used = (arr + Rules.DEBRIEF) - new_rep
         why = None
-        if not after_rest and nlegs > Rules.MAX_LEGS_DAY:
+        if not after_rest and not not_reported and nlegs > Rules.MAX_LEGS_DAY:
             why = f"{nlegs} legs, the day allows {Rules.MAX_LEGS_DAY}"
-        elif not after_rest and dep - avail > max_sit_at(ap, stn):
+        elif (not after_rest and not not_reported
+              and dep - avail > max_sit_at(ap, stn)):
             why = f"{dep - avail:.1f}h sit at {stn}, longer than the day allows"
         elif nblk > blk_cap:
             why = f"{nblk:.1f}h block, the day allows {blk_cap:.1f}h"
@@ -777,7 +788,8 @@ def recover_from_disruption(seq, dom, ap, legs, duty_day, leg_index,
         tried.append(total_days)
         search = pairing_engine.Search(legs, ap, total_days, budget)
         chains = search.run_from(actual_destination, actual_arrival_utc, dom, day_number,
-                                  dlegs_so_far, dblk_so_far, rpt_utc, total_days)
+                                  dlegs_so_far, dblk_so_far, rpt_utc, total_days,
+                                  not_reported=drop_disrupted and not kept_legs)
         for chain in chains:
             bad = pairing_engine.verify_from(
                 legs, ap, chain, dom, actual_destination, actual_arrival_utc,
