@@ -1517,6 +1517,16 @@ BOEING_TAKEOFF_THRUST = {
         # minimum EPR a flex setting may be reduced to.
         'flex_min_epr': {1.80: 1.60, 1.75: 1.56, 1.70: 1.53,
                          1.65: 1.49, 1.60: 1.45, 1.55: 1.41},
+        # ATI FCOM PI.10.10, "EPR Adjustments for Engine Bleeds". The grid
+        # itself is packs ON, anti-ice OFF; these are the deltas from that.
+        # Banded by pressure altitude, and the band edge really is 8000/8001
+        # in the manual — (ceiling, delta), first band whose ceiling the
+        # altitude is at or below.
+        'bleed_corrections': {
+            'packs_off':            [(8000, 0.01), (None, 0.01)],
+            'engine_anti_ice':      [(8000, 0.00), (None, -0.01)],
+            'engine_wing_anti_ice': [(8000, -0.01), (None, -0.02)],
+        },
         # 752RR/toga.txt — 7 pressure altitudes x 13 OATs, 1000ft steps
         'max_alt_gap': 1500,
         'max_temp_gap': 6,
@@ -1706,7 +1716,7 @@ def _interp_grid(grid, temp, altitude, max_alt_gap=None, max_temp_gap=None,
     return v_lo + (v_hi - v_lo) * ((altitude - lo) / (hi - lo))
 
 
-def get_takeoff_thrust(icao_code, engine, oat, altitude, assumed_temp=None,
+def get_takeoff_thrust(icao_code, engine, oat, altitude, assumed_temp=None, packs_off=False, anti_ice=None,
                        apu_on=False):
     """Max (TOGA) or reduced (FLEX) takeoff thrust for an Airbus.
 
@@ -1763,6 +1773,24 @@ def get_takeoff_thrust(icao_code, engine, oat, altitude, assumed_temp=None,
             key = min(floors, key=lambda k: abs(k - full))
             if abs(key - full) <= 0.03:
                 value = max(value, floors[key])
+
+    # Engine-bleed corrections, where the manual publishes them. Only the
+    # 535E4 does here, so every other type is unaffected rather than being
+    # given a delta borrowed from a different engine.
+    _bleeds = entry.get('bleed_corrections') or {}
+    if _bleeds and altitude is not None:
+        def _band(rows):
+            for ceiling, delta in rows:
+                if ceiling is None or altitude <= ceiling:
+                    return delta
+            return 0.0
+        if packs_off and 'packs_off' in _bleeds:
+            value += _band(_bleeds['packs_off'])
+        _ai = (anti_ice or '').strip().lower()
+        if _ai in ('engine', 'eng') and 'engine_anti_ice' in _bleeds:
+            value += _band(_bleeds['engine_anti_ice'])
+        elif _ai in ('engine_wing', 'wing', 'both') and 'engine_wing_anti_ice' in _bleeds:
+            value += _band(_bleeds['engine_wing_anti_ice'])
 
     if apu_on:
         value += (entry.get('bleed_adjust') or {}).get('apu_on', 0.0)

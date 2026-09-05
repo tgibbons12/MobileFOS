@@ -869,10 +869,17 @@ def write_takeoff_performance_string(
             _dec = 2 if _thr_param == 'EPR' else 1
             def _fmt_thr(r):
                 return f"{r['value']:.{_dec}f}" if r else f"{0:.{_dec}f}"
+            # anti_ice_on is the sheet's own engine anti-ice state. The
+            # manual distinguishes engine from engine+wing and we only know
+            # the one bit, so this claims the engine-only correction — the
+            # smaller of the two, and the one that is 0.00 below 8000ft.
+            _ai_arg = 'engine' if anti_ice_on else None
             _ab_off = get_takeoff_thrust(icaocode, engine_designation, temp,
-                                         alt_val, apu_on=False) if _thr_param else None
+                                         alt_val, anti_ice=_ai_arg,
+                                         apu_on=False) if _thr_param else None
             _ab_on  = get_takeoff_thrust(icaocode, engine_designation, temp,
-                                         alt_val, apu_on=True) if _thr_param else None
+                                         alt_val, anti_ice=_ai_arg,
+                                         apu_on=True) if _thr_param else None
             _lbl    = _thr_param or ''
             _v_off  = _fmt_thr(_ab_off) if _thr_param else ''
             _v_on   = _fmt_thr(_ab_on)  if _thr_param else ''
@@ -1659,8 +1666,15 @@ def write_takeoff_performance_string(
                 # these conditions, matching the *MAX* block above.
                 _is_toga = at_override_occurred or at_display.startswith("MAX")
                 _fx_temp = None if _is_toga else (int(at_numeric) if at_numeric is not None else None)
+                # bld is this runway's own bleed field from the TLR line —
+                # "OFF" meaning the takeoff was analysed without engine
+                # bleed air, which is the manual's packs-off case. Stated
+                # rather than assumed silently: if that mapping is wrong,
+                # this is the one line to change.
                 _fx = get_takeoff_thrust(icaocode, engine_designation, temp, alt_val,
-                                         assumed_temp=_fx_temp)
+                                         assumed_temp=_fx_temp,
+                                         packs_off=(str(bld).strip().upper() == 'OFF'),
+                                         anti_ice='engine' if anti_ice_on else None)
                 if _thr_param:
                     _fd = 2 if _thr_param == 'EPR' else 1
                     thr_display = f"{_fx['value']:.{_fd}f}" if _fx else f"{0:.{_fd}f}"
