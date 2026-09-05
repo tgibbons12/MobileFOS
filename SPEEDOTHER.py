@@ -1000,9 +1000,12 @@ _ENGINE_FAMILIES = [
     (r'V2\d{3}|IAE',      'V2500',     'EPR'),
     # 757/767. Order matters: 535E4-B also matches 535E4, and CF6-80C2B8F
     # also matches CF6-80, so the longer name has to be tried first.
-    (r'RB211-?535E4-?B',  'RB211-535E4-B', 'EPR'),
-    (r'RB211-?535E4',     'RB211-535E4',   'EPR'),
-    (r'RB211-?524H',      'RB211-524H',    'EPR'),
+    # SimBrief's <aircraft/engines> is not always prefixed: a 757F comes
+    # through as "535E4-B", which the RB211-anchored patterns missed, so the
+    # sheet printed TO with no EPR beside it. The prefix is optional here.
+    (r'(?:RB211-?)?535E4-?B', 'RB211-535E4-B', 'EPR'),
+    (r'(?:RB211-?)?535E4',    'RB211-535E4',   'EPR'),
+    (r'(?:RB211-?)?524H',     'RB211-524H',    'EPR'),
     (r'PW2037',           'PW2037',        'EPR'),
     (r'PW2040',           'PW2040',        'EPR'),
     (r'PW4056',           'PW4056',        'EPR'),
@@ -1688,6 +1691,21 @@ BOEING_TAKEOFF_THRUST = {
     },
 }
 
+
+# The RB211-535E4-B is fitted to 757-200s as well as -300s, and the -E4 to
+# both as well; the freighters especially. The two grids are byte-identical
+# in this data — the engines are flat-rated alike — so each airframe is
+# pointed at the same object rather than given a copy that could drift.
+BOEING_TAKEOFF_THRUST[('B752', 'RB211-535E4-B')] = BOEING_TAKEOFF_THRUST[('B753', 'RB211-535E4-B')]
+BOEING_TAKEOFF_THRUST[('B753', 'RB211-535E4')] = BOEING_TAKEOFF_THRUST[('B752', 'RB211-535E4')]
+
+# Freighters and sub-variants share their passenger airframe's tables.
+for _f, _base in (('B75F', 'B752'), ('B752F', 'B752'), ('B753F', 'B753'),
+                  ('B76F', 'B763'), ('B762F', 'B762'), ('B763F', 'B763'),
+                  ('B764F', 'B764')):
+    for (_i, _e), _v in list(BOEING_TAKEOFF_THRUST.items()):
+        if _i == _base:
+            BOEING_TAKEOFF_THRUST.setdefault((_f, _e), _v)
 
 # Both families answer the same question, so the lookup sees one table.
 _TAKEOFF_THRUST = {**AIRBUS_TAKEOFF_THRUST, **BOEING_TAKEOFF_THRUST}
