@@ -61,6 +61,11 @@ def _install_tkinter_stub():
         nothing to say why. Anything unknown is a no-op that returns
         another no-op, so chained calls are safe too."""
 
+        def __init__(self, *_a, **_k):
+            # Widgets are constructed with arguments — tk.Label(root,
+            # text=...) — so the stub has to accept them and ignore them.
+            pass
+
         def __getattr__(self, _name):
             return _StubTk._noop
 
@@ -90,6 +95,22 @@ def _install_tkinter_stub():
     tkinter_stub.simpledialog = simpledialog_stub
     tkinter_stub.messagebox = messagebox_stub
     tkinter_stub.filedialog = filedialog_stub
+
+    # And the module itself, for the same reason the class needed it:
+    # naming widgets one at a time only lasts until a generator uses one
+    # that was not named (tkinter.Label, after tkinter.Tk().title). Tk's
+    # ALL-CAPS names are layout constants and are used as strings, so they
+    # come back as strings; everything else is a widget-shaped no-op.
+    def _tk_any(name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        if name.isupper():
+            return name.lower()
+        return _StubTk
+
+    tkinter_stub.__getattr__ = _tk_any
+    for _sub in (simpledialog_stub, messagebox_stub, filedialog_stub):
+        _sub.__getattr__ = lambda _n: (lambda *a, **k: None)
 
     sys.modules["tkinter"] = tkinter_stub
     sys.modules["tkinter.simpledialog"] = simpledialog_stub
@@ -224,6 +245,20 @@ def generate_release_pdfs(user_id, gate="", arr_gate="", generation=0,
         _restore = generator.get_report_type
         generator.get_report_type = lambda _rt=report_type.strip().upper(): _rt
 
+    # JetPlan's save_as_pdf asks for a font mid-generation, through a Tk
+    # dialog. No stub can answer that — it measures the screen and does
+    # arithmetic on the result — but ask_font_selection returns immediately
+    # when _cached_font_choice is already set, which is the hook the desktop
+    # app uses to avoid re-prompting. Seed it: "1" is Courier Prime, and the
+    # font loader falls back on its own when that path is absent, as it is
+    # on a server.
+    _font_restore = None
+    if hasattr(generator, "ask_font_selection"):
+        _font_restore = (getattr(generator, "_cached_font_choice", None),
+                         getattr(generator, "_cached_report_type", None))
+        generator._cached_font_choice = "1"
+        generator._cached_report_type = (report_type or "TPS").strip().upper()
+
     if not user_id:
         raise RuntimeError("no SimBrief user id given (set SIMBRIEF_USER or pass user_id)")
 
@@ -232,6 +267,8 @@ def generate_release_pdfs(user_id, gate="", arr_gate="", generation=0,
     finally:
         if _restore is not None:
             generator.get_report_type = _restore
+        if _font_restore is not None:
+            generator._cached_font_choice, generator._cached_report_type = _font_restore
 
 
 def _generate_with(generator, user_id, gate, arr_gate, generation, ofp_format):
