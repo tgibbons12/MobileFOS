@@ -294,6 +294,18 @@ def safe_weight(value):
 # Main renderer
 # ---------------------------------------------------------------------------
 
+# 757/767 airframes, by ICAO type. Used for the sheet header and to decide
+# that the THR column holds a thrust setting rather than a rating name —
+# the two must agree, so they read the same map.
+BOEING_75_76_NAMES = {
+    'B752': '757-200', 'B75F': '757-200', 'B752F': '757-200',
+    'B753': '757-300', 'B753F': '757-300',
+    'B762': '767-200', 'B762F': '767-200', 'B76F': '767-300',
+    'B763': '767-300', 'B763F': '767-300',
+    'B764': '767-400', 'B764F': '767-400',
+}
+
+
 def write_takeoff_performance_string(
     flight_info, valid_runways, anti_ice_on,
     runway_lines, airport_altitudes=None, max_elevation=0, icao_code="XXXX",
@@ -555,6 +567,7 @@ def write_takeoff_performance_string(
         is_737_max    = icaocode == 'B38M'
         is_boeing_737 = is_737_ng or is_737_max
         is_md8x       = icaocode.startswith('MD8')
+        is_75_76      = (icaocode or '').upper() in BOEING_75_76_NAMES
         # is_erj already set above from icao_code; icaocode is the same normalised form
 
         # Extract and format basic flight data
@@ -747,14 +760,7 @@ def write_takeoff_performance_string(
         #   *** 767-300 *** TO1 DRY ***
         # engine_type here is SimBrief's own string ("757F-535E4-B"), which
         # is the aeroplane and its engine run together and reads as neither.
-        _75_76 = {
-            'B752': '757-200', 'B75F': '757-200', 'B752F': '757-200',
-            'B753': '757-300', 'B753F': '757-300',
-            'B762': '767-200', 'B762F': '767-200', 'B76F': '767-300',
-            'B763': '767-300', 'B763F': '767-300',
-            'B764': '767-400', 'B764F': '767-400',
-        }
-        _75_76_name = _75_76.get((icaocode or '').upper())
+        _75_76_name = BOEING_75_76_NAMES.get((icaocode or '').upper())
         if _75_76_name:
             _hdr_thr = (first_runway.get('thr', '') or '').upper().strip().replace(' ', '')
             if _hdr_thr.startswith('D-'):
@@ -1689,7 +1695,12 @@ def write_takeoff_performance_string(
                     else:
                         thr_display = str(n1_pack_on)
 
-            elif is_airbus:
+            elif is_airbus or is_75_76:
+                # The column holds the bare setting (83.6 / 1.69), not a
+                # rating name — the AT column says whether a flex temp was
+                # used, and on the 75/76 the header already names TO or TO1.
+                # This branch was Airbus-only, so a 757 fell through it
+                # entirely and printed its rating where its EPR belonged.
                 # Per the A32F AOM the column holds the bare setting (83.6),
                 # not a "FLEX 83.6" label — the AT column alongside it already
                 # says whether a flex temp was used. TOGA is read from the
@@ -1715,7 +1726,19 @@ def write_takeoff_performance_string(
                                          anti_ice='engine' if anti_ice_on else None)
                 if _thr_param:
                     _fd = 2 if _thr_param == 'EPR' else 1
-                    thr_display = f"{_fx['value']:.{_fd}f}" if _fx else f"{0:.{_fd}f}"
+                    if _fx:
+                        thr_display = f"{_fx['value']:.{_fd}f}"
+                    elif is_75_76:
+                        # XXX, not 0.00. A 757 asked for a derate nobody has
+                        # published a table for gets no number — printing
+                        # 0.00 in an EPR column invites reading it as one,
+                        # and the sheet already says XXX where a V-speed is
+                        # unavailable. (The Airbus path keeps its 0.00: that
+                        # is long-standing behaviour and not mine to change
+                        # from here.)
+                        thr_display = "XXX"
+                    else:
+                        thr_display = f"{0:.{_fd}f}"
                 else:
                     thr_display = "TOGA" if _is_toga else "FLEX"
 
