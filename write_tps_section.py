@@ -742,7 +742,28 @@ def write_takeoff_performance_string(
         output += f"{'STA':<6} {'PRES ALT':<11} {'FLT':<8} {'AIRPL':<9} {'DTE/TIME':<10}\n"
         output += f"{sta:<6} {alt_disp:<10}  {flt_dte:<8} {airpl:<9} {dte_time:<10}\n\n"
 
-        if is_boeing_737 and thrust_label and thrust_label != "N/A":
+        # 757/767 header names the airframe and the rating, not the engine:
+        #   *** 757-200 *** TO DRY ***
+        #   *** 767-300 *** TO1 DRY ***
+        # engine_type here is SimBrief's own string ("757F-535E4-B"), which
+        # is the aeroplane and its engine run together and reads as neither.
+        _75_76 = {
+            'B752': '757-200', 'B75F': '757-200', 'B752F': '757-200',
+            'B753': '757-300', 'B753F': '757-300',
+            'B762': '767-200', 'B762F': '767-200', 'B76F': '767-300',
+            'B763': '767-300', 'B763F': '767-300',
+            'B764': '767-400', 'B764F': '767-400',
+        }
+        _75_76_name = _75_76.get((icaocode or '').upper())
+        if _75_76_name:
+            _hdr_thr = (first_runway.get('thr', '') or '').upper().strip().replace(' ', '')
+            if _hdr_thr.startswith('D-'):
+                _hdr_thr = _hdr_thr[2:]
+            _hdr_thr = _hdr_thr.replace('-', '')
+            if not re.fullmatch(r'TO[1-9]?', _hdr_thr):
+                _hdr_thr = 'TO'
+            output += f"*** {_75_76_name} *** {_hdr_thr} {surface} ***\n\n"
+        elif is_boeing_737 and thrust_label and thrust_label != "N/A":
             output += f"*** {engine_type} {thrust_label} {surface} ***\n\n"
         else:
             output += f"*** {engine_type} {surface} ***\n\n"
