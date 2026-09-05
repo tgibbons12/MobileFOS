@@ -1740,7 +1740,8 @@ def _interp_grid(grid, temp, altitude, max_alt_gap=None, max_temp_gap=None,
 
 def derate_from_thrust_setting(thrust_setting):
     """'D-TO1' -> 'TO1'. SimBrief's TLR names the rating in <thrust_setting>:
-    D-TO1/D-TO2 for the derates, TO or TOGA for full thrust.
+    D-TO1/D-TO2 for the derates, TO or TOGA for full thrust. D-TO1, TO1 and
+    TO-1 are the same rating written three ways and all resolve alike.
 
     Anything else that looks like a derate is returned as-is rather than
     treated as full thrust, so an unrecognised rating reaches
@@ -1748,11 +1749,22 @@ def derate_from_thrust_setting(thrust_setting):
     honest; printing TOGA numbers to a crew who selected a derate is not.
     """
     s = (thrust_setting or '').strip().upper().replace(' ', '')
+    derated = s.startswith('D-')
+    if derated:
+        s = s[2:]
+    # D-TO1, TO1 and TO-1 are the same rating written three ways.
+    s = s.replace('-', '')
     if not s or s in ('TO', 'TOGA', 'MAX', 'XXX'):
         return None
-    if s.startswith('D-'):
-        s = s[2:]
-    return s or None
+    if re.fullmatch(r'TO[1-9]', s):
+        return s
+    # Only the D- prefix and the TO-n family name a derate. Everything else
+    # a TLR might carry — FLEX, ALT TO, an Airbus label — is a way of
+    # describing full thrust, and must not be read as a derate nobody has a
+    # table for: that would blank the value on aircraft this has nothing to
+    # do with. An unrecognised D- rating still blanks, because there the
+    # prefix says a derate really was selected.
+    return s if derated else None
 
 
 def get_takeoff_thrust(icao_code, engine, oat, altitude, assumed_temp=None, packs_off=False, anti_ice=None,

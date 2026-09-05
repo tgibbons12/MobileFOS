@@ -1614,7 +1614,17 @@ def write_takeoff_performance_string(
                 at_display           = "MAX-WT"
                 at_override_occurred = True
 
-            thr_display = thr
+            # The sheet says TO and TO-1. SimBrief writes the derates as
+            # D-TO1/D-TO2, which are the same ratings written differently,
+            # so the label is normalised rather than printed raw. Anything
+            # not of that family — TOGA, FLEX, an Airbus label — is left
+            # exactly as it came.
+            _thr_norm = thr.upper().strip().replace(' ', '')
+            if _thr_norm.startswith('D-'):
+                _thr_norm = _thr_norm[2:]
+            _thr_norm = _thr_norm.replace('-', '')
+            thr_display = {'TO1': 'TO-1', 'TO2': 'TO-2', 'TO': 'TO'}.get(_thr_norm, thr)
+
             # ERJ thrust label mapping: SimBrief XML value -> TPS display
             _ERJ_THR_MAP = {
                 'TO':       'TO1',
