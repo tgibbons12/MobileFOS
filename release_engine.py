@@ -52,13 +52,29 @@ def _install_tkinter_stub():
     tkinter_stub = types.ModuleType("tkinter")
 
     class _StubTk:
-        def withdraw(self):
-            pass
+        """Accepts anything Tk would.
 
-        def destroy(self):
-            pass
+        Listing methods one at a time only works until a generator reaches
+        for one that is not there: JetPlan's save_as_pdf calls .title() on
+        the root window, and the AttributeError was swallowed by that
+        function's own except, so the release came back missing its PDF with
+        nothing to say why. Anything unknown is a no-op that returns
+        another no-op, so chained calls are safe too."""
+
+        def __getattr__(self, _name):
+            return _StubTk._noop
+
+        @staticmethod
+        def _noop(*_a, **_k):
+            return _StubTk()
+
+        def __bool__(self):
+            return False
 
     tkinter_stub.Tk = _StubTk
+    tkinter_stub.Toplevel = _StubTk
+    tkinter_stub.StringVar = _StubTk
+    tkinter_stub.IntVar = _StubTk
 
     simpledialog_stub = types.ModuleType("tkinter.simpledialog")
     simpledialog_stub.askstring = lambda *a, **k: None

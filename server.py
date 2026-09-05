@@ -4120,7 +4120,13 @@ def _release_choice(record):
     `airline_iata` is the pack's OPERATOR code (NAC/EMY/SSX/RBD/PFT), which
     is what the leg actually carries; there is no separate operator field.
     """
-    opr = (record.get("airline_iata") or "").strip().upper()
+    # airline_iata carries whichever code its source used: a PBS-sourced leg
+    # has the pack's operator ("RBD"), a SimBrief-sourced one has the airline
+    # IATA ("YC"). Keyed on the operator code alone, every SimBrief leg fell
+    # through to the fallback — a Cardinal flight reported operator=YC and
+    # got MASTERLOG+TPS instead of JetPlan+TLR.
+    code = (record.get("airline_iata") or "").strip().upper()
+    opr = code if code in OPERATOR_RELEASE_DEFAULTS else _IATA_TO_ICAO.get(code, code)
     fmt, rpt = OPERATOR_RELEASE_DEFAULTS.get(opr, _RELEASE_FALLBACK)
     chosen_fmt = (getattr(current_user, "ofp_format", "") or "").strip().lower()
     if chosen_fmt and chosen_fmt != "auto":
