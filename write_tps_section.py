@@ -858,6 +858,25 @@ def write_takeoff_performance_string(
             output += f"      TOW CG  O/RET    MM\n"
             output += f"       {_md_cg:<6} {vsr_val:<7} {vmm_val}\n\n"
 
+        elif is_75_76 and _thr_param:
+            # *MAX* block, the 75/76 counterpart to the A321's and the
+            # MD-8x's. The pair shown is A/C ON and A/C OFF because that is
+            # the correction the FCOM publishes for these types — packs off
+            # is worth +0.01 EPR on the 535E4 and +0.3 to +0.5 %N1 on the
+            # CF6 — where the Airbus block shows APU OFF/ON. The delta is
+            # read from the engine's own table rather than hardcoded the way
+            # the MD-8x's +0.02 is.
+            _mx_on  = get_takeoff_thrust(icaocode, engine_designation, temp, alt_val,
+                                         anti_ice='engine' if anti_ice_on else None)
+            _mx_off = get_takeoff_thrust(icaocode, engine_designation, temp, alt_val,
+                                         packs_off=True,
+                                         anti_ice='engine' if anti_ice_on else None)
+            _mxd = 2 if _thr_param == 'EPR' else 1
+            _fmt_mx = lambda r: f"{r['value']:.{_mxd}f}" if r else "XXX"
+            output += f"         *MAX* {_thr_param}\n"
+            output += f"      A/C ON  {_fmt_mx(_mx_on)}\n"
+            output += f"      A/C OFF {_fmt_mx(_mx_off)}\n\n"
+
         elif icaocode in ['A318', 'A319', 'A320', 'A321', 'A20N', 'A21N'] \
                 and speed_data_dict and isinstance(speed_data_dict.get('speed'), dict):
             # Airbus: CG from cg_percent; trim from TRIMSETTING
@@ -953,10 +972,12 @@ def write_takeoff_performance_string(
             thr_column_label = "N1"
         elif is_erj:
             thr_column_label = "THR"
-        elif is_airbus and _thr_param:
-            # Airbus sets neither by hand — the sheet is a crosscheck — but
+        elif (is_airbus or is_75_76) and _thr_param:
+            # Neither type sets it by hand — the sheet is a crosscheck — but
             # the column still has to say which parameter it is, and that
-            # follows the engine: V2500 is EPR-rated, CFM/LEAP/PW are N1.
+            # follows the ENGINE, not the airframe: V2500 is EPR-rated,
+            # CFM/LEAP/PW are N1. The same 767 is N1 with a CF6 and EPR with
+            # a PW4060, so the label has to come from the engine string.
             thr_column_label = _thr_param
         else:
             thr_column_label = "THR"
