@@ -132,8 +132,11 @@ OFP_FORMATS = {
     "jetplan": "MASTERLOG_JetPlan",
     "fos": "MASTERLOG_FOS",
 }
+# What the pilot sees. The keys and module names stay as they are —
+# MASTERLOG is what the file is called and what the logs say — but the
+# standard release is FlightKeys to anyone using it.
 OFP_FORMAT_LABELS = {
-    "masterlog": "MASTERLOG",
+    "masterlog": "FLIGHTKEYS (AA)",
     "jetplan": "JetPlan",
     "fos": "FOS",
 }

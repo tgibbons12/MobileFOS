@@ -6690,7 +6690,7 @@ if (window.matchMedia) {
         <label for="ofp-format-select">Release Format</label>
         <select id="ofp-format-select" onchange="saveReleaseFormat()">$ofp_format_options</select>
         <div style="font-size:12px;color:var(--label);margin-top:6px;">
-          Follow the operator unless you pick one: NAC and EMY fly MASTERLOG,
+          Follow the operator unless you pick one: NAC and EMY fly FLIGHTKEYS (AA),
           SSX, RBD and PFT fly JetPlan. FOS is the older layout and no operator
           uses it by default.
         </div>
