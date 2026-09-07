@@ -1048,6 +1048,33 @@ def write_takeoff_performance_string(
                 lbs -= hd * hw
             return max(0.0, lbs)
 
+        def _rwy_hwc(r):
+            """
+            Signed wind component for a runway (+ headwind, - tailwind), or
+            None when SimBrief did not publish one.
+            """
+            if not r:
+                return None
+            try:
+                return int(round(float(r.get('HD'))))
+            except (TypeError, ValueError):
+                return None
+
+        def _is_tailwind(r):
+            """
+            True when this runway has a real tailwind.
+
+            Calm-wind planning is only ever conservative in ONE direction.
+            Declining a headwind credit costs performance the aeroplane
+            actually has, which is safe. Zeroing a TAILWIND throws away a
+            penalty that physically exists — it prints a weight and a set of
+            speeds the runway cannot deliver. PHX 07L on a 300/16 read H0
+            with calm-wind numbers while sitting on a 10 kt tailwind.
+            So: headwinds may be rounded down to calm, tailwinds never.
+            """
+            h = _rwy_hwc(r)
+            return h is not None and h < 0
+
         WIND_ADJM_MSG   = "WIND ADJM-CALL LOADS OR COMPUTE DATA"
         _TAILWIND_LIMIT = 5          # kt on the primary before a wind is entered
 
@@ -1508,6 +1535,14 @@ def write_takeoff_performance_string(
             _rid_c = str(_r.get('id', '')).upper()
             # Intersections inherit their parent runway's calm row
             _row_c = _calm_rows.get(_rid_c) or _calm_rows.get(_rid_c[:-1])
+            # A tailwind runway keeps SimBrief's wind-corrected figures.
+            # Substituting the calm-wind TLR row here discarded the tailwind
+            # penalty outright — weight, V-speeds and assumed temp all came
+            # back as though the runway were calm.
+            if _row_c and _is_tailwind(_r):
+                LOG.info(f"[WIND] {_rid_c}: {abs(_rwy_hwc(_r))} kt tailwind — keeping "
+                         f"SimBrief's wind-corrected data, not the calm-wind row")
+                _row_c = None
             if _row_c:
                 _r['max_weight'] = float(_row_c['mtow_lb'])
                 _r['flex']       = str(_row_c['mt'])
@@ -2263,12 +2298,19 @@ def write_takeoff_performance_string(
                         wind_cols = []
                         for cid in conf_chunk_ids:
                             r = unique_rwy_by_id.get(cid)
-                            hw = 0
-                            if _wind_applied and _is_parallel_rwy(cid, _primary_rwy):
-                                try:
-                                    hw = int(round(float(r.get('HD', 0)))) if r else 0
-                                except (TypeError, ValueError):
-                                    hw = 0
+                            _h = _rwy_hwc(r)
+                            # A tailwind is always the planned wind, whether or
+                            # not a wind was entered and whether or not this is
+                            # a parallel — the penalty is in the numbers above,
+                            # so the row has to say so. Only headwinds get
+                            # rounded down to calm, and only where the wind was
+                            # not applied to this runway.
+                            if _h is not None and _h < 0:
+                                hw = _h
+                            elif _wind_applied and _is_parallel_rwy(cid, _primary_rwy):
+                                hw = _h if _h is not None else 0
+                            else:
+                                hw = 0
                             wind_cols.append(
                                 f"{'H'+str(hw) if hw >= 0 else 'T'+str(abs(hw)):>{CW}}")
                         output += f"{'PLANNED WIND KT':>{PRE}}" + "".join(wind_cols) + "\n"
