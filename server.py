@@ -7524,10 +7524,18 @@ async function refreshOfp(){
     // a fresh flight — there is no comparison to make, so just build it.
     const mine = mineR.ok ? String((await mineR.json()).ofp_time_generated || '') : null;
 
+    // Same plan on both sides. That answers "has SimBrief moved on", which
+    // is not the only reason to rebuild: the documents are also rendered by
+    // THIS app, so a fix to the performance code changes the output while
+    // the OFP behind it stays put. Dead-ending on a toast left no way to
+    // rebuild from Overview at all — the only force path was the Regenerate
+    // button over on Confirm & Generate Release. So say what's true and
+    // offer the rebuild instead of refusing it.
+    let _force = mine !== null;
     if(live && mine !== null && mine && live === mine){
       if(el) el.textContent = was;
-      showToast('OFP is already current');
-      return;
+      if(!confirm('SimBrief has no newer plan than this release was built from.\\n\\nRebuild the documents anyway? This can take up to a minute.')) return;
+      _force = true;
     }
     // Either nothing is on file yet, SimBrief has moved on, or one side has
     // no timestamp to compare — rebuild rather than guess, since a stale
@@ -7537,10 +7545,10 @@ async function refreshOfp(){
     // which dumps you on Confirm & Generate Release — the send-to-SimBrief
     // page — when all you asked for was a refresh. Refreshing from Overview
     // should leave you on Overview.
-    if(el) el.textContent = mine === null ? 'Generating\u2026' : 'Refreshing\u2026';
+    if(el) el.textContent = mine === null ? 'Generating\u2026' : 'Rebuilding\u2026';
     const gen = await fetch('/fos/' + LEG_ID + '/release', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({user_id: user, force: mine !== null}),
+      body: JSON.stringify({user_id: user, force: _force}),
     });
     const data = await gen.json().catch(() => ({}));
     if(!gen.ok){
