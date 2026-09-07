@@ -4969,6 +4969,29 @@ def render_fos_html(leg, default_view=""):
         [("AUTO", "Follow the operator"), ("TPS", "TPS — performance sheet + W&B"),
          ("TLR", "TLR — ops release only")],
         current_user.report_type or "AUTO")
+    # JetPlan is not a DECS product: FI/FIL/AL*/FR/WX*/G*L-SS are FOS-era
+    # terminal pages, and queueing them under a JetPlan release offers the
+    # pilot documents that release will never produce. Under JetPlan the
+    # command list keeps only what the format actually issues — the eFlight
+    # Plan and the TLR — plus FFD, which is this app's own attestation and
+    # gates the downloads rather than being a DECS page at all.
+    _decs_fmt, _decs_rpt = _release_choice(ctx)
+    _jp = _decs_fmt == "jetplan"
+    ctx["decs_row_style"] = "display:none;" if _jp else ""
+    # The same row serves both sheets (the release globs -WB.pdf or
+    # -TLR.pdf); only its label follows the report type.
+    ctx["wb_code"] = "TLR" if _decs_rpt == "TLR" else "WBD"
+    ctx["wb_desc"] = ("Takeoff &amp; Landing Report" if _decs_rpt == "TLR"
+                      else "Weight &amp; Balance Data (TPS)")
+    # With the FOS pages hidden this is the last visible row, so it has to
+    # carry the closing edge the hidden G*L/SS row would have.
+    ctx["wb_row_style"] = "border-bottom:none;" if _jp else ""
+    _decs_hidden = ["FI", "FIL", "AL*", "FR", "WX*", "G*L/SS"] if _jp else []
+    ctx["decs_hidden_json"] = json.dumps(_decs_hidden)
+    # Saved Docs is filtered client-side too, but the Overview count is
+    # server-rendered — left alone it would advertise documents the list
+    # then refuses to show.
+    ctx["saved_docs_count"] = str(len([d for d in bookmarked if d not in _decs_hidden]))
     ctx["default_view"] = default_view
     ctx["is_admin"] = "1" if bool(getattr(current_user, "is_admin", False)) else ""
     # Server-rendered rather than fetched, so the banner is on screen with
@@ -6427,31 +6450,31 @@ if (window.matchMedia) {
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('rls','eFlight Plan')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg>
           </div>
         </div>
-        <div class="doc-row">
+        <div class="doc-row" style="$decs_row_style">
           <div><div class="code">FI</div><div class="desc">Flight Details \u2013 GMT</div></div>
           <div class="actions"><svg class="bookmark-icon" data-doc="FI" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="toggleBookmark('FI', this)"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('fi','Flight Details \u2013 GMT')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
         </div>
-        <div class="doc-row">
+        <div class="doc-row" style="$decs_row_style">
           <div><div class="code">FIL</div><div class="desc">Flight Details \u2013 Local</div></div>
           <div class="actions"><svg class="bookmark-icon" data-doc="FIL" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="toggleBookmark('FIL', this)"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('fil','Flight Details \u2013 Local')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
         </div>
-        <div class="doc-row">
-          <div><div class="code">WBD</div><div class="desc">Weight &amp; Balance Data (TPS)</div></div>
+        <div class="doc-row" style="$wb_row_style">
+          <div><div class="code">$wb_code</div><div class="desc">$wb_desc</div></div>
           <div class="actions"><svg class="bookmark-icon" data-doc="WBD" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="toggleBookmark('WBD', this)"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('wb','Weight &amp; Balance Data')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
         </div>
-        <div class="doc-row">
+        <div class="doc-row" style="$decs_row_style">
           <div><div class="code">AL*</div><div class="desc">Field Condition Report &amp; NOTAMs</div></div>
           <div class="actions"><svg class="bookmark-icon" data-doc="AL*" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="toggleBookmark('AL*', this)"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('notams','NOTAMs')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
         </div>
-        <div class="doc-row">
+        <div class="doc-row" style="$decs_row_style">
           <div><div class="code">FR</div><div class="desc">Field Reports</div></div>
           <div class="actions"><svg class="bookmark-icon" data-doc="FR" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="toggleBookmark('FR', this)"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('field_report','Field Reports')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
         </div>
-        <div class="doc-row">
+        <div class="doc-row" style="$decs_row_style">
           <div><div class="code">WX*</div><div class="desc">Winds &amp; Weather</div></div>
           <div class="actions"><svg class="bookmark-icon" data-doc="WX*" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="toggleBookmark('WX*', this)"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="viewDoc('weather','Winds &amp; Weather')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
         </div>
-        <div class="doc-row" style="border-bottom:none;">
+        <div class="doc-row" style="border-bottom:none;$decs_row_style">
           <div><div class="code">G*L/SS</div><div class="desc">Customers Requiring Special Services</div></div>
           <div class="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" onclick="showToast('Not available \u2014 no data source for this document yet')"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
         </div>
@@ -6845,6 +6868,11 @@ const LEG_DEP_DATE = "$dep_date";
 const LEG_ARR_DATE = "$arr_date";
 const LEG_SCHED_IN = "$sched_in";
 const LEG_BOOKMARKED_DOCS = $bookmarked_docs_json;
+// DECS pages this release format never issues. Hiding the All Commands
+// rows alone was not enough: a page bookmarked while the leg was on
+// MASTERLOG stays in Saved Docs, so the pilot could still open a document
+// a JetPlan release will never generate.
+const DECS_HIDDEN_DOCS = $decs_hidden_json;
 const LEG_PENDING_DATE_SLIP = $pending_date_slip_json;
 // Settings is now reachable from every view (the global gear, not just
 // Overview's own topbar) — its own back chevron needs to return to
@@ -10967,11 +10995,12 @@ async function acknowledgeCompanyDoc(docId){
 }
 function initSavedDocs(){
   const body = document.getElementById('saveddocs-body');
-  if(!LEG_BOOKMARKED_DOCS.length){
+  const shown = LEG_BOOKMARKED_DOCS.filter(c => !DECS_HIDDEN_DOCS.includes(c));
+  if(!shown.length){
     body.innerHTML = '<p class="placeholder-note">No saved documents yet. Bookmark one under All Commands to save it here.</p>';
     return;
   }
-  body.innerHTML = '<div class="doc-list">' + LEG_BOOKMARKED_DOCS.map(code => {
+  body.innerHTML = '<div class="doc-list">' + shown.map(code => {
     const mapped = DOC_CODE_TO_KIND[code];
     const action = mapped ? `viewDoc('${mapped[0]}','${mapped[1].replace(/'/g, "\\'")}')` : `showToast('${code} has no PDF to view')`;
     return `<div class="doc-row" style="cursor:pointer;" onclick="${action}">
