@@ -567,6 +567,7 @@ def write_takeoff_performance_string(
         is_737_max    = icaocode == 'B38M'
         is_boeing_737 = is_737_ng or is_737_max
         is_md8x       = icaocode.startswith('MD8')
+        is_md11       = icaocode.startswith('MD11')
         is_75_76      = (icaocode or '').upper() in BOEING_75_76_NAMES
         # is_erj already set above from icao_code; icaocode is the same normalised form
 
@@ -972,7 +973,7 @@ def write_takeoff_performance_string(
             thr_column_label = "N1"
         elif is_erj:
             thr_column_label = "THR"
-        elif (is_airbus or is_75_76) and _thr_param:
+        elif (is_airbus or is_75_76 or is_md11) and _thr_param:
             # Neither type sets it by hand — the sheet is a crosscheck — but
             # the column still has to say which parameter it is, and that
             # follows the ENGINE, not the airframe: V2500 is EPR-rated,
@@ -1101,6 +1102,10 @@ def write_takeoff_performance_string(
             d = abs(a - b)
             return min(d, 36 - d) <= 1
 
+        # Latched by any runway row that printed an unverified thrust
+        # value, so the footnote below the table is only emitted when
+        # there is actually a marked number to explain.
+        _provisional_thr = False
         _wind_applied  = False
         _wind_kt       = 0
         _wind_kind     = ""
@@ -1751,7 +1756,7 @@ def write_takeoff_performance_string(
                     else:
                         thr_display = str(n1_pack_on)
 
-            elif is_airbus or is_75_76:
+            elif is_airbus or is_75_76 or is_md11:
                 # The column holds the bare setting (83.6 / 1.69), not a
                 # rating name — the AT column says whether a flex temp was
                 # used, and on the 75/76 the header already names TO or TO1.
@@ -1784,7 +1789,15 @@ def write_takeoff_performance_string(
                     _fd = 2 if _thr_param == 'EPR' else 1
                     if _fx:
                         thr_display = f"{_fx['value']:.{_fd}f}"
-                    elif is_75_76:
+                        # A grid that was never transcribed from a manual is
+                        # marked ON THE NUMBER, not just in a footnote: an
+                        # unmarked provisional value is indistinguishable
+                        # from a verified one at a glance, which is exactly
+                        # how 07L's borrowed row went unnoticed.
+                        if _fx.get('provisional'):
+                            thr_display += "*"
+                            _provisional_thr = True
+                    elif is_75_76 or is_md11:
                         # XXX, not 0.00. A 757 asked for a derate nobody has
                         # published a table for gets no number — printing
                         # 0.00 in an EPR column invites reading it as one,
@@ -1920,6 +1933,13 @@ def write_takeoff_performance_string(
                            f"{v1:>3} {vr:>3} {v2:>3}  {at_display:<9}{mtow:>7}\n") if is_airbus else \
                          f"{rwy:<5} {flap_fmt:<5} {apu_status:<4} {v1:>3} {vr:>3} {v2:>3}   {thr_display:<7} {at_display:<8}   {mtow:<6}\n"
             output += "-" * 58 + "\n"
+
+        # Not printed on the sheet — the * on the value is the whole marker.
+        # Kept in the log so a release built from an unverified grid is still
+        # identifiable after the fact.
+        if _provisional_thr:
+            LOG.info(f"[THRUST] {thr_column_label} values on this sheet came from a "
+                     f"provisional grid ({icaocode}/{_eng_family})")
 
         # ===================================================================
         # AIRPORT NOTES (intersections + EFP)

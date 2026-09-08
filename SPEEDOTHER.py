@@ -1012,6 +1012,7 @@ _ENGINE_FAMILIES = [
     (r'PW4060',           'PW4060',        'EPR'),
     (r'CF6-?80C2B8F',     'CF6-80C2B8F',   'N1'),
     (r'CF6-?80C2B6F',     'CF6-80C2B6F',   'N1'),
+    (r'CF6-?80C2D1F',     'CF6-80C2D1F',   'N1'),
     (r'CF6-?80A',         'CF6-80A',       'N1'),
 ]
 
@@ -1698,6 +1699,44 @@ BOEING_TAKEOFF_THRUST = {
             8000: {70: 1.47, 65: 1.51, 60: 1.55, 55: 1.58, 50: 1.62, 45: 1.66, 40: 1.69, 35: 1.73, 30: 1.75, 25: 1.77, 20: 1.78, 15: 1.78, 10: 1.79},
         },
     },
+    # -----------------------------------------------------------------
+    # MD-11 / CF6-80C2D1F — PROVISIONAL, NOT FROM A MANUAL.
+    #
+    # No MD-11 FCOM and no MD-11 perfData exist in this tree, so unlike
+    # every other entry here this one is not transcribed from anything.
+    # It is SEEDED with the 767-300's CF6-80C2B6F grid, unmodified, and
+    # exists to be calibrated against reported N1 rather than to be
+    # trusted as published data.
+    #
+    # Seeded UNMODIFIED on purpose. The D1F is flat-rated near 61,960 lbf
+    # against the B6F's ~60,200, so the real grid sits somewhere above
+    # this one — but applying a guessed offset would make any reported
+    # delta uninterpretable, since it would mix the rating correction
+    # with my invention. Left as the B6F, a reported delta IS the
+    # correction, directly and in one term.
+    #
+    # Known to be wrong in at least these ways, none of them corrected:
+    #   * rating       — D1F is the higher rating; expect real N1 above
+    #   * installation — the #2 engine sits behind an S-duct with its own
+    #                    inlet pressure recovery; the 767's podded data
+    #                    cannot describe it
+    #   * bleeds       — three packs off three engines, not two off two,
+    #                    so the B6F's packs_off band is NOT carried over
+    #   * derates      — the B6F's TO1 is a 767 rating; not carried over
+    #
+    # 'provisional' propagates to the caller so the TPS can mark the
+    # number on the sheet. Do not remove that flag without a manual.
+    ('MD11', 'CF6-80C2D1F'): {
+        'param': 'N1',
+        'provisional': True,
+        'provisional_note': 'seeded from 767-300 CF6-80C2B6F; awaiting reported N1',
+        'max_alt_gap': 2500,
+        'max_temp_gap': 6,
+        'alt_snap': 1000,
+        # Deliberately no 'bleed_corrections' and no 'derates': see above.
+        # A missing grid returns None and the sheet shows nothing, which is
+        # the honest answer for data nobody has measured.
+    },
     ('B764', 'CF6-80C2B8F'): {
         'param': 'N1',
         # 764GE/toga.txt — 6 pressure altitudes x 13 OATs, 1000ft steps
@@ -1728,6 +1767,14 @@ BOEING_TAKEOFF_THRUST = {
 BOEING_TAKEOFF_THRUST[('B752', 'RB211-535E4-B')] = BOEING_TAKEOFF_THRUST[('B752', 'RB211-535E4')]
 BOEING_TAKEOFF_THRUST[('B753', 'RB211-535E4-B')] = BOEING_TAKEOFF_THRUST[('B752', 'RB211-535E4')]
 BOEING_TAKEOFF_THRUST[('B753', 'RB211-535E4')] = BOEING_TAKEOFF_THRUST[('B752', 'RB211-535E4')]
+
+# The MD-11's provisional grid points AT the 767-300's rather than holding
+# a copy, so the seed cannot silently drift from its source: if the B6F
+# table is ever corrected, the MD-11 seed moves with it and stays honestly
+# labelled as "the 767 numbers". Replacing this line with a real MD-11 grid
+# is the whole point of the 'provisional' flag.
+BOEING_TAKEOFF_THRUST[('MD11', 'CF6-80C2D1F')]['toga'] = \
+    BOEING_TAKEOFF_THRUST[('B763', 'CF6-80C2B6F')]['toga']
 
 # Freighters and sub-variants share their passenger airframe's tables.
 for _f, _base in (('B75F', 'B752'), ('B752F', 'B752'), ('B753F', 'B753'),
@@ -1913,4 +1960,9 @@ def get_takeoff_thrust(icao_code, engine, oat, altitude, assumed_temp=None, pack
         'value': round(value, 2 if param == 'EPR' else 1),
         'engine': family,
         'flex': flex,
+        # True only for a grid that was never transcribed from a manual.
+        # The caller is expected to mark it on the sheet — an unmarked
+        # provisional number is indistinguishable from a verified one,
+        # which is the failure this flag exists to prevent.
+        'provisional': bool(entry.get('provisional')),
     }
